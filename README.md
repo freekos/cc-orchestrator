@@ -48,12 +48,22 @@ cc task mrs t_add-x                               # MR links + state (open/merge
 cc task mr  t_add-x --dry-run                     # preview the MR commands
 cc task mr  t_add-x                               # push + one MR per repo to the epic target
 cc task done t_add-x                              # safety-checked worktree cleanup
+
+cc deploys myproject                              # what's live per repo: dev/stage/prod ref@sha (EAS for Expo repos)
+cc epic archive FEAT-1                            # hide an epic from the tree (unarchive to restore)
+cc epic rm FEAT-1 [--force]                       # drop an epic from cc (refuses with live tasks; Jira untouched)
 ```
 
 ### TUI keys
 `a` +Project · `e` +Epic · `n` +Task · `o` chat (interactive, new terminal/cmux tab) ·
 `v` view chat (read-only) · `c` Cursor · `d` diff · `m`/`M` MR dry/create ·
-`g` MR links · `x` cleanup · `R` reviewers · `r` refresh · `q` quit.
+`g` MR links · `D` refresh deploy status · `x` cleanup task / archive·delete epic ·
+`R` reviewers · `r` refresh · `q` quit.
+
+### Deploy status
+The project panel shows, per repo, what's currently deployed — `stage:<ref> prod:<ref>`
+pulled from the GitLab Environments/Deployments API (the real "what's live", not just the
+latest pipeline), or the latest EAS staging update for Expo/mobile repos. `D` refreshes.
 
 ### Reviewers / assignee
 Assignee defaults to your `glab` user. Set a reviewer per repo from the GitLab

@@ -949,10 +949,11 @@ def repo_deploy_state(ri):
         r = run(["eas", "update:list", "--branch", "staging", "--limit", "1", "--json", "--non-interactive"],
                 cwd=rp, check=False)
         try:
-            data = json.loads(r.stdout)
-            grp = (data[0] if isinstance(data, list) and data else data)
-            g = (grp.get("currentPage") or grp) if isinstance(grp, dict) else {}
-            st["channels"]["staging"] = (grp.get("createdAt", "") if isinstance(grp, dict) else "")[:10] or "?"
+            out = r.stdout or ""
+            data = json.loads(out[out.index("{"):])  # eas prints an upgrade banner before the JSON
+            cp = data.get("currentPage") or []
+            msg = (cp[0].get("message") or "").strip().strip('"') if cp else ""
+            st["channels"]["staging"] = msg[:48] or "(no updates)"
         except Exception:
             st["channels"]["staging"] = "?"
         return st
