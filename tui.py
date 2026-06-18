@@ -465,7 +465,7 @@ class ChatScreen(ModalScreen):
         if not os.path.isdir(pw):
             self.app.notify("worktree missing", severity="error"); return
         sid = t.get("claude_session", {}).get(t["primary"]) or cc.resolve_session(pw)
-        chat = ("claude --resume %s --permission-mode bypassPermissions" % sid) if sid else "claude --permission-mode bypassPermissions"
+        chat = ("claude --resume %s --permission-mode auto" % sid) if sid else "claude --permission-mode auto"
         open_cmux("%s chat" % self.tid, pw, chat)
         self.app.notify("ответ: открыл интерактивный чат в новой вкладке")
 
@@ -1312,7 +1312,7 @@ class CCApp(App):
     def _chat_cmd(self, t):
         cwd = t.get("dir") or t["worktrees"][t["primary"]]
         sid = t.get("claude_session", {}).get(t["primary"]) or cc.resolve_session(cwd)
-        return cwd, ("claude --resume %s --permission-mode bypassPermissions" % sid if sid else "claude --permission-mode bypassPermissions")
+        return cwd, ("claude --resume %s --permission-mode auto" % sid if sid else "claude --permission-mode auto")
 
     def _mark_seen(self, tid):
         now = time.time()
@@ -1354,7 +1354,7 @@ class CCApp(App):
         repos = e.get("repos") or list(proj.get("repos", {}).keys())
         adds = " ".join("--add-dir %s" % shlex.quote(proj["repos"][r]["path"])
                         for r in repos if proj.get("repos", {}).get(r, {}).get("path"))
-        cmd = "claude --permission-mode bypassPermissions %s" % adds
+        cmd = "claude --permission-mode auto %s" % adds
         where = open_cmux("%s release" % ekey, edir, cmd)
         self.notify("чат эпика %s открыт (%s) — релиз/координация" % (ekey, where))
 

@@ -518,7 +518,7 @@ def cmd_task_open(args):
             t.setdefault("claude_session", {})[t["primary"]] = sid
             save_state(s)
     if sid:
-        print("  follow-up:  (cd '%s' && claude --resume %s --permission-mode bypassPermissions)" % (t["worktrees"][t["primary"]], sid))
+        print("  follow-up:  (cd '%s' && claude --resume %s --permission-mode auto)" % (t["worktrees"][t["primary"]], sid))
     if t.get("log"):
         print("  watch log:  tail -f '%s'" % t["log"])
     if runnable:
@@ -1031,7 +1031,7 @@ def cmd_epic_open(args):
                     for r in repos if proj["repos"].get(r, {}).get("path"))
     print("epic chat dir: %s" % edir)
     print("  release runbook CLAUDE.md written (%d repo(s))" % len(repos))
-    print("  open:  cd %s && claude --permission-mode bypassPermissions %s" % (shlex.quote(str(edir)), adds))
+    print("  open:  cd %s && claude --permission-mode auto %s" % (shlex.quote(str(edir)), adds))
 
 
 def cmd_epic_set(args):
