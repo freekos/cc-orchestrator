@@ -524,6 +524,67 @@ class ReviewersScreen(ModalScreen):
         self.dismiss(None)
 
 
+class ProjectJiraScreen(ModalScreen):
+    CSS = """
+    ProjectJiraScreen { align: center middle; }
+    #dlg { width: 80; height: auto; border: thick $accent; background: $surface; padding: 1 2; }
+    #dlg Input { margin-bottom: 1; }
+    #row { height: auto; }
+    """
+    BINDINGS = [Binding("escape", "close", "Close")]
+
+    def __init__(self, project):
+        super().__init__()
+        self.project = project
+
+    def compose(self) -> ComposeResult:
+        s = cc.load_state()
+        j = s["projects"][self.project].get("jira", {})
+        with Vertical(id="dlg"):
+            yield Label("Jira для проекта '%s' (вставь API-token с id.atlassian.com)" % self.project)
+            yield Input(value=j.get("site", ""), placeholder="site (you.atlassian.net)", id="jsite")
+            yield Input(value=j.get("email", ""), placeholder="email", id="jemail")
+            yield Input(placeholder=("token: ••• (введи чтобы изменить)" if j.get("token") else "API-token"),
+                        id="jtoken", password=True)
+            yield Input(value=j.get("project_key", ""), placeholder="project key (e.g. IK)", id="jkey")
+            with Horizontal(id="row"):
+                yield Button("Сохранить", variant="success", id="save")
+                yield Button("Выключить Jira", id="off")
+                yield Button("Cancel", id="cancel")
+
+    def on_button_pressed(self, event: Button.Pressed):
+        if event.button.id == "cancel":
+            self.dismiss(None); return
+        if event.button.id == "off":
+            subprocess.run([sys.executable, ENGINE, "project", "jira", self.project, "--off"], capture_output=True)
+            self.app.notify("Jira выключена для %s" % self.project); self.dismiss(True); return
+        args = [sys.executable, ENGINE, "project", "jira", self.project]
+        site = self.query_one("#jsite", Input).value.strip()
+        email = self.query_one("#jemail", Input).value.strip()
+        token = self.query_one("#jtoken", Input).value.strip()
+        key = self.query_one("#jkey", Input).value.strip()
+        if site:
+            args += ["--site", site]
+        if email:
+            args += ["--email", email]
+        if token:
+            args += ["--token", token]
+        if key:
+            args += ["--project-key", key]
+        r = subprocess.run(args, capture_output=True, text=True)
+        out = (r.stdout or "") + (r.stderr or "")
+        if "ok —" in out:
+            self.app.notify("Jira подключена ✓ (%s)" % (out.split("ok —")[1].strip()[:60]))
+        elif "WARN" in out:
+            self.app.notify("сохранено, но auth не прошла — проверь токен/email", severity="error")
+        else:
+            self.app.notify("Jira сохранена для %s" % self.project)
+        self.dismiss(True)
+
+    def action_close(self):
+        self.dismiss(None)
+
+
 class CCApp(App):
     CSS = """
     Tree { width: 44%; border-right: solid $accent; }
@@ -532,6 +593,7 @@ class CCApp(App):
     BINDINGS = [
         Binding("a", "add_project", "+Project"),
         Binding("R", "reviewers", "Reviewers"),
+        Binding("j", "project_jira", "Jira/settings"),
         Binding("e", "new_epic", "+Epic"),
         Binding("n", "new_task", "+Task"),
         Binding("o", "open", "Chat"),
@@ -640,10 +702,14 @@ class CCApp(App):
             d.update("\n".join(L))
         elif data["type"] == "project":
             p = s["projects"][data["id"]]
-            L = ["[b]project %s[/b]  (%s, %d repos)" % (data["id"], p["kind"], len(p["repos"])), ""]
-            for r in p["repos"]:
-                L.append("  - " + r)
-            L += ["", "[dim]e=add epic here[/dim]"]
+            j = p.get("jira", {})
+            jira_line = ("on — %s @ %s" % (j.get("project_key", "?"), j.get("site", "?"))) if j.get("token") else "off"
+            L = ["[b]project %s[/b]  (%s, %d repos)" % (data["id"], p["kind"], len(p["repos"])),
+                 "assignee: %s    Jira: %s" % (p.get("default_assignee") or "-", jira_line),
+                 "", "repos (reviewer):"]
+            for r, ri in p["repos"].items():
+                L.append("  %-22s %s" % (r, ri.get("reviewer") or "— (R чтобы задать)"))
+            L += ["", "[dim]e=новый эпик   R=ревьюеры   j=Jira/настройки[/dim]"]
             d.update("\n".join(L))
 
     def refresh_glyphs(self):
@@ -696,6 +762,12 @@ class CCApp(App):
         if not proj:
             self.notify("select a project node first", severity="error"); return
         self.push_screen(ReviewersScreen(proj))
+
+    def action_project_jira(self):
+        proj = self._current_project()
+        if not proj:
+            self.notify("select a project node first", severity="error"); return
+        self.push_screen(ProjectJiraScreen(proj), lambda _: self.build_tree())
 
     def _project_added(self, res):
         if not res:
