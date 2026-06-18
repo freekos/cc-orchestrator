@@ -5,7 +5,7 @@ import tui, cc
 
 async def main():
     app = tui.CCApp()
-    async with app.run_test() as pilot:
+    async with app.run_test(size=(100, 40)) as pilot:  # realistic terminal; 80x24 clips bottom-docked buttons
         await pilot.pause()
         tree = app.query_one("#tree")
         nproj = len(tree.root.children)
