@@ -692,31 +692,35 @@ class ProjectJiraScreen(ModalScreen):
 
 
 class EpicManageScreen(ModalScreen):
-    """Archive (hide) or delete an epic from cc. Jira is never touched."""
+    """Archive (hide under 'Архив') or unarchive an epic.
+    Archiving also moves the epic + all its child tasks to Done in Jira."""
     CSS = """
     EpicManageScreen { align: center middle; }
-    #dlg { width: 64; max-width: 92%; height: auto; padding: 1 2;
+    #dlg { width: 68; max-width: 92%; height: auto; padding: 1 2;
            border: round $accent; background: $surface; }
     #dlg Label { margin-bottom: 1; }
-    #dlg Button { margin: 0 2 0 0; }
+    #dlg Button { margin: 0 2 0 0; min-width: 18; }
     """
     BINDINGS = [Binding("escape", "cancel", "Cancel")]
 
-    def __init__(self, key, ntasks):
+    def __init__(self, key, archived):
         super().__init__()
         self.key = key
-        self.ntasks = ntasks
+        self.archived = archived
 
     def compose(self):
         with Vertical(id="dlg"):
             yield Label("[b]Эпик %s[/b]" % self.key)
-            note = ("%d задач(и) в эпике — Удалить потребует подтверждения (force)." % self.ntasks
-                    if self.ntasks else "Задач нет.")
-            yield Label("[dim]Архив = скрыть из дерева (вернуть: cc epic unarchive).\nУдалить = убрать эпик + задачи из cc и снести их локальные worktrees.\nRemote MR/ветки и Jira НЕ трогаются (для них — cc task abort).\n%s[/dim]" % note)
-            with Horizontal():
-                yield Button("Архивировать", id="arch", variant="primary")
-                yield Button("Удалить", id="del", variant="error")
-                yield Button("Отмена", id="cancel")
+            if self.archived:
+                yield Label("[dim]Эпик в архиве. Разархивировать вернёт его в список живых.\n(статусы в Jira обратно не меняются)[/dim]")
+                with Horizontal():
+                    yield Button("Разархивировать", id="unarch", variant="primary")
+                    yield Button("Отмена", id="cancel")
+            else:
+                yield Label("[dim]Архив = убрать эпик в раздел 'Архив' (свёрнут внизу проекта).\nВ Jira переведём в Done сам эпик и ВСЕ его задачи (уже-Done пропустим).\nRemote MR/ветки не трогаем.[/dim]")
+                with Horizontal():
+                    yield Button("Архивировать", id="arch", variant="primary")
+                    yield Button("Отмена", id="cancel")
 
     def on_button_pressed(self, event):
         self.dismiss(None if event.button.id == "cancel" else event.button.id)
@@ -786,6 +790,17 @@ class CCApp(App):
     def state(self):
         return cc.load_state()
 
+    def _add_epic_node(self, parent, ekey, e, s, expand=True, dim=False):
+        label = "# %s  %s" % (ekey, e.get("summary", ""))
+        en = parent.add("[dim]%s[/dim]" % label if dim else label,
+                        data={"type": "epic", "id": ekey}, expand=expand)
+        for tid, t in s["tasks"].items():
+            if t["epic"] != ekey:
+                continue
+            tl = "%s %s" % (GLYPH.get(cc.task_status(t), "?"), t["title"])
+            en.add_leaf("[dim]%s[/dim]" % tl if dim else tl, data={"type": "task", "id": tid})
+        return en
+
     def build_tree(self):
         tree = self.query_one("#tree", Tree)
         tree.clear()
@@ -794,21 +809,16 @@ class CCApp(App):
         for pname, p in s["projects"].items():
             pn = tree.root.add("%s  [%d repo]" % (pname, len(p["repos"])),
                                data={"type": "project", "id": pname}, expand=True)
-            has_epic = False
-            for ekey, e in s["epics"].items():
-                if e["project"] != pname:
-                    continue
-                if e.get("archived"):
-                    continue
-                has_epic = True
-                en = pn.add("# %s  %s" % (ekey, e.get("summary", "")),
-                            data={"type": "epic", "id": ekey}, expand=True)
-                for tid, t in s["tasks"].items():
-                    if t["epic"] != ekey:
-                        continue
-                    en.add_leaf("%s %s" % (GLYPH.get(cc.task_status(t), "?"), t["title"]),
-                                data={"type": "task", "id": tid})
-            if not has_epic:
+            live = [(k, e) for k, e in s["epics"].items() if e["project"] == pname and not e.get("archived")]
+            arch = [(k, e) for k, e in s["epics"].items() if e["project"] == pname and e.get("archived")]
+            for ekey, e in live:
+                self._add_epic_node(pn, ekey, e, s, expand=True)
+            if arch:
+                an = pn.add("🗄  Архив (%d)" % len(arch),
+                            data={"type": "archive", "id": pname}, expand=False)
+                for ekey, e in arch:
+                    self._add_epic_node(an, ekey, e, s, expand=False, dim=True)
+            if not live and not arch:
                 pn.add_leaf("(no epics — press 'e' to add one)", data=None)
 
     def current(self):
@@ -825,6 +835,10 @@ class CCApp(App):
             d.update("")
             return
         s = self.state()
+        if data["type"] == "archive":
+            n = sum(1 for e in s["epics"].values() if e["project"] == data["id"] and e.get("archived"))
+            d.update("[b]Архив[/b] — %d архивн. эпик(ов) в '%s'\n[dim]разверни узел; на эпике x → Разархивировать[/dim]" % (n, data["id"]))
+            return
         if data["type"] == "task" and data["id"] in s["tasks"]:
             t = s["tasks"][data["id"]]
             L = ["[b]%s[/b]   status=%s" % (t["title"], cc.task_status(t)),
@@ -1113,35 +1127,32 @@ class CCApp(App):
         data = self.current()
         if data and data["type"] == "epic":
             ekey = data["id"]
-            s = self.state()
-            ntasks = sum(1 for t in s["tasks"].values() if t.get("epic") == ekey)
-            self.push_screen(EpicManageScreen(ekey, ntasks),
-                             lambda res: self._epic_manage(ekey, res, ntasks))
+            archived = bool(self.state()["epics"].get(ekey, {}).get("archived"))
+            self.push_screen(EpicManageScreen(ekey, archived),
+                             lambda res: self._epic_manage(ekey, res))
+            return
+        if data and data["type"] == "archive":
+            self.notify("разверни 'Архив', встань на эпик и нажми x → Разархивировать")
             return
         tid = self._cur_task()
         if not tid:
-            self.notify("выбери задачу (очистить) или эпик (архив/удалить)")
+            self.notify("выбери задачу (очистить) или эпик (архив/разархив)")
             return
         self.push_screen(OutputScreen("cleanup: %s" % tid,
                          [sys.executable, "-u", ENGINE, "task", "done", tid]),
                          lambda _: self.build_tree())
 
-    def _epic_manage(self, ekey, res, ntasks):
+    def _epic_manage(self, ekey, res):
         if not res:
             return
         if res == "arch":
-            subprocess.run([sys.executable, ENGINE, "epic", "archive", ekey], capture_output=True)
-            self.notify("эпик %s в архиве" % ekey)
-            self.build_tree()
-        elif res == "del":
-            argv = [sys.executable, ENGINE, "epic", "rm", ekey]
-            if ntasks:
-                argv.append("--force")
-            r = subprocess.run(argv, capture_output=True, text=True)
-            if r.returncode == 0:
-                self.notify("эпик %s удалён" % ekey)
-            else:
-                self.notify((r.stderr or r.stdout or "не удалось").strip()[:120], severity="error")
+            # archive + push epic and its tasks to Done in Jira — stream so the result is visible
+            self.push_screen(OutputScreen("archive: %s (+ Jira Done)" % ekey,
+                             [sys.executable, "-u", ENGINE, "epic", "archive", ekey]),
+                             lambda _: self.build_tree())
+        elif res == "unarch":
+            subprocess.run([sys.executable, ENGINE, "epic", "unarchive", ekey], capture_output=True)
+            self.notify("эпик %s разархивирован" % ekey)
             self.build_tree()
 
     def _mr(self, dry):

@@ -733,7 +733,28 @@ def cmd_epic_archive(args):
     e = s["epics"].get(args.key) or die("unknown epic '%s'" % args.key)
     e["archived"] = True
     save_state(s)
-    print("epic %s archived (hidden; `cc epic unarchive %s` to restore)" % (args.key, args.key))
+    print("epic %s archived (под 'Архив'; `cc epic unarchive %s` чтобы вернуть)" % (args.key, args.key))
+    # push the whole epic to Done in Jira: the epic issue + all its children (best effort)
+    proj = s["projects"][e["project"]]
+    jira = proj.get("jira")
+    if not (jira and jira.get("token") and args.key.split("-")[0] == jira.get("project_key")):
+        return
+    try:
+        children = [c["key"] for c in jira_epic_children(jira, args.key)]
+    except Exception:
+        children = []
+    keys = [args.key] + children
+    print("  jira: перевожу в Done %d issue(s) …" % len(keys))
+    done = skipped = failed = 0
+    for k in keys:
+        if jira_status_category(jira, k) == "done":
+            print("    %-10s уже Done" % k); skipped += 1; continue
+        ok, info = jira_transition_done(jira, k)
+        if ok:
+            print("    %-10s -> Done (%s)" % (k, info)); done += 1
+        else:
+            print("    %-10s не смог: %s" % (k, info)); failed += 1
+    print("  jira итог: %d переведено, %d уже Done, %d не смог" % (done, skipped, failed))
 
 def cmd_epic_unarchive(args):
     s = load_state()
@@ -880,6 +901,28 @@ def jira_epic_children(cfg, epic_key, query=""):
         out.append({"key": i["key"], "summary": f.get("summary", ""),
                     "status": (f.get("status") or {}).get("name", "")})
     return out
+
+def jira_status_category(cfg, key):
+    try:
+        f = jira_req(cfg, "GET", "/issue/%s?fields=status" % key).get("fields", {})
+        return (((f.get("status") or {}).get("statusCategory") or {}).get("key") or "").lower()
+    except Exception:
+        return ""
+
+def jira_transition_done(cfg, key):
+    """Transition an issue to a status in the 'done' category. (ok, info)."""
+    try:
+        trs = jira_req(cfg, "GET", "/issue/%s/transitions" % key).get("transitions", [])
+    except Exception as e:
+        return (False, "transitions fetch failed: %s" % str(e)[:50])
+    t = next((x for x in trs if (((x.get("to") or {}).get("statusCategory") or {}).get("key") or "").lower() == "done"), None)
+    if not t:
+        return (False, "no Done transition from current status")
+    try:
+        jira_req(cfg, "POST", "/issue/%s/transitions" % key, {"transition": {"id": t["id"]}})
+        return (True, (t.get("to") or {}).get("name", "Done"))
+    except Exception as e:
+        return (False, str(e)[:50])
 
 def jira_adf(text):
     return {"type": "doc", "version": 1,

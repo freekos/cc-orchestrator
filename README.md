@@ -50,14 +50,14 @@ cc task mr  t_add-x                               # push + one MR per repo to th
 cc task done t_add-x                              # safety-checked worktree cleanup
 
 cc deploys myproject                              # what's live per repo: dev/stage/prod ref@sha (EAS for Expo repos)
-cc epic archive FEAT-1                            # hide an epic from the tree (unarchive to restore)
-cc epic rm FEAT-1 [--force]                       # drop an epic from cc (refuses with live tasks; Jira untouched)
+cc epic archive FEAT-1                            # archive: hide under "Архив" + push epic & its tasks to Done in Jira
+cc epic unarchive FEAT-1                          # bring it back to the live list
 ```
 
 ### TUI keys
 `a` +Project · `e` +Epic · `n` +Task · `o` chat (interactive, new terminal/cmux tab) ·
 `v` view chat (read-only) · `c` Cursor · `d` diff · `m`/`M` MR dry/create ·
-`g` MR links · `D` refresh deploy status · `x` cleanup task / archive·delete epic ·
+`g` MR links · `D` refresh deploy status · `x` cleanup task / archive epic ·
 `R` reviewers · `r` refresh · `q` quit.
 
 ### Deploy status
