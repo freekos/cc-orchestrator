@@ -533,20 +533,27 @@ class ProjectJiraScreen(ModalScreen):
         s = cc.load_state()
         j = s["projects"][self.project].get("jira", {})
         with Vertical(id="dlg"):
-            yield Label("Jira для проекта '%s' (вставь API-token с id.atlassian.com)" % self.project)
+            yield Label("Jira для проекта '%s'" % self.project)
+            yield Label("[dim]нет токена? создай тут (клик или кнопка ниже):[/dim]")
+            yield Label("[link=https://id.atlassian.com/manage-profile/security/api-tokens]https://id.atlassian.com/manage-profile/security/api-tokens[/link]")
             yield Input(value=j.get("site", ""), placeholder="site (you.atlassian.net)", id="jsite")
             yield Input(value=j.get("email", ""), placeholder="email", id="jemail")
-            yield Input(placeholder=("token: ••• (введи чтобы изменить)" if j.get("token") else "API-token"),
+            yield Input(placeholder=("token: ••• (введи чтобы изменить)" if j.get("token") else "API-token (вставь сюда)"),
                         id="jtoken", password=True)
             yield Input(value=j.get("project_key", ""), placeholder="project key (e.g. IK)", id="jkey")
             with Horizontal(id="row"):
                 yield Button("Сохранить", variant="success", id="save")
+                yield Button("Открыть страницу токена", id="tokenpage")
                 yield Button("Выключить Jira", id="off")
                 yield Button("Cancel", id="cancel")
 
     def on_button_pressed(self, event: Button.Pressed):
         if event.button.id == "cancel":
             self.dismiss(None); return
+        if event.button.id == "tokenpage":
+            subprocess.Popen(["open", "https://id.atlassian.com/manage-profile/security/api-tokens"])
+            self.app.notify("открыл страницу создания токена в браузере")
+            return
         if event.button.id == "off":
             subprocess.run([sys.executable, ENGINE, "project", "jira", self.project, "--off"], capture_output=True)
             self.app.notify("Jira выключена для %s" % self.project); self.dismiss(True); return
