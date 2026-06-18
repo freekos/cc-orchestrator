@@ -903,15 +903,28 @@ def cmd_epic_set(args):
     e = s["epics"].get(args.key) or die("unknown epic '%s'" % args.key)
     if args.summary is not None:
         e["summary"] = args.summary
+    proj = s["projects"][e["project"]]
     if args.repos is not None:
-        proj = s["projects"][e["project"]]
         rl = [x for x in args.repos.split(",") if x]
         for r in rl:
             if r not in proj["repos"]:
                 die("repo '%s' not in project '%s'" % (r, e["project"]))
         e["repos"] = rl or None
+    if args.target:
+        targets = dict(e.get("targets") or {})
+        for pair in args.target:
+            if "=" not in pair:
+                die("--target must be repo=branch, got '%s'" % pair)
+            rr, br = pair.split("=", 1)
+            if rr not in proj["repos"]:
+                die("repo '%s' not in project '%s'" % (rr, e["project"]))
+            targets[rr] = br
+        e["targets"] = targets
+        e["mode"] = "targets"   # route MRs to these branches; no bare epic branch (avoids D/F key clashes)
     save_state(s)
-    print("epic %s  repos=%s  summary=%r" % (args.key, e.get("repos") or "ALL", e.get("summary", "")))
+    print("epic %s  mode=%s  repos=%s  targets=%s  summary=%r" % (
+        args.key, e.get("mode") or ("targets" if e.get("targets") else "epic_branch"),
+        e.get("repos") or "ALL", e.get("targets") or "-", e.get("summary", "")))
 
 def cmd_repo_members(args):
     s = load_state()
@@ -1215,7 +1228,7 @@ def build_parser():
     a = ep.add_parser("ls"); a.add_argument("project", nargs="?"); a.set_defaults(fn=cmd_epic_ls)
     a = ep.add_parser("mr"); a.add_argument("key"); a.add_argument("--dry-run", action="store_true"); a.set_defaults(fn=cmd_epic_mr)
     a = ep.add_parser("mrs"); a.add_argument("key"); a.set_defaults(fn=cmd_epic_mrs)
-    a = ep.add_parser("set"); a.add_argument("key"); a.add_argument("--summary"); a.add_argument("--repos"); a.set_defaults(fn=cmd_epic_set)
+    a = ep.add_parser("set"); a.add_argument("key"); a.add_argument("--summary"); a.add_argument("--repos"); a.add_argument("--target", action="append"); a.set_defaults(fn=cmd_epic_set)
     a = ep.add_parser("note"); a.add_argument("key"); a.add_argument("text"); a.set_defaults(fn=cmd_epic_note)
     a = ep.add_parser("memory"); a.add_argument("key"); a.set_defaults(fn=cmd_epic_memory)
     a = ep.add_parser("sync"); a.add_argument("key"); a.set_defaults(fn=cmd_epic_sync)
