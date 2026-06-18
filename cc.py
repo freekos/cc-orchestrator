@@ -1,0 +1,937 @@
+#!/usr/bin/env python3
+"""cc — multi-repo, epic-routed AI-agent orchestrator (Phase 1 engine).
+
+Model:  Project > Repos   and   Project > Epic > Task > RepoWork
+Rule:   the agent only EDITS files; cc owns ALL git (branch/commit/push/MR).
+State:  ~/.cc/state.json holds intent + pointers; git/jsonl hold the truth.
+"""
+import argparse, base64, json, os, re, shlex, shutil, subprocess, sys, time, urllib.request
+from pathlib import Path
+
+HOME = Path.home()
+STATE_DIR = HOME / ".cc"
+STATE_FILE = STATE_DIR / "state.json"
+WS_DIR = STATE_DIR / "workspaces"
+CLAUDE_PROJECTS = HOME / ".claude" / "projects"
+
+def glab_user():
+    """Current GitLab username (for default MR assignee)."""
+    r = run(["glab", "api", "user"], check=False)
+    try:
+        return json.loads(r.stdout).get("username", "")
+    except Exception:
+        return ""
+
+def glab_members(remote):
+    """Project members [{username, name, access}] sorted by access desc — for picking a reviewer."""
+    enc = (remote or "").replace("/", "%2F")
+    r = run(["glab", "api", "projects/%s/members/all?per_page=100" % enc], check=False)
+    try:
+        ms = json.loads(r.stdout)
+        ms.sort(key=lambda m: -m.get("access_level", 0))
+        return [{"username": m.get("username", ""), "name": m.get("name", ""),
+                 "access": m.get("access_level", 0)} for m in ms if m.get("username")]
+    except Exception:
+        return []
+
+# ----------------------------- state -----------------------------
+
+def load_state():
+    if STATE_FILE.exists():
+        return json.loads(STATE_FILE.read_text())
+    return {"projects": {}, "epics": {}, "tasks": {}}
+
+def save_state(s):
+    STATE_DIR.mkdir(parents=True, exist_ok=True)
+    STATE_FILE.write_text(json.dumps(s, indent=2, ensure_ascii=False))
+    try:
+        os.chmod(STATE_FILE, 0o600)   # may hold a Jira API token
+    except OSError:
+        pass
+
+# ----------------------------- helpers -----------------------------
+
+class _FakeProc:
+    returncode = 1
+    stdout = ""
+    def __init__(self, msg=""):
+        self.stderr = msg
+
+def run(cmd, cwd=None, check=True):
+    if cwd is not None and not os.path.isdir(str(cwd)):
+        if check:
+            raise RuntimeError("cwd missing: %s" % cwd)
+        return _FakeProc("cwd missing: %s" % cwd)
+    r = subprocess.run(cmd, cwd=cwd, text=True, capture_output=True)
+    if check and r.returncode != 0:
+        raise RuntimeError("cmd failed: %s\n%s" % (" ".join(cmd), r.stderr.strip()))
+    return r
+
+def git(args, cwd, check=True):
+    return run(["git"] + args, cwd=cwd, check=check)
+
+def tmux_name(tid):
+    return "cc_" + tid
+
+def tmux_alive(name):
+    return bool(shutil.which("tmux")) and subprocess.run(
+        ["tmux", "has-session", "-t", name], capture_output=True).returncode == 0
+
+def default_branch(repo_path):
+    r = run(["git", "symbolic-ref", "refs/remotes/origin/HEAD"], cwd=repo_path, check=False)
+    if r.returncode == 0 and r.stdout.strip():
+        return r.stdout.strip().rsplit("/", 1)[-1]
+    for b in ("main", "master"):
+        if run(["git", "rev-parse", "--verify", "origin/" + b], cwd=repo_path, check=False).returncode == 0:
+            return b
+    cur = run(["git", "branch", "--show-current"], cwd=repo_path, check=False).stdout.strip()
+    return cur or "HEAD"
+
+def have_ref(repo_path, ref):
+    return run(["git", "rev-parse", "--verify", ref], cwd=repo_path, check=False).returncode == 0
+
+def ensure_epic_branch(repo_path, key, base):
+    if have_ref(repo_path, key):
+        return                                  # already local -> no network
+    git(["fetch", "origin", base], cwd=repo_path, check=False)
+    for cand in ("origin/" + key, "origin/" + base, base, "HEAD"):
+        if have_ref(repo_path, cand):
+            git(["branch", key, cand], cwd=repo_path, check=False)
+            return
+    git(["branch", key], cwd=repo_path, check=False)
+
+def push_epic_branch(repo_path, key):
+    run(["git", "push", "--no-verify", "-u", "origin", key], cwd=repo_path, check=False)
+
+def slugify(s):
+    s = re.sub(r"[^a-zA-Z0-9]+", "-", s.strip().lower()).strip("-")
+    return s[:40] or "task"
+
+def die(msg):
+    print("error: " + msg, file=sys.stderr)
+    sys.exit(1)
+
+# ----------------------------- detection -----------------------------
+
+def repo_info(p):
+    p = Path(p)
+    url = git(["remote", "get-url", "origin"], cwd=p, check=False).stdout.strip()
+    clean = url[:-4] if url.endswith(".git") else url
+    m = re.search(r"[:/]([^/]+(?:/[^/]+)+)$", clean)
+    remote = m.group(1) if m else clean
+    provider = "gitlab" if "gitlab" in url else ("github" if "github" in url else "unknown")
+    db = git(["symbolic-ref", "--short", "HEAD"], cwd=p, check=False).stdout.strip() or "main"
+    setup, run_cmd = detect_setup_run(p)
+    return {"path": str(p), "provider": provider, "remote": remote, "default_branch": db,
+            "setup": setup, "run": run_cmd, "reviewer": ""}
+
+def detect_setup_run(repo_path):
+    """Best-effort defaults so a fresh worktree is runnable.
+    node repos: symlink node_modules from the main checkout (instant, shares deps) + a run cmd."""
+    pj = Path(repo_path) / "package.json"
+    if pj.exists():
+        run_cmd = ""
+        try:
+            scripts = json.loads(pj.read_text()).get("scripts", {})
+            run_cmd = "npm run dev" if "dev" in scripts else ("npm start" if "start" in scripts else "")
+        except Exception:
+            pass
+        return 'ln -sfn "$CC_MAIN_REPO/node_modules" node_modules', run_cmd
+    if (Path(repo_path) / "go.mod").exists():
+        return "", "go run ."
+    if (Path(repo_path) / "requirements.txt").exists() or (Path(repo_path) / "pyproject.toml").exists():
+        return "", ""
+    return "", ""
+
+def detect_repos(path):
+    path = Path(path).expanduser().resolve()
+    if not path.is_dir():
+        die("not a directory: %s" % path)
+    if (path / ".git").exists():
+        return "single", {path.name: repo_info(path)}, path
+    repos = {}
+    for child in sorted(path.iterdir()):
+        if child.name in ("cctui", "cc-orchestrator"):
+            continue
+        if child.is_dir() and (child / ".git").is_dir():
+            repos[child.name] = repo_info(child)
+    if not repos:
+        die("no git repos at %s (neither a repo nor a folder of repos)" % path)
+    return "multi", repos, path
+
+# ----------------------------- session capture -----------------------------
+
+def newest_session_after(ts):
+    newest, best = None, ts
+    if not CLAUDE_PROJECTS.exists():
+        return None
+    for f in CLAUDE_PROJECTS.glob("*/*.jsonl"):
+        try:
+            mt = f.stat().st_mtime
+        except OSError:
+            continue
+        if mt >= best:
+            best, newest = mt, f
+    return newest.stem if newest else None
+
+def resolve_session(primary_wt):
+    """Find the newest claude session transcript for a worktree (lazy, on open)."""
+    enc = str(primary_wt).replace("/", "-")
+    d = CLAUDE_PROJECTS / enc
+    if not d.exists():
+        return None
+    js = sorted(d.glob("*.jsonl"), key=lambda f: f.stat().st_mtime, reverse=True)
+    return js[0].stem if js else None
+
+# ----------------------------- project cmds -----------------------------
+
+def cmd_project_add(args):
+    s = load_state()
+    kind, repos, path = detect_repos(args.path)
+    name = args.name or path.name
+    s["projects"][name] = {"path": str(path), "kind": kind, "repos": repos,
+                           "default_assignee": glab_user()}
+    save_state(s)
+    print("project '%s' added - %s, %d repo(s)  (assignee=%s):" % (
+        name, kind, len(repos), s["projects"][name]["default_assignee"] or "-"))
+    for rn, ri in repos.items():
+        print("  - %-22s %-8s %s" % (rn, ri["provider"], ri["remote"]))
+
+def cmd_project_ls(args):
+    s = load_state()
+    if not s["projects"]:
+        print("(no projects - `cc project add <path>`)"); return
+    for name, p in s["projects"].items():
+        print("%s  [%s, %d repo(s)]  %s" % (name, p["kind"], len(p["repos"]), p["path"]))
+        for rn in p["repos"]:
+            print("    - " + rn)
+
+# ----------------------------- epic cmds -----------------------------
+
+def cmd_epic_add(args):
+    s = load_state()
+    if args.project not in s["projects"]:
+        die("unknown project '%s'" % args.project)
+    proj = s["projects"][args.project]
+    targets = {}
+    for t in (args.target or []):
+        if "=" not in t:
+            die("--target must be repo=branch, got '%s'" % t)
+        repo, br = t.split("=", 1)
+        if repo not in proj["repos"]:
+            die("repo '%s' not in project '%s'" % (repo, args.project))
+        targets[repo] = br
+    erepos = None
+    if args.repos:
+        erepos = args.repos.split(",")
+        for r in erepos:
+            if r not in proj["repos"]:
+                die("repo '%s' not in project '%s'" % (r, args.project))
+    mode = "targets" if targets else "epic_branch"
+    s["epics"][args.key] = {"project": args.project, "summary": args.summary or "",
+                            "targets": targets, "mode": mode, "branch": args.key, "repos": erepos,
+                            "memory": (args.summary or "").strip()}
+    save_state(s)
+    print("epic '%s' added under '%s'  [mode=%s]" % (args.key, args.project, mode))
+    if targets:
+        print("  routing (repo -> target branch):")
+        for r, b in targets.items():
+            print("    %-22s -> %s" % (r, b))
+    else:
+        print("  epic-branch mode: tasks merge into branch '%s'; that branch -> MR to master/main" % args.key)
+
+def cmd_epic_ls(args):
+    s = load_state()
+    for key, e in s["epics"].items():
+        if args.project and e["project"] != args.project:
+            continue
+        mode = e.get("mode") or ("targets" if e.get("targets") else "epic_branch")
+        print("%s  [%s, %s]  %s" % (key, e["project"], mode, e.get("summary", "")))
+        if mode == "epic_branch":
+            print("    tasks -> branch '%s' -> MR to master/main" % key)
+        for r, b in e.get("targets", {}).items():
+            print("    %-22s -> %s" % (r, b))
+
+# ----------------------------- task cmds -----------------------------
+
+def target_for(epic, proj, repo):
+    return epic.get("targets", {}).get(repo) or proj["repos"][repo]["default_branch"]
+
+def worktree_path(project_path, epic, slug, repo_name):
+    return Path(project_path) / "cctui" / epic / slug / repo_name
+
+def _provision(epic_key, epic, proj, r, branch, slug, epic_mode, no_setup):
+    ri = proj["repos"][r]; rp = ri["path"]
+    if ri.get("provider") in (None, "unknown") or not ri.get("remote"):
+        return (r, None, None, "no git remote")
+    wt = worktree_path(proj["path"], epic_key, slug, r)
+    if wt.exists():
+        return (r, None, None, "worktree exists")
+    try:
+        wt.parent.mkdir(parents=True, exist_ok=True)
+        if epic_mode == "epic_branch":
+            ensure_epic_branch(rp, epic_key, default_branch(rp))
+            mr_target, start = epic_key, epic_key
+        else:
+            mr_target = epic.get("targets", {}).get(r) or ri["default_branch"]
+            git(["fetch", "origin", mr_target], cwd=rp, check=False)
+            start = "origin/" + mr_target if have_ref(rp, "origin/" + mr_target) else mr_target
+        gr = git(["worktree", "add", "-b", branch, str(wt), start], cwd=rp, check=False)
+        if gr.returncode != 0:
+            gr2 = git(["worktree", "add", str(wt), branch], cwd=rp, check=False)
+            if gr2.returncode != 0:
+                return (r, None, None, ((gr.stderr or "") + (gr2.stderr or "")).strip().splitlines()[0][:80] or "worktree add failed")
+        for envf in Path(rp).glob(".env*"):
+            if envf.name == ".env.example":   # tracked file — copying could create a spurious diff
+                continue
+            if envf.is_file() and not (Path(wt) / envf.name).exists():
+                shutil.copy2(envf, Path(wt) / envf.name)
+        setup = ri.get("setup")
+        if setup and not no_setup:
+            env = dict(os.environ); env["CC_MAIN_REPO"] = rp
+            subprocess.run(setup, cwd=str(wt), shell=True, env=env, capture_output=True, text=True)
+        return (r, str(wt), mr_target, None)
+    except Exception as ex:
+        return (r, None, None, str(ex).splitlines()[0][:80])
+
+
+def cmd_task_add(args):
+    s = load_state()
+    if args.epic not in s["epics"]:
+        die("unknown epic '%s'" % args.epic)
+    epic = s["epics"][args.epic]
+    proj = s["projects"][epic["project"]]
+    repos = args.repos.split(",") if args.repos else (epic.get("repos") or list(proj["repos"].keys()))
+    for r in repos:
+        if r not in proj["repos"]:
+            die("repo '%s' not in project '%s'" % (r, epic["project"]))
+    slug = slugify(args.title)
+    branch = "%s-%s" % (args.epic, slug)
+    tid = "t_" + slug
+    epic_mode = epic.get("mode") or ("targets" if epic.get("targets") else "epic_branch")
+    print("task '%s' under epic %s [%s] - provisioning %d repo(s) in parallel ..." % (
+        args.title, args.epic, epic_mode, len(repos)))
+    from concurrent.futures import ThreadPoolExecutor
+    with ThreadPoolExecutor(max_workers=min(8, max(1, len(repos)))) as exr:
+        results = list(exr.map(
+            lambda r: _provision(args.epic, epic, proj, r, branch, slug, epic_mode, args.no_setup), repos))
+    worktrees, base, skipped, order = {}, {}, [], []
+    for (r, wt, tgt, err) in results:
+        if err:
+            print("  [%s] skipped (%s)" % (r, err)); skipped.append(r); continue
+        worktrees[r] = wt; base[r] = tgt; order.append(r)
+        print("  [%s] ready -> MR target %s" % (r, tgt))
+    if not worktrees:
+        die("no usable repos (all skipped). Scope the epic: cc epic set %s --repos <a,b>" % args.epic)
+    if skipped:
+        print("  (skipped %d: %s)" % (len(skipped), ", ".join(skipped)))
+    primary = order[0]
+    task_dir = str(Path(worktrees[primary]).parent)   # cctui/<epic>/<slug>/ — repos are its subfolders
+    repo_map = "\n".join("- %s -> %s" % (r, worktrees[r]) for r in order)
+    epic_mem = (epic.get("memory") or "").strip()
+    claude_md = ("# Epic %s: %s\n\n%s\n\n## Repos for THIS task (branch %s) — edit ONLY inside these subfolders:\n%s\n\n"
+                 "Do NOT run git — cc handles branches/commits/MRs.\n") % (
+                 args.epic, epic.get("summary", ""), epic_mem or "(no epic notes yet)", branch, repo_map)
+    try:
+        (Path(task_dir) / "CLAUDE.md").write_text(claude_md)
+    except Exception:
+        pass
+    log = STATE_DIR / ("%s.log" % tid)
+    s["tasks"][tid] = {"epic": args.epic, "title": args.title, "prompt": args.prompt,
+                       "repos": order, "branch": branch, "worktrees": worktrees, "base": base,
+                       "primary": primary, "dir": task_dir, "claude_session": {}, "status": "running",
+                       "mrs": {}, "log": str(log)}
+    save_state(s)
+    full_prompt = (args.prompt
+                   + "\n\n[cc] This task spans the repo worktrees below (branch %s). "
+                     "Edit files ONLY inside these subfolders (your cwd is their parent):\n%s"
+                     "\nDo NOT run git; cc handles branches/commits/MRs." % (branch, repo_map))
+    claude_cmd = ["claude", "--permission-mode", "acceptEdits", "-p", full_prompt]
+    STATE_DIR.mkdir(parents=True, exist_ok=True)
+    if args.sync:
+        print("  running agent (sync) ...")
+        rr = subprocess.run(claude_cmd, cwd=task_dir, text=True, capture_output=True)
+        log.write_text((rr.stdout or "") + "\n" + (rr.stderr or ""))
+        s = load_state(); s["tasks"][tid]["status"] = "review"; save_state(s)
+        print("  done.")
+    else:
+        with open(log, "w") as lf:
+            proc = subprocess.Popen(claude_cmd, cwd=task_dir, stdout=lf, stderr=lf)
+        s = load_state(); s["tasks"][tid]["pid"] = proc.pid; save_state(s)
+        print("  agent running in BACKGROUND (cwd=%s, pid=%s). log: %s" % (task_dir, proc.pid, log))
+    jira = proj.get("jira")
+    if jira and jira.get("token"):
+        try:
+            jk = jira_create_task(jira, args.epic, args.title, args.prompt)
+            if jk:
+                s = load_state(); s["tasks"][tid]["jira"] = jk; save_state(s)
+                print("  jira task created: %s (under %s)" % (jk, args.epic))
+        except Exception as ex:
+            print("  (jira task not created: %s)" % str(ex)[:100])
+    print("done: cc task open %s   |   cc task diff %s" % (tid, tid))
+
+
+def _changed(wt):
+    if not os.path.isdir(wt):
+        return ""
+    return git(["status", "--short"], cwd=wt, check=False).stdout.strip()
+
+def pid_alive(pid):
+    try:
+        os.kill(int(pid), 0)
+        return True
+    except Exception:
+        return False
+
+def task_status(t):
+    """Derive status from reality: running > merged > mr > review > idle."""
+    pid = t.get("pid")
+    if pid and pid_alive(pid):
+        return "running"
+    if t.get("merged"):
+        return "merged"
+    if t.get("mrs"):
+        return "mr"
+    for r, wt in t.get("worktrees", {}).items():
+        if not os.path.isdir(wt):
+            continue
+        if _changed(wt):
+            return "review"
+        base = t.get("base", {}).get(r)
+        if base:
+            cmp_ref = ("origin/" + base) if have_ref(wt, "origin/" + base) else base
+            ahead = run(["git", "rev-list", "--count", cmp_ref + "..HEAD"], cwd=wt, check=False).stdout.strip()
+            if ahead not in ("", "0"):
+                return "review"
+    return "idle"
+
+def cmd_task_diff(args):
+    s = load_state()
+    t = s["tasks"].get(args.task) or die("unknown task '%s'" % args.task)
+    for r in t["repos"]:
+        wt = t["worktrees"][r]
+        print("\n===== %s  (%s) =====" % (r, wt))
+        st = _changed(wt)
+        print(st if st else "(no changes)")
+        git(["add", "-A", "--intent-to-add", "."], cwd=wt, check=False)
+        diff = git(["diff", "--stat"], cwd=wt, check=False).stdout.strip()
+        if diff:
+            print("--- diffstat ---\n" + diff)
+
+def cmd_task_open(args):
+    s = load_state()
+    t = s["tasks"].get(args.task) or die("unknown task '%s'" % args.task)
+    proj = s["projects"][s["epics"][t["epic"]]["project"]]
+    WS_DIR.mkdir(parents=True, exist_ok=True)
+    ws = WS_DIR / ("%s.code-workspace" % args.task)
+    folders = [{"path": t["worktrees"][r]} for r in t["repos"]]
+    ws.write_text(json.dumps({"folders": folders, "settings": {"window.title": "cc:%s" % args.task}}, indent=2))
+    print("Cursor multi-root workspace written: %s" % ws)
+    print("  open:   cursor '%s'" % ws)
+    sid = t.get("claude_session", {}).get(t["primary"])
+    if not sid:
+        sid = resolve_session(t["worktrees"][t["primary"]])
+        if sid:
+            t.setdefault("claude_session", {})[t["primary"]] = sid
+            save_state(s)
+    if sid:
+        print("  follow-up:  (cd '%s' && claude --resume %s)" % (t["worktrees"][t["primary"]], sid))
+    if t.get("log"):
+        print("  watch log:  tail -f '%s'" % t["log"])
+    print("  run locally:")
+    for r in t["repos"]:
+        rc = proj["repos"].get(r, {}).get("run") or "<dev cmd>"
+        print("    [%s]  cd '%s' && %s" % (r, t["worktrees"][r], rc))
+
+def cmd_task_ls(args):
+    s = load_state()
+    by_epic = {}
+    for tid, t in s["tasks"].items():
+        if args.epic and t["epic"] != args.epic:
+            continue
+        by_epic.setdefault(t["epic"], []).append((tid, t))
+    for epic, items in by_epic.items():
+        print("[epic] %s  %s" % (epic, s["epics"].get(epic, {}).get("summary", "")))
+        for tid, t in items:
+            st = task_status(t)
+            glyph = {"running": "~", "review": "*", "mr": "MR", "idle": "."}.get(st, "?")
+            print("   %s %-18s %-28s [%s]" % (glyph, tid, t["title"], st))
+
+def cmd_task_mrs(args):
+    s = load_state()
+    t = s["tasks"].get(args.task) or die("unknown task '%s'" % args.task)
+    proj = s["projects"][s["epics"][t["epic"]]["project"]]
+    branch = t["branch"]
+    any_url = merged = open_ = 0
+    states = {}
+    for r in t["repos"]:
+        ri = proj["repos"][r]
+        url, state = mr_info(ri["remote"], branch, ri["path"])
+        if url:
+            t.setdefault("mrs", {})[r] = url
+            states[r] = state
+            any_url += 1
+            print("[%s] %s  (%s)" % (r, url, state))
+            if state == "merged":
+                merged += 1
+            else:
+                open_ += 1
+        else:
+            print("[%s] (no MR)" % r)
+    t["mr_state"] = states
+    t["merged"] = any_url > 0 and open_ == 0   # all found MRs merged
+    save_state(s)
+    if not any_url:
+        print("(no MRs found — create with M)")
+    elif merged and not open_:
+        print("\nall %d MR(s) merged -> `cc task done %s` to clean up worktrees" % (merged, args.task))
+    elif merged:
+        print("\n%d merged, %d still open" % (merged, open_))
+
+
+def cmd_task_abort(args):
+    """Tear down a task's REMOTE side: close MRs + delete remote branches, then local cleanup.
+    Use for throwaway/test tasks so they don't pollute team repos."""
+    s = load_state()
+    t = s["tasks"].get(args.task) or die("unknown task '%s'" % args.task)
+    epic = s["epics"][t["epic"]]
+    proj = s["projects"][epic["project"]]
+    branch = t["branch"]
+    epic_branch = epic.get("branch") if (epic.get("mode") == "epic_branch") else None
+    # is the epic branch still used by OTHER tasks (with MRs)? if so, keep it
+    others = [k for k, ot in s["tasks"].items() if k != args.task and ot.get("epic") == t["epic"]]
+    drop_epic_branch = epic_branch and not others
+    for r in t["repos"]:
+        ri = proj["repos"][r]; rp = ri["path"]
+        url = (t.get("mrs", {}) or {}).get(r) or find_mr(ri["remote"], branch, rp)
+        if url:
+            m = re.search(r"/merge_requests/(\d+)", url)
+            if m:
+                run(["glab", "mr", "close", m.group(1), "-R", ri["remote"]], cwd=rp, check=False)
+                print("[%s] closed MR !%s" % (r, m.group(1)))
+        if run(["git", "push", "origin", "--delete", branch], cwd=rp, check=False).returncode == 0:
+            print("[%s] deleted remote branch %s" % (r, branch))
+        if drop_epic_branch:
+            if run(["git", "push", "origin", "--delete", epic_branch], cwd=rp, check=False).returncode == 0:
+                print("[%s] deleted remote epic branch %s" % (r, epic_branch))
+    # local cleanup
+    sess = t.get("tmux")
+    if sess:
+        subprocess.run(["tmux", "kill-session", "-t", sess], capture_output=True)
+    task_dir = Path(next(iter(t["worktrees"].values()))).parent if t.get("worktrees") else None
+    for r in t["repos"]:
+        rp = proj["repos"].get(r, {}).get("path")
+        if rp:
+            git(["worktree", "remove", t["worktrees"][r], "--force"], cwd=rp, check=False)
+            git(["worktree", "prune"], cwd=rp, check=False)
+            git(["branch", "-D", branch], cwd=rp, check=False)
+    if task_dir and task_dir.exists():
+        shutil.rmtree(task_dir, ignore_errors=True)
+    s["tasks"].pop(args.task, None)
+    save_state(s)
+    print("task %s aborted (MRs closed, remote+local branches/worktrees removed)." % args.task)
+
+
+def cmd_task_done(args):
+    s = load_state()
+    t = s["tasks"].get(args.task) or die("unknown task '%s'" % args.task)
+    proj = s["projects"][s["epics"][t["epic"]]["project"]]
+    problems = [("%s has uncommitted changes" % r) for r in t["repos"] if _changed(t["worktrees"][r])]
+    if problems and not args.force:
+        die("refusing cleanup:\n  - " + "\n  - ".join(problems) + "\n(use --force to override)")
+    sess = t.get("tmux")
+    if sess:
+        subprocess.run(["tmux", "kill-session", "-t", sess], capture_output=True)
+    task_dir = Path(next(iter(t["worktrees"].values()))).parent
+    for r in t["repos"]:
+        rp = proj["repos"].get(r, {}).get("path")
+        if not rp:
+            continue
+        git(["worktree", "remove", t["worktrees"][r], "--force"], cwd=rp, check=False)
+        git(["worktree", "prune"], cwd=rp, check=False)
+        print("removed worktree: %s" % t["worktrees"][r])
+    if task_dir.exists():
+        shutil.rmtree(task_dir, ignore_errors=True)
+        print("removed task dir: %s" % task_dir)
+    t["status"] = "done"
+    save_state(s)
+    print("task %s archived." % args.task)
+
+def find_mr(remote, branch, cwd):
+    """Web URL of the MR for this branch (or None) — looks up existing via glab mr list."""
+    lst = run(["glab", "mr", "list", "-R", remote, "--source-branch", branch], cwd=cwd, check=False)
+    text = (lst.stdout or "") + (lst.stderr or "")
+    m = re.search(r"https?://\S+/-/merge_requests/\d+", text)
+    if m:
+        return m.group(0)
+    m = re.search(r"!(\d+)", text)
+    if m:
+        return "https://gitlab.com/%s/-/merge_requests/%s" % (remote, m.group(1))
+    return None
+
+def mr_info(remote, branch, cwd):
+    """(url, state) for the MR of this branch via `glab mr view`, or (None, None)."""
+    r = run(["glab", "mr", "view", branch, "-R", remote], cwd=cwd, check=False)
+    if r.returncode != 0:
+        return (None, None)
+    text = r.stdout or ""
+    um = re.search(r"url:\s*(\S+)", text)
+    sm = re.search(r"state:\s*(\w+)", text)
+    return (um.group(1) if um else find_mr(remote, branch, cwd), sm.group(1) if sm else "?")
+
+def mr_url(out, remote, branch, cwd):
+    text = (out.stdout or "") + "\n" + (out.stderr or "")
+    m = re.search(r"https?://\S+/-/merge_requests/\d+", text)   # real web url from create
+    if m:
+        return m.group(0)
+    return find_mr(remote, branch, cwd) or "(MR exists — see `cc task mrs`)"
+
+
+def cmd_task_mr(args):
+    s = load_state()
+    t = s["tasks"].get(args.task) or die("unknown task '%s'" % args.task)
+    epic = s["epics"][t["epic"]]
+    proj = s["projects"][epic["project"]]
+    epic_mode = epic.get("mode") or ("targets" if epic.get("targets") else "epic_branch")
+    assignee = proj.get("default_assignee") or glab_user()
+    any_real = False
+    for r in t["repos"]:
+        wt = t["worktrees"][r]
+        ri = proj["repos"][r]
+        target = t["base"][r]
+        branch = t["branch"]
+        cmp_ref = ("origin/" + target) if have_ref(wt, "origin/" + target) else target
+        ahead = run(["git", "rev-list", "--count", cmp_ref + "..HEAD"], cwd=wt, check=False).stdout.strip()
+        if not _changed(wt) and ahead in ("", "0"):
+            print("[%s] no changes - skipped (no branch pushed, no MR)" % r)
+            continue
+        lead = ri.get("reviewer", "")
+        title = "[%s] %s" % (t["epic"], t["title"])
+        push = ["git", "push", "--no-verify", "-u", "origin", branch]
+        if args.dry_run:
+            print("[%s] DRY-RUN: %s -> %s | title=%r reviewer=%s assignee=%s label=%s" % (
+                r, branch, target, title, lead or "-", assignee or "-", t["epic"]))
+            continue
+        any_real = True
+        print("[%s] preparing %s ..." % (r, branch))
+        if epic_mode == "epic_branch":
+            print("[%s] pushing epic branch %s ..." % (r, target))
+            push_epic_branch(proj["repos"][r]["path"], target)
+        if _changed(wt):
+            print("[%s] commit (--no-verify) ..." % r)
+            git(["add", "-A"], cwd=wt)
+            git(["reset", "-q", "--", "node_modules", ".env", ".env.local", ".env.development",
+                 ".env.example", ".cc-task.md"], cwd=wt, check=False)
+            git(["commit", "--no-verify", "-m", title], cwd=wt)
+        print("[%s] push %s ..." % (r, branch))
+        run(push, cwd=wt)
+        diffstat = run(["git", "diff", "--stat", cmp_ref + "..HEAD"], cwd=wt, check=False).stdout.strip()
+        desc = (t.get("prompt") or "").strip()
+        if diffstat:
+            desc += "\n\n## Changes\n```\n" + diffstat + "\n```"
+        desc += "\n\n_MR by cc — epic %s_" % t["epic"]
+        glab_cmd = ["glab", "mr", "create", "-R", ri["remote"],
+                    "--source-branch", branch, "--target-branch", target,
+                    "--title", title, "--description", desc[:8000],
+                    "--label", t["epic"], "--yes"]
+        if assignee:
+            glab_cmd += ["--assignee", assignee]
+        if lead:
+            glab_cmd += ["--reviewer", lead]
+        print("[%s] glab mr create -> %s (reviewer %s, assignee %s) ..." % (r, target, lead or "-", assignee or "-"))
+        out = run(glab_cmd, cwd=wt, check=False)
+        url = mr_url(out, ri["remote"], branch, wt)
+        t["mrs"][r] = url
+        print("[%s] MR -> %s" % (r, url))
+    if any_real:
+        t["status"] = "mr"
+        save_state(s)
+
+def cmd_epic_mr(args):
+    s = load_state()
+    e = s["epics"].get(args.key) or die("unknown epic '%s'" % args.key)
+    proj = s["projects"][e["project"]]
+    key = e.get("branch", args.key)
+    found = False
+    for r, ri in proj["repos"].items():
+        rp = ri["path"]
+        if not (have_ref(rp, key) or have_ref(rp, "origin/" + key)):
+            continue
+        found = True
+        db = default_branch(rp)
+        lead = ri.get("reviewer", "")
+        assignee = proj.get("default_assignee") or glab_user()
+        glab_cmd = ["glab", "mr", "create", "-R", ri["remote"],
+                    "--source-branch", key, "--target-branch", db,
+                    "--title", "[%s] %s" % (args.key, e.get("summary", "") or "epic integration"),
+                    "--description", "Epic %s integration -> %s\n\n_MR by cc_" % (args.key, db),
+                    "--label", args.key, "--yes"]
+        if assignee:
+            glab_cmd += ["--assignee", assignee]
+        if lead:
+            glab_cmd += ["--reviewer", lead]
+        if args.dry_run:
+            print("[%s] DRY-RUN epic MR: %s -> %s (reviewer %s)" % (r, key, db, lead or "-"))
+            print("    would: git push -u origin %s" % key)
+            print("    would: " + " ".join(glab_cmd))
+            continue
+        push_epic_branch(rp, key)
+        out = run(glab_cmd, cwd=rp, check=False)
+        url = mr_url(out, ri["remote"], key, rp)
+        print("[%s] epic MR -> %s" % (r, url))
+    if not found:
+        print("(no epic branch '%s' in any repo yet - create a task first)" % key)
+
+
+def cmd_epic_note(args):
+    s = load_state()
+    e = s["epics"].get(args.key) or die("unknown epic '%s'" % args.key)
+    e["memory"] = ((e.get("memory", "") or "").rstrip() + "\n- " + args.text).strip()
+    save_state(s)
+    print("noted on %s (memory now %d lines)" % (args.key, e["memory"].count("\n") + 1))
+
+def cmd_epic_memory(args):
+    s = load_state()
+    e = s["epics"].get(args.key) or die("unknown epic '%s'" % args.key)
+    print(e.get("memory", "") or "(empty — `cc epic note %s \"...\"`)" % args.key)
+
+
+def cmd_epic_set(args):
+    s = load_state()
+    e = s["epics"].get(args.key) or die("unknown epic '%s'" % args.key)
+    if args.summary is not None:
+        e["summary"] = args.summary
+    if args.repos is not None:
+        proj = s["projects"][e["project"]]
+        rl = [x for x in args.repos.split(",") if x]
+        for r in rl:
+            if r not in proj["repos"]:
+                die("repo '%s' not in project '%s'" % (r, e["project"]))
+        e["repos"] = rl or None
+    save_state(s)
+    print("epic %s  repos=%s  summary=%r" % (args.key, e.get("repos") or "ALL", e.get("summary", "")))
+
+def cmd_repo_members(args):
+    s = load_state()
+    proj = s["projects"].get(args.project) or die("unknown project '%s'" % args.project)
+    ri = proj["repos"].get(args.repo) or die("unknown repo '%s'" % args.repo)
+    for m in glab_members(ri["remote"]):
+        print("%-26s L%-3d %s" % (m["username"], m["access"], m["name"]))
+
+
+def cmd_repo_set(args):
+    s = load_state()
+    proj = s["projects"].get(args.project) or die("unknown project '%s'" % args.project)
+    r = proj["repos"].get(args.repo) or die("unknown repo '%s'" % args.repo)
+    if args.setup is not None:
+        r["setup"] = args.setup
+    if args.run is not None:
+        r["run"] = args.run
+    if args.reviewer is not None:
+        r["reviewer"] = args.reviewer
+    save_state(s)
+    print("%s/%s  setup=%r  run=%r  reviewer=%r" % (args.project, args.repo, r.get("setup", ""), r.get("run", ""), r.get("reviewer", "")))
+
+def cmd_repo_ls(args):
+    s = load_state()
+    proj = s["projects"].get(args.project) or die("unknown project '%s'" % args.project)
+    for rn, ri in proj["repos"].items():
+        print("%-22s setup=%r  run=%r" % (rn, ri.get("setup", ""), ri.get("run", "")))
+
+
+# ----------------------------- jira -----------------------------
+
+def jira_req(cfg, method, path, body=None):
+    url = "https://%s/rest/api/3%s" % (cfg["site"], path)
+    data = json.dumps(body).encode() if body is not None else None
+    req = urllib.request.Request(url, data=data, method=method)
+    auth = base64.b64encode(("%s:%s" % (cfg["email"], cfg["token"])).encode()).decode()
+    req.add_header("Authorization", "Basic " + auth)
+    req.add_header("Content-Type", "application/json")
+    req.add_header("Accept", "application/json")
+    with urllib.request.urlopen(req, timeout=25) as r:
+        raw = r.read().decode()
+    return json.loads(raw) if raw.strip() else {}
+
+def jira_my_epics(cfg, query=""):
+    jql = "project = %s AND issuetype = Epic AND assignee = currentUser()" % cfg["project_key"]
+    if query:
+        jql += ' AND summary ~ "%s"' % query.replace('"', "")
+    jql += " ORDER BY updated DESC"
+    body = {"jql": jql, "maxResults": 50, "fields": ["summary", "status"]}
+    try:
+        data = jira_req(cfg, "POST", "/search/jql", body)
+    except Exception:
+        data = jira_req(cfg, "POST", "/search", body)
+    out = []
+    for i in data.get("issues", []):
+        f = i.get("fields", {})
+        st = (f.get("status") or {}).get("name", "")
+        out.append({"key": i["key"], "summary": f.get("summary", ""), "status": st})
+    return out
+
+def jira_adf(text):
+    return {"type": "doc", "version": 1,
+            "content": [{"type": "paragraph", "content": [{"type": "text", "text": (text or " ")[:4000]}]}]}
+
+def jira_discover(cfg):
+    """Fill account_id + epic/task issuetype ids (best effort). Mutates cfg."""
+    try:
+        cfg["account_id"] = jira_req(cfg, "GET", "/myself").get("accountId", "")
+    except Exception:
+        pass
+    try:
+        data = jira_req(cfg, "GET", "/issue/createmeta/%s/issuetypes" % cfg["project_key"])
+        for it in (data.get("issueTypes") or data.get("values") or []):
+            if it.get("hierarchyLevel") == 1 and not cfg.get("epic_type_id"):
+                cfg["epic_type_id"] = it["id"]
+            if it.get("hierarchyLevel") == 0 and not it.get("subtask") and not cfg.get("task_type_id"):
+                cfg["task_type_id"] = it["id"]
+    except Exception:
+        pass
+
+def jira_epic_description(cfg, key):
+    try:
+        f = jira_req(cfg, "GET", "/issue/%s?fields=description" % key).get("fields", {})
+        d = f.get("description")
+        if isinstance(d, str):
+            return d
+        # ADF -> plain text (best effort)
+        out = []
+        def walk(n):
+            if isinstance(n, dict):
+                if n.get("type") == "text":
+                    out.append(n.get("text", ""))
+                for c in n.get("content", []) or []:
+                    walk(c)
+                if n.get("type") == "paragraph":
+                    out.append("\n")
+        walk(d or {})
+        return "".join(out).strip()
+    except Exception:
+        return ""
+
+def jira_create_epic(cfg, summary, description=""):
+    fields = {"project": {"key": cfg["project_key"]},
+              "issuetype": {"id": cfg.get("epic_type_id", "10000")}, "summary": summary}
+    if cfg.get("account_id"):
+        fields["assignee"] = {"accountId": cfg["account_id"]}
+    if description:
+        fields["description"] = jira_adf(description)
+    return jira_req(cfg, "POST", "/issue", {"fields": fields}).get("key")
+
+def jira_create_task(cfg, epic_key, summary, description=""):
+    fields = {"project": {"key": cfg["project_key"]},
+              "issuetype": {"id": cfg.get("task_type_id", "10001")},
+              "summary": summary, "parent": {"key": epic_key}}
+    if cfg.get("account_id"):
+        fields["assignee"] = {"accountId": cfg["account_id"]}
+    if description:
+        fields["description"] = jira_adf(description)
+    return jira_req(cfg, "POST", "/issue", {"fields": fields}).get("key")
+
+def cmd_project_jira(args):
+    s = load_state()
+    proj = s["projects"].get(args.project) or die("unknown project '%s'" % args.project)
+    j = proj.setdefault("jira", {})
+    if args.site:
+        j["site"] = args.site.replace("https://", "").replace("http://", "").rstrip("/")
+    if args.email:
+        j["email"] = args.email
+    if args.token:
+        j["token"] = args.token
+    if args.project_key:
+        j["project_key"] = args.project_key
+    if args.off:
+        proj.pop("jira", None)
+        save_state(s); print("jira disabled for '%s'" % args.project); return
+    save_state(s)
+    print("jira for '%s': site=%s email=%s project=%s token=%s" % (
+        args.project, j.get("site", "-"), j.get("email", "-"), j.get("project_key", "-"),
+        "set" if j.get("token") else "MISSING"))
+    if j.get("site") and j.get("token") and j.get("project_key"):
+        try:
+            n = len(jira_my_epics(j))
+            jira_discover(j); save_state(s)
+            print("  ok — auth works, %d of your epics in %s (epic-type=%s task-type=%s)" % (
+                n, j["project_key"], j.get("epic_type_id", "?"), j.get("task_type_id", "?")))
+        except Exception as ex:
+            print("  WARN — could not reach Jira: %s" % str(ex)[:120])
+
+def cmd_jira_create_epic(args):
+    s = load_state()
+    proj = s["projects"].get(args.project) or die("unknown project '%s'" % args.project)
+    cfg = proj.get("jira") or die("Jira not configured for '%s'" % args.project)
+    if not cfg.get("epic_type_id"):
+        jira_discover(cfg); save_state(s)
+    key = jira_create_epic(cfg, args.summary)
+    print("created Jira epic: %s  %s" % (key, args.summary))
+
+
+def cmd_jira_epics(args):
+    s = load_state()
+    proj = s["projects"].get(args.project) or die("unknown project '%s'" % args.project)
+    cfg = proj.get("jira") or die("Jira not configured — `cc project jira %s --site .. --email .. --token .. --project-key ..`" % args.project)
+    eps = jira_my_epics(cfg, args.search or "")
+    for e in eps:
+        print("%-10s %-8s %s" % (e["key"], e.get("status", ""), e["summary"]))
+    if not eps:
+        print("(no epics found for you in %s)" % cfg["project_key"])
+
+
+# ----------------------------- cli -----------------------------
+
+def build_parser():
+    p = argparse.ArgumentParser(prog="cc", description="multi-repo epic-routed agent orchestrator")
+    sub = p.add_subparsers(dest="group", required=True)
+
+    pj = sub.add_parser("project").add_subparsers(dest="cmd", required=True)
+    a = pj.add_parser("add"); a.add_argument("path"); a.add_argument("name", nargs="?"); a.set_defaults(fn=cmd_project_add)
+    pj.add_parser("ls").set_defaults(fn=cmd_project_ls)
+    a = pj.add_parser("jira"); a.add_argument("project")
+    a.add_argument("--site"); a.add_argument("--email"); a.add_argument("--token")
+    a.add_argument("--project-key", dest="project_key"); a.add_argument("--off", action="store_true")
+    a.set_defaults(fn=cmd_project_jira)
+
+    jr = sub.add_parser("jira").add_subparsers(dest="cmd", required=True)
+    a = jr.add_parser("epics"); a.add_argument("project"); a.add_argument("--search")
+    a.set_defaults(fn=cmd_jira_epics)
+    a = jr.add_parser("create-epic"); a.add_argument("project"); a.add_argument("summary")
+    a.set_defaults(fn=cmd_jira_create_epic)
+
+    rp_ = sub.add_parser("repo").add_subparsers(dest="cmd", required=True)
+    a = rp_.add_parser("set"); a.add_argument("project"); a.add_argument("repo")
+    a.add_argument("--setup"); a.add_argument("--run"); a.add_argument("--reviewer"); a.set_defaults(fn=cmd_repo_set)
+    a = rp_.add_parser("ls"); a.add_argument("project"); a.set_defaults(fn=cmd_repo_ls)
+    a = rp_.add_parser("members"); a.add_argument("project"); a.add_argument("repo"); a.set_defaults(fn=cmd_repo_members)
+
+    ep = sub.add_parser("epic").add_subparsers(dest="cmd", required=True)
+    a = ep.add_parser("add"); a.add_argument("project"); a.add_argument("key")
+    a.add_argument("--summary"); a.add_argument("--target", action="append"); a.add_argument("--repos")
+    a.set_defaults(fn=cmd_epic_add)
+    a = ep.add_parser("ls"); a.add_argument("project", nargs="?"); a.set_defaults(fn=cmd_epic_ls)
+    a = ep.add_parser("mr"); a.add_argument("key"); a.add_argument("--dry-run", action="store_true"); a.set_defaults(fn=cmd_epic_mr)
+    a = ep.add_parser("set"); a.add_argument("key"); a.add_argument("--summary"); a.add_argument("--repos"); a.set_defaults(fn=cmd_epic_set)
+    a = ep.add_parser("note"); a.add_argument("key"); a.add_argument("text"); a.set_defaults(fn=cmd_epic_note)
+    a = ep.add_parser("memory"); a.add_argument("key"); a.set_defaults(fn=cmd_epic_memory)
+
+    tk = sub.add_parser("task").add_subparsers(dest="cmd", required=True)
+    a = tk.add_parser("add"); a.add_argument("epic"); a.add_argument("title")
+    a.add_argument("--prompt", required=True); a.add_argument("--repos")
+    a.add_argument("--sync", action="store_true"); a.add_argument("--no-setup", action="store_true")
+    a.set_defaults(fn=cmd_task_add)
+    a = tk.add_parser("ls"); a.add_argument("epic", nargs="?"); a.set_defaults(fn=cmd_task_ls)
+    a = tk.add_parser("diff"); a.add_argument("task"); a.set_defaults(fn=cmd_task_diff)
+    a = tk.add_parser("open"); a.add_argument("task"); a.set_defaults(fn=cmd_task_open)
+    a = tk.add_parser("done"); a.add_argument("task"); a.add_argument("--force", action="store_true"); a.set_defaults(fn=cmd_task_done)
+    a = tk.add_parser("mr"); a.add_argument("task"); a.add_argument("--dry-run", action="store_true"); a.set_defaults(fn=cmd_task_mr)
+    a = tk.add_parser("mrs"); a.add_argument("task"); a.set_defaults(fn=cmd_task_mrs)
+    a = tk.add_parser("abort"); a.add_argument("task"); a.set_defaults(fn=cmd_task_abort)
+    return p
+
+def main(argv=None):
+    args = build_parser().parse_args(argv)
+    args.fn(args)
+
+if __name__ == "__main__":
+    main()
