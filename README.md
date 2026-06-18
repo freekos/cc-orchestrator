@@ -88,6 +88,13 @@ Each epic carries notes (`cc epic note <KEY> "invariant/decision/gotcha"`,
 `cc epic memory <KEY>` to view) that `cc` injects into every task agent of that
 epic via a `CLAUDE.md` — so agents stay consistent and don't repeat mistakes.
 
+### Task list — grouped by state
+Under each epic, tasks are grouped into collapsible folders, **"🟡 Ждут тебя" first**
+(agent finished, needs your review), then **🔵 В работе** (agent running), **🟣 На ревью
+(MR)**, **✅ Готово** (collapsed). A **💬** badge marks tasks whose agent wrote output you
+haven't opened yet (cleared when you open the chat with `o`/`v`). Not-yet-started Jira
+children sit in a collapsed **📋 Jira-задачи** folder at the bottom.
+
 ### Epics & archive
 Live epics sit at the top of each project; **archived** ones collapse under a
 **"🗄 Архив (N)"** node at the bottom (collapsed by default, dimmed). Archive — TUI

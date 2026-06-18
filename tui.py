@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """cc TUI — terminal interface over the cc engine (Phase 3, Textual)."""
-import json, os, re, shlex, shutil, subprocess, sys
+import json, os, re, shlex, shutil, subprocess, sys, time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
@@ -810,26 +810,55 @@ class CCApp(App):
     def state(self):
         return cc.load_state()
 
+    TASK_GROUPS = [("review", "🟡 Ждут тебя", True), ("running", "🔵 В работе", True),
+                   ("mr", "🟣 На ревью (MR)", True), ("merged", "✅ Готово", False)]
+
+    def _unseen(self, t):
+        """Agent finished and wrote output you haven't opened yet."""
+        log = t.get("log")
+        try:
+            return bool(log) and os.path.exists(log) and os.path.getmtime(log) > t.get("seen_at", 0)
+        except Exception:
+            return False
+
     def _add_epic_node(self, parent, ekey, e, s, expand=True, dim=False):
         label = "# %s  %s" % (ekey, e.get("summary", ""))
         en = parent.add("[dim]%s[/dim]" % label if dim else label,
                         data={"type": "epic", "id": ekey}, expand=expand)
+        if dim:  # archived epic: flat dim list, no folders
+            for tid, t in s["tasks"].items():
+                if t["epic"] == ekey:
+                    en.add_leaf("[dim]%s %s[/dim]" % (GLYPH.get(cc.task_status(t), "?"), t["title"]),
+                                data={"type": "task", "id": tid})
+            return en
+        # group live tasks by state into collapsible folders
+        buckets = {"review": [], "running": [], "mr": [], "merged": []}
         linked = set()
         for tid, t in s["tasks"].items():
             if t["epic"] != ekey:
                 continue
             if t.get("jira"):
                 linked.add(t["jira"])
-            tl = "%s %s" % (GLYPH.get(cc.task_status(t), "?"), t["title"])
-            en.add_leaf("[dim]%s[/dim]" % tl if dim else tl, data={"type": "task", "id": tid})
-        # Jira child issues not yet turned into cc-tasks (stubs you can activate with n)
-        if not dim:
-            for c in e.get("jira_children", []):
-                if c["key"] in linked:
-                    continue
+            st = cc.task_status(t)
+            buckets[st if st in buckets else "review"].append((tid, t))
+        for key, title, exp in self.TASK_GROUPS:
+            items = buckets[key]
+            if not items:
+                continue
+            gn = en.add("%s (%d)" % (title, len(items)),
+                        data={"type": "taskgroup", "epic": ekey, "state": key}, expand=exp)
+            for tid, t in items:
+                badge = "💬 " if (key == "review" and self._unseen(t)) else ""
+                gn.add_leaf("%s%s %s" % (badge, GLYPH.get(cc.task_status(t), "?"), t["title"]),
+                            data={"type": "task", "id": tid})
+        # Jira child issues not yet started -> collapsed folder
+        stubs = [c for c in e.get("jira_children", []) if c["key"] not in linked]
+        if stubs:
+            jn = en.add("📋 Jira-задачи (%d)" % len(stubs),
+                        data={"type": "jiragroup", "epic": ekey}, expand=False)
+            for c in stubs:
                 mark = "[green]✓[/green]" if c.get("done") else "·"
-                lbl = "📋 %s %s  %s" % (mark, c["key"], c.get("summary", "")[:48])
-                en.add_leaf("[dim]%s[/dim]" % lbl,
+                jn.add_leaf("[dim]%s %s  %s[/dim]" % (mark, c["key"], c.get("summary", "")[:46]),
                             data={"type": "jira_stub", "epic": ekey, "key": c["key"],
                                   "summary": c.get("summary", ""), "done": c.get("done", False)})
         return en
@@ -868,6 +897,9 @@ class CCApp(App):
             d.update("")
             return
         s = self.state()
+        if data["type"] in ("taskgroup", "jiragroup"):
+            d.update("[dim]группа задач — раскрой и выбери задачу[/dim]")
+            return
         if data["type"] == "jira_stub":
             st = "Done" if data.get("done") else "не начата"
             d.update("[b]%s[/b]  (Jira — %s)\n%s\n\n[dim]n — активировать: создаст cc-задачу (worktree+агент), prompt засеян из Jira[/dim]"
@@ -994,6 +1026,8 @@ class CCApp(App):
             if data["type"] == "task":
                 return s["tasks"][data["id"]]["epic"]
             if data["type"] == "jira_stub":
+                return data["epic"]
+            if data["type"] in ("taskgroup", "jiragroup"):
                 return data["epic"]
         return None
 
@@ -1129,10 +1163,17 @@ class CCApp(App):
         sid = t.get("claude_session", {}).get(t["primary"]) or cc.resolve_session(cwd)
         return cwd, ("claude --resume %s" % sid if sid else "claude")
 
+    def _mark_seen(self, tid):
+        s = cc.load_state()
+        if tid in s["tasks"]:
+            s["tasks"][tid]["seen_at"] = time.time()
+            cc.save_state(s)
+
     def action_view_chat(self):
         tid = self._cur_task()
         if not tid:
             return
+        self._mark_seen(tid)
         self.push_screen(ChatScreen(tid))
 
     def action_open(self):
@@ -1143,6 +1184,7 @@ class CCApp(App):
         cwd, chat = self._chat_cmd(t)
         if not os.path.isdir(cwd):
             self.notify("worktree missing — recreate the task", severity="error"); return
+        self._mark_seen(tid)
         where = open_cmux("%s chat" % tid, cwd, chat)
         self.notify("чат задачи открыт (%s) — печатай там, отвечай на вопросы агента" % where)
 
