@@ -398,12 +398,12 @@ def cmd_task_add(args):
     else:
         promptfile = STATE_DIR / (tid + ".prompt")
         promptfile.write_text(full_prompt)
-        tmux_name = "cc_" + re.sub(r"[^A-Za-z0-9_-]", "-", tid)
-        print("  starting LIVE agent in tmux '%s' (auto mode) ..." % tmux_name)
-        ok = spawn_tmux_agent(tmux_name, task_dir, promptfile, "auto")
-        s = load_state(); s["tasks"][tid]["tmux"] = tmux_name; s["tasks"][tid].pop("pid", None); save_state(s)
-        print("  agent LIVE in tmux '%s' (cwd=%s) — open with `cc task open %s` / o (normal session)" % (tmux_name, task_dir, tid)
-              if ok else "  WARNING: tmux spawn failed (tmux installed?)")
+        win = re.sub(r"[^A-Za-z0-9_-]", "-", tid)
+        print("  starting LIVE agent as tmux window '%s' in session cc (auto mode) ..." % win)
+        ok = spawn_tmux_agent(win, task_dir, promptfile, "auto")
+        s = load_state(); s["tasks"][tid]["tmux"] = win; s["tasks"][tid].pop("pid", None); save_state(s)
+        print("  agent LIVE (tmux window cc:%s) — press o in cc tui to switch to it, Ctrl-B 0 to return"
+              % win if ok else "  WARNING: tmux spawn failed (tmux installed?)")
     jira = proj.get("jira")
     if getattr(args, "jira", None):
         s = load_state(); s["tasks"][tid]["jira"] = args.jira; save_state(s)
@@ -443,37 +443,55 @@ def _changed(wt):
     lines = [l for l in out.splitlines() if l[3:].strip().strip('"') and not _cc_artifact(l[3:].strip().strip('"'))]
     return "\n".join(lines).strip()
 
-def tmux_alive(name):
-    return bool(name) and subprocess.run(["tmux", "has-session", "-t", name],
-                                         capture_output=True).returncode == 0
+CC_TMUX = "cc"   # the single tmux session that hosts cc tui (window "tui") + task windows
 
-def tmux_pane(name):
-    return subprocess.run(["tmux", "capture-pane", "-p", "-t", name],
+def tmux_ok():
+    return bool(shutil.which("tmux"))
+
+def ensure_cc_session():
+    if not tmux_ok():
+        return False
+    if subprocess.run(["tmux", "has-session", "-t", CC_TMUX], capture_output=True).returncode != 0:
+        subprocess.run(["tmux", "new-session", "-d", "-s", CC_TMUX, "-n", "tui"], capture_output=True)
+    return True
+
+def tmux_alive(win):
+    """A task WINDOW exists in the cc session."""
+    if not win or not tmux_ok():
+        return False
+    out = subprocess.run(["tmux", "list-windows", "-t", CC_TMUX, "-F", "#{window_name}"],
+                         capture_output=True, text=True).stdout
+    return win in out.split()
+
+def tmux_pane(win):
+    return subprocess.run(["tmux", "capture-pane", "-p", "-t", "%s:%s" % (CC_TMUX, win)],
                           capture_output=True, text=True).stdout
 
-def tmux_busy(name):
-    # Claude shows "esc to interrupt" while a turn is running; idle = input box only
-    return "esc to interrupt" in tmux_pane(name).lower()
+def tmux_busy(win):
+    return "esc to interrupt" in tmux_pane(win).lower()
 
-def spawn_tmux_agent(name, cwd, promptfile, mode="auto"):
-    """Start a LIVE interactive claude in a detached tmux session, auto-accepting the
-    one-time trust dialog. Returns True on success."""
-    if not shutil.which("tmux"):
+def tmux_kill(win):
+    subprocess.run(["tmux", "kill-window", "-t", "%s:%s" % (CC_TMUX, win)], capture_output=True)
+
+def spawn_tmux_agent(win, cwd, promptfile, mode="auto"):
+    """Start a LIVE interactive claude as a WINDOW in the cc session (auto-accept trust).
+    Returns True on success."""
+    if not ensure_cc_session():
         return False
-    subprocess.run(["tmux", "kill-session", "-t", name], capture_output=True)
+    tmux_kill(win)
     inner = "claude --permission-mode %s \"$(cat %s)\"" % (mode, shlex.quote(str(promptfile)))
-    if subprocess.run(["tmux", "new-session", "-d", "-s", name, "-c", cwd, "bash", "-lc", inner],
+    if subprocess.run(["tmux", "new-window", "-t", CC_TMUX, "-d", "-n", win, "-c", cwd, "bash", "-lc", inner],
                       capture_output=True).returncode != 0:
         return False
     for _ in range(40):                      # ~16s: wait for & answer "trust this folder"
         time.sleep(0.4)
-        pane = tmux_pane(name).lower()
+        pane = tmux_pane(win).lower()
         if "trust this folder" in pane or "trust the files" in pane:
-            subprocess.run(["tmux", "send-keys", "-t", name, "1", "Enter"], capture_output=True)
+            subprocess.run(["tmux", "send-keys", "-t", "%s:%s" % (CC_TMUX, win), "1", "Enter"], capture_output=True)
             break
         if "auto mode on" in pane or "esc to interrupt" in pane:
             break
-        if not tmux_alive(name):
+        if not tmux_alive(win):
             return False
     return True
 
@@ -650,9 +668,8 @@ def cmd_task_abort(args):
             if run(["git", "push", "origin", "--delete", epic_branch], cwd=rp, check=False).returncode == 0:
                 print("[%s] deleted remote epic branch %s" % (r, epic_branch))
     # local cleanup
-    sess = t.get("tmux")
-    if sess:
-        subprocess.run(["tmux", "kill-session", "-t", sess], capture_output=True)
+    if t.get("tmux"):
+        tmux_kill(t["tmux"])
     task_dir = Path(next(iter(t["worktrees"].values()))).parent if t.get("worktrees") else None
     for r in t["repos"]:
         rp = proj["repos"].get(r, {}).get("path")
@@ -674,9 +691,8 @@ def cmd_task_done(args):
     problems = [("%s has uncommitted changes" % r) for r in t["repos"] if _changed(t["worktrees"][r])]
     if problems and not args.force:
         die("refusing cleanup:\n  - " + "\n  - ".join(problems) + "\n(use --force to override)")
-    sess = t.get("tmux")
-    if sess:
-        subprocess.run(["tmux", "kill-session", "-t", sess], capture_output=True)
+    if t.get("tmux"):
+        tmux_kill(t["tmux"])
     task_dir = Path(next(iter(t["worktrees"].values()))).parent
     for r in t["repos"]:
         rp = proj["repos"].get(r, {}).get("path")

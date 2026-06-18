@@ -249,44 +249,22 @@ class NewTaskScreen(ModalScreen):
         self.dismiss({"epic": self.epic, "title": title, "prompt": prompt, "jira": self._jira_key})
 
 
-def open_in_terminal(workdir, shell_cmd):
-    """Open a NEW terminal tab/window running shell_cmd in workdir (keeps the TUI alive)."""
-    full = "cd %s && %s" % (shlex.quote(workdir), shell_cmd)
-    esc = full.replace("\\", "\\\\").replace('"', '\\"')
-    term = os.environ.get("TERM_PROGRAM", "")
-    if term == "iTerm.app":
-        subprocess.Popen(["osascript",
-            "-e", 'tell application "iTerm"',
-            "-e", 'tell current window to create tab with default profile',
-            "-e", 'tell current session of current window to write text "%s"' % esc,
-            "-e", 'end tell'])
-    else:
-        subprocess.Popen(["osascript",
-            "-e", 'tell application "Terminal" to do script "%s"' % esc,
-            "-e", 'tell application "Terminal" to activate'])
+def in_tmux():
+    return bool(os.environ.get("TMUX"))
 
+def tmux_select(win):
+    subprocess.run(["tmux", "select-window", "-t", "%s:%s" % (cc.CC_TMUX, win)], capture_output=True)
 
-CMUX_BIN = "/Applications/cmux.app/Contents/Resources/bin/cmux"
-
-
-def open_cmux(name, cwd, cmd):
-    """Open the command as a NEW TAB (surface) in the CURRENT cmux workspace, then send it.
-    Falls back to a new Terminal.app tab if cmux socket isn't reachable / ref can't be parsed."""
-    cm = shutil.which("cmux") or (CMUX_BIN if os.path.exists(CMUX_BIN) else None)
-    if cm:
-        r = subprocess.run([cm, "new-surface", "--type", "terminal", "--focus", "true"],
-                           capture_output=True, text=True)
-        ref = None
-        if r.returncode == 0:
-            m = re.search(r"surface:\d+|[0-9a-fA-F]{8}-[0-9a-fA-F-]{27,}", (r.stdout or "") + (r.stderr or ""))
-            ref = m.group(0) if m else None
-        if ref:
-            subprocess.run([cm, "send", "--surface", ref, "--",
-                            "cd %s && %s\n" % (shlex.quote(cwd), cmd)], capture_output=True, text=True)
-            subprocess.run([cm, "rename-tab", "--surface", ref, name], capture_output=True, text=True)
-            return ref
-    open_in_terminal(cwd, cmd)
-    return "terminal"
+def tmux_window(win, cwd, cmd):
+    """Create/recreate a tmux WINDOW in the cc session running cmd, then select it.
+    cc tui runs inside the cc session, so select switches the screen in place."""
+    if not cc.ensure_cc_session():
+        return False
+    cc.tmux_kill(win)
+    subprocess.run(["tmux", "new-window", "-t", cc.CC_TMUX, "-n", win, "-c", cwd, "bash", "-lc", cmd],
+                   capture_output=True)
+    tmux_select(win)
+    return True
 
 
 
@@ -462,10 +440,15 @@ class ChatScreen(ModalScreen):
         pw = t.get("dir") or t["worktrees"][t["primary"]]
         if not os.path.isdir(pw):
             self.app.notify("worktree missing", severity="error"); return
-        sid = t.get("claude_session", {}).get(t["primary"]) or cc.resolve_session(pw)
-        chat = ("claude --resume %s --permission-mode auto" % sid) if sid else "claude --permission-mode auto"
-        open_cmux("%s chat" % self.tid, pw, chat)
-        self.app.notify("ответ: открыл интерактивный чат в новой вкладке")
+        win = t.get("tmux")
+        if win and cc.tmux_alive(win):
+            tmux_select(win)
+        else:
+            sid = t.get("claude_session", {}).get(t["primary"]) or cc.resolve_session(pw)
+            chat = ("claude --resume %s --permission-mode auto" % sid) if sid else "claude --permission-mode auto"
+            tmux_window(win or re.sub(r"[^A-Za-z0-9_-]", "-", self.tid), pw, chat)
+        self.dismiss(None)
+        self.app.notify("→ %s (Ctrl-B 0 / Ctrl-B w — назад в cc tui)" % self.tid)
 
 
 class AddProjectScreen(ModalScreen):
@@ -1335,21 +1318,17 @@ class CCApp(App):
         if not os.path.isdir(cwd):
             self.notify("worktree missing — recreate the task", severity="error"); return
         self._mark_seen(tid)
-        name = t.get("tmux")
-        if name and cc.tmux_alive(name):
-            clients = subprocess.run(["tmux", "list-clients", "-F", "#{client_name}"],
-                                     capture_output=True, text=True).stdout.split()
-            if clients:
-                # one tmux tab already open -> switch its session in place (no new tab)
-                subprocess.run(["tmux", "switch-client", "-c", clients[0], "-t", name], capture_output=True)
-                self.notify("сессия %s — переключил cc-tmux вкладку (без новой), глянь её" % tid)
-            else:
-                open_cmux("cc sessions", cwd, "tmux attach -t %s" % name)
-                self.notify("открыл cc-сессии (tmux); дальше o переключает эту же вкладку")
+        if not in_tmux():
+            self.notify("запусти cc через `cc tui` (он откроет tmux) — тогда o переключает экран", severity="error"); return
+        win = t.get("tmux")
+        if win and cc.tmux_alive(win):
+            tmux_select(win)
+            self.notify("→ %s (Ctrl-B 0 / Ctrl-B w — назад в cc tui)" % tid)
         else:
-            _, chat = self._chat_cmd(t)                # session ended -> resume transcript
-            open_cmux("%s chat" % tid, cwd, chat)
-            self.notify("сессия %s завершена — открыл resume" % tid)
+            sid = (t.get("claude_session") or {}).get(t["primary"]) or cc.resolve_session(cwd)
+            chat = "claude --resume %s --permission-mode auto" % sid if sid else "claude --permission-mode auto"
+            tmux_window(win or re.sub(r"[^A-Za-z0-9_-]", "-", tid), cwd, chat)
+            self.notify("→ возобновил %s (Ctrl-B 0 назад)" % tid)
 
     def action_epic_chat(self):
         ekey = self._current_epic()
@@ -1365,9 +1344,11 @@ class CCApp(App):
         repos = e.get("repos") or list(proj.get("repos", {}).keys())
         adds = " ".join("--add-dir %s" % shlex.quote(proj["repos"][r]["path"])
                         for r in repos if proj.get("repos", {}).get(r, {}).get("path"))
+        if not in_tmux():
+            self.notify("запусти cc через `cc tui` (tmux) для чата эпика", severity="error"); return
         cmd = "claude --permission-mode auto %s" % adds
-        where = open_cmux("%s release" % ekey, edir, cmd)
-        self.notify("чат эпика %s открыт (%s) — релиз/координация" % (ekey, where))
+        tmux_window("epic-" + re.sub(r"[^A-Za-z0-9_-]", "-", ekey), edir, cmd)
+        self.notify("→ чат эпика %s (релиз/координация; Ctrl-B 0 назад)" % ekey)
 
     def action_cursor(self):
         tid = self._cur_task()
