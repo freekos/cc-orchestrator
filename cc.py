@@ -680,8 +680,11 @@ def cmd_epic_mr(args):
         push_epic_branch(rp, key)
         out = run(glab_cmd, cwd=rp, check=False)
         url = mr_url(out, ri["remote"], key, rp)
+        e.setdefault("mrs", {})[r] = url
         print("[%s] epic MR -> %s" % (r, url))
-    if not found:
+    if found:
+        save_state(s)
+    else:
         print("(no epic branch '%s' in any repo yet - create a task first)" % key)
 
 
@@ -696,6 +699,30 @@ def cmd_epic_memory(args):
     s = load_state()
     e = s["epics"].get(args.key) or die("unknown epic '%s'" % args.key)
     print(e.get("memory", "") or "(empty — `cc epic note %s \"...\"`)" % args.key)
+
+
+def cmd_epic_mrs(args):
+    s = load_state()
+    e = s["epics"].get(args.key) or die("unknown epic '%s'" % args.key)
+    proj = s["projects"][e["project"]]
+    key = e.get("branch", args.key)
+    states = {}
+    any_url = 0
+    for r, ri in proj["repos"].items():
+        if not (have_ref(ri["path"], key) or have_ref(ri["path"], "origin/" + key)):
+            continue
+        url, state = mr_info(ri["remote"], key, ri["path"])
+        if url:
+            e.setdefault("mrs", {})[r] = url
+            states[r] = state
+            any_url += 1
+            print("[%s] %s  (%s)" % (r, url, state))
+        else:
+            print("[%s] эпик-ветка есть, MR пока нет (M чтобы создать)" % r)
+    e["mr_state"] = states
+    save_state(s)
+    if not any_url:
+        print("(MR ветки эпика ещё нет — нажми M / cc epic mr %s)" % args.key)
 
 
 def cmd_epic_set(args):
@@ -913,6 +940,7 @@ def build_parser():
     a.set_defaults(fn=cmd_epic_add)
     a = ep.add_parser("ls"); a.add_argument("project", nargs="?"); a.set_defaults(fn=cmd_epic_ls)
     a = ep.add_parser("mr"); a.add_argument("key"); a.add_argument("--dry-run", action="store_true"); a.set_defaults(fn=cmd_epic_mr)
+    a = ep.add_parser("mrs"); a.add_argument("key"); a.set_defaults(fn=cmd_epic_mrs)
     a = ep.add_parser("set"); a.add_argument("key"); a.add_argument("--summary"); a.add_argument("--repos"); a.set_defaults(fn=cmd_epic_set)
     a = ep.add_parser("note"); a.add_argument("key"); a.add_argument("text"); a.set_defaults(fn=cmd_epic_note)
     a = ep.add_parser("memory"); a.add_argument("key"); a.set_defaults(fn=cmd_epic_memory)

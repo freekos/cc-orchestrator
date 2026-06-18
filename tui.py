@@ -744,12 +744,23 @@ class CCApp(App):
             mode = e.get("mode") or ("targets" if e.get("targets") else "epic_branch")
             L = ["[b]epic %s[/b]  %s   [%s]" % (data["id"], e.get("summary", ""), mode), ""]
             if mode == "epic_branch":
-                L += ["tasks -> branch '%s' -> MR to master/main" % data["id"]]
+                L += ["ветка эпика: [b]%s[/b]  →  MR в master/main" % data["id"]]
             else:
                 L += ["routing:"]
                 for r, b in e.get("targets", {}).items():
                     L.append("  %s -> %s" % (r, b))
-            L += ["", "[dim]n=new task   m/M=epic MR (dry/real)[/dim]"]
+            mrs = e.get("mrs", {}) or {}
+            mst = e.get("mr_state", {}) or {}
+            if mrs:
+                L += ["", "MR ветки эпика (→ master):"]
+                for r, url in mrs.items():
+                    i = len(self._detail_urls)
+                    self._detail_urls.append(url)
+                    st = mst.get(r, "")
+                    L.append("  [@click=app.open_url_idx(%d)][u]%s[/u][/]  %s" % (i, r, "(%s)" % st if st else ""))
+            else:
+                L += ["", "[dim]MR ветки эпика ещё нет[/dim]"]
+            L += ["", "[dim]n=задача  M=создать MR эпик→master  m=dry  g=обновить ссылки[/dim]"]
             d.update("\n".join(L))
         elif data["type"] == "project":
             p = s["projects"][data["id"]]
@@ -954,12 +965,17 @@ class CCApp(App):
         self._mr(False)
 
     def action_mrs(self):
-        tid = self._cur_task()
-        if not tid:
-            return
-        self.push_screen(OutputScreen("MR links: %s" % tid,
-                         [sys.executable, "-u", ENGINE, "task", "mrs", tid]),
-                         lambda _: self.build_tree())
+        data = self.current()
+        if data and data["type"] == "epic":
+            self.push_screen(OutputScreen("Epic MR links: %s" % data["id"],
+                             [sys.executable, "-u", ENGINE, "epic", "mrs", data["id"]]),
+                             lambda _: self.build_tree())
+        elif data and data["type"] == "task":
+            self.push_screen(OutputScreen("MR links: %s" % data["id"],
+                             [sys.executable, "-u", ENGINE, "task", "mrs", data["id"]]),
+                             lambda _: self.build_tree())
+        else:
+            self.notify("выбери задачу или эпик")
 
     def action_cleanup(self):
         tid = self._cur_task()
