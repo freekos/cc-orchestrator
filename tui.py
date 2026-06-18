@@ -239,7 +239,18 @@ class ChatScreen(ModalScreen):
     #chatcontent { padding: 0 1; }
     """
     BINDINGS = [Binding("escape", "close", "Close"), Binding("q", "close", "Close"),
-                Binding("i", "reply", "Reply (new tab)")]
+                Binding("i", "reply", "Reply (new tab)"), Binding("o", "open_links", "Открыть ссылки")]
+
+    def action_open_links(self):
+        urls = []
+        if self._file and self._file.exists():
+            urls = re.findall(r"https?://[^\s)\]\"']+", self._file.read_text(errors="replace"))
+        urls = list(dict.fromkeys(urls))
+        if not urls:
+            self.app.notify("ссылок в переписке нет"); return
+        for u in urls:
+            subprocess.Popen(["open", u])
+        self.app.notify("открыл %d ссылок" % len(urls))
 
     def __init__(self, tid):
         super().__init__()
@@ -385,12 +396,25 @@ class OutputScreen(ModalScreen):
     #obox { width: 90%; height: 85%; border: thick $accent; background: $surface; }
     #ocontent { padding: 0 1; }
     """
-    BINDINGS = [Binding("escape", "close", "Close"), Binding("q", "close", "Close")]
+    BINDINGS = [Binding("escape", "close", "Close"), Binding("q", "close", "Close"),
+                Binding("o", "open_links", "Открыть ссылки")]
 
     def __init__(self, title, argv):
         super().__init__()
         self._title = title
         self._argv = argv
+        self._lines = []
+
+    def action_open_links(self):
+        urls = []
+        for ln in self._lines:
+            urls += re.findall(r"https?://[^\s)\]\"']+", ln)
+        urls = list(dict.fromkeys(urls))
+        if not urls:
+            self.app.notify("ссылок в выводе нет"); return
+        for u in urls:
+            subprocess.Popen(["open", u])
+        self.app.notify("открыл %d ссылок в браузере" % len(urls))
 
     def compose(self) -> ComposeResult:
         with VerticalScroll(id="obox"):
@@ -535,7 +559,7 @@ class ProjectJiraScreen(ModalScreen):
         with Vertical(id="dlg"):
             yield Label("Jira для проекта '%s'" % self.project)
             yield Label("[dim]нет токена? кликни ссылку (или кнопку) — откроется в браузере:[/dim]")
-            yield Static("[@click=open_token][u]https://id.atlassian.com/manage-profile/security/api-tokens[/u][/]")
+            yield Static("[@click=screen.open_token][u]https://id.atlassian.com/manage-profile/security/api-tokens[/u][/]")
             yield Input(value=j.get("site", ""), placeholder="site (you.atlassian.net)", id="jsite")
             yield Input(value=j.get("email", ""), placeholder="email", id="jemail")
             yield Input(placeholder=("token: ••• (введи чтобы изменить)" if j.get("token") else "API-token (вставь сюда)"),
