@@ -1300,12 +1300,13 @@ class CCApp(App):
         if not tid:
             return
         subprocess.run([sys.executable, ENGINE, "task", "open", tid], capture_output=True)
-        ws = Path.home() / ".cc" / "workspaces" / ("%s.code-workspace" % tid)
-        if shutil.which("cursor") and ws.exists():
-            subprocess.Popen(["cursor", str(ws)])
-            self.notify("Cursor opened for %s" % tid)
+        t = self.state()["tasks"].get(tid, {})
+        folder = t.get("dir")
+        if shutil.which("cursor") and folder and os.path.isdir(folder):
+            subprocess.Popen(["cursor", folder])
+            self.notify("Cursor открыт (папка задачи) для %s" % tid)
         else:
-            self.notify("cursor CLI or workspace missing", severity="error")
+            self.notify("cursor CLI или папка задачи отсутствует", severity="error")
 
     def action_diff(self):
         tid = self._cur_task()

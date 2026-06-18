@@ -475,27 +475,32 @@ def cmd_task_open(args):
     s = load_state()
     t = s["tasks"].get(args.task) or die("unknown task '%s'" % args.task)
     proj = s["projects"][s["epics"][t["epic"]]["project"]]
-    WS_DIR.mkdir(parents=True, exist_ok=True)
     proj_name = s["epics"][t["epic"]]["project"]
-    ws = WS_DIR / ("%s.code-workspace" % args.task)
-    folders = [{"path": t["worktrees"][r]} for r in t["repos"]]
-    # repos with a known dev command -> embed Cursor/VS Code tasks so "Run Task" starts them all
+    task_dir = t.get("dir") or str(Path(next(iter(t["worktrees"].values()))).parent)
     runnable = [(r, proj["repos"].get(r, {}).get("run")) for r in t["repos"]]
     runnable = [(r, rc) for r, rc in runnable if rc]
-    ws_obj = {"folders": folders, "settings": {"window.title": "cc:%s" % args.task}}
+    # open the task FOLDER directly (repos are subfolders, like Codebase/work/invictus);
+    # keep Run Task + sane settings via .vscode/ inside the folder (no .code-workspace)
+    vs = Path(task_dir) / ".vscode"
+    vs.mkdir(parents=True, exist_ok=True)
+    (vs / "settings.json").write_text(json.dumps({
+        "window.title": "cc:%s" % args.task,
+        "git.repositoryScanMaxDepth": 2,
+        "search.exclude": {"**/node_modules": True},
+        "files.watcherExclude": {"**/node_modules/**": True},
+    }, indent=2))
     if runnable:
         tasks = [{
             "label": "dev: %s" % r, "type": "shell", "command": rc,
-            "options": {"cwd": t["worktrees"][r]},
+            "options": {"cwd": "${workspaceFolder}/%s" % r},
             "isBackground": True, "problemMatcher": [],
             "presentation": {"panel": "dedicated", "group": "ccdev", "reveal": "always"},
         } for r, rc in runnable]
         tasks.append({"label": "cc: dev all", "dependsOrder": "parallel",
                       "dependsOn": ["dev: %s" % r for r, _ in runnable], "problemMatcher": []})
-        ws_obj["tasks"] = {"version": "2.0.0", "tasks": tasks}
-    ws.write_text(json.dumps(ws_obj, indent=2))
-    print("Cursor multi-root workspace written: %s" % ws)
-    print("  open:   cursor '%s'" % ws)
+        (vs / "tasks.json").write_text(json.dumps({"version": "2.0.0", "tasks": tasks}, indent=2))
+    print("Cursor folder: %s" % task_dir)
+    print("  open:   cursor '%s'" % task_dir)
     sid = t.get("claude_session", {}).get(t["primary"])
     if not sid:
         sid = resolve_session(t["worktrees"][t["primary"]])
