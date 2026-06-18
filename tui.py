@@ -749,6 +749,57 @@ class EpicManageScreen(ModalScreen):
         self.dismiss(None)
 
 
+class EpicTargetsScreen(ModalScreen):
+    """Set per-repo integration branches (targets) for an epic — repo -> branch."""
+    CSS = """
+    EpicTargetsScreen { align: center middle; }
+    #tbox { width: 94; max-width: 95%; height: auto; max-height: 90%;
+            border: thick $accent; background: $surface; padding: 1 2; }
+    #tbox > Label { margin-bottom: 1; }
+    #tbody { height: auto; max-height: 22; overflow-y: auto; margin-bottom: 1; }
+    .trow { height: 3; }
+    .trow Label { width: 24; content-align: left middle; }
+    .trow Input { width: 1fr; }
+    #trbtn { height: auto; align-horizontal: right; }
+    #trbtn Button { margin: 0 0 0 2; min-width: 14; }
+    """
+    BINDINGS = [Binding("escape", "cancel", "Cancel")]
+
+    def __init__(self, epic):
+        super().__init__()
+        self.epic = epic
+        self.project = cc.load_state()["epics"][epic]["project"]
+
+    def compose(self):
+        s = cc.load_state()
+        targets = s["epics"][self.epic].get("targets") or {}
+        with Vertical(id="tbox"):
+            yield Label("[b]Интеграционные ветки[/b] эпика %s — repo → ветка (пусто = не в скоупе эпика)" % self.epic)
+            yield Label("[dim]задачи будут базироваться на этих ветках и MR-иться в них; пусто → дефолтная ветка репо[/dim]")
+            with VerticalScroll(id="tbody"):
+                for r in s["projects"][self.project]["repos"]:
+                    with Horizontal(classes="trow"):
+                        yield Label(r)
+                        yield Input(value=targets.get(r, ""), placeholder="напр. loyalty/integration", id="tgt__" + r)
+            with Horizontal(id="trbtn"):
+                yield Button("Cancel", id="cancel")
+                yield Button("Save", variant="success", id="ok")
+
+    def on_button_pressed(self, event):
+        if event.button.id == "cancel":
+            self.dismiss(None); return
+        s = cc.load_state()
+        pairs = {}
+        for r in s["projects"][self.project]["repos"]:
+            v = self.query_one("#tgt__" + r, Input).value.strip()
+            if v:
+                pairs[r] = v
+        self.dismiss({"targets": pairs})
+
+    def action_cancel(self):
+        self.dismiss(None)
+
+
 class CCApp(App):
     CSS = """
     Tree { width: 44%; border-right: solid $accent; }
@@ -758,6 +809,7 @@ class CCApp(App):
         Binding("a", "add_project", "+Project"),
         Binding("R", "reviewers", "Reviewers"),
         Binding("D", "deploys", "Deploys"),
+        Binding("T", "targets", "Targets"),
         Binding("j", "project_jira", "Jira/settings"),
         Binding("e", "new_epic", "+Epic"),
         Binding("n", "new_task", "+Task"),
@@ -1040,6 +1092,29 @@ class CCApp(App):
         if not proj:
             self.notify("select a project node first", severity="error"); return
         self.push_screen(ReviewersScreen(proj))
+
+    def action_targets(self):
+        ekey = self._current_epic()
+        if not ekey:
+            self.notify("выбери эпик (или его задачу)", severity="error"); return
+        self.push_screen(EpicTargetsScreen(ekey), lambda res: self._targets_set(ekey, res))
+
+    def _targets_set(self, ekey, res):
+        if not res:
+            return
+        pairs = res["targets"]
+        args = [sys.executable, ENGINE, "epic", "set", ekey]
+        if pairs:
+            args += ["--repos", ",".join(pairs)]
+            for r, b in pairs.items():
+                args += ["--target", "%s=%s" % (r, b)]
+        subprocess.run(args, capture_output=True)
+        self.build_tree()
+        ntasks = sum(1 for t in self.state()["tasks"].values() if t.get("epic") == ekey)
+        if ntasks:
+            self.notify("targets сохранены. %d задач(а) на старой базе — пересоздай (x→abort + заново активируй стаб)" % ntasks)
+        else:
+            self.notify("targets для %s сохранены" % ekey)
 
     def action_deploys(self):
         proj = self._current_project()
