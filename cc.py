@@ -329,7 +329,9 @@ def cmd_task_add(args):
     task_dir = str(Path(worktrees[primary]).parent)   # cctui/<epic>/<slug>/ — repos are its subfolders
     repo_map = "\n".join("- %s -> %s" % (r, worktrees[r]) for r in order)
     epic_mem = (epic.get("memory") or "").strip()
-    claude_md = ("# Epic %s: %s\n\n%s\n\n## Repos for THIS task (branch %s) — edit ONLY inside these subfolders:\n%s\n\n"
+    claude_md = ("# Epic %s: %s\n\n%s\n\n## Repos available for THIS task (branch %s):\n%s\n\n"
+                 "Touch ONLY the repos actually relevant to this task; leave the rest UNCHANGED "
+                 "(cc opens a Merge Request only for repos you modify, so untouched repos cost nothing). "
                  "Do NOT run git — cc handles branches/commits/MRs.\n") % (
                  args.epic, epic.get("summary", ""), epic_mem or "(no epic notes yet)", branch, repo_map)
     try:

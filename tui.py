@@ -111,22 +111,15 @@ class NewTaskScreen(ModalScreen):
     #row { height: auto; }
     """
 
-    def __init__(self, epic, default_repos, scoped):
+    def __init__(self, epic):
         super().__init__()
         self.epic = epic
-        self.default_repos = default_repos
-        self.scoped = scoped
 
     def compose(self) -> ComposeResult:
         with Vertical(id="dlg"):
             yield Label("New task under epic '%s'" % self.epic)
+            yield Label("[dim]идёт по всем репо проекта; MR создаётся только там, где агент что-то менял[/dim]")
             yield Input(placeholder="title (e.g. fix badge)", id="title")
-            n = len([x for x in self.default_repos.split(",") if x])
-            if self.scoped:
-                yield Label("[dim]repos (from epic; trim if needed):[/dim]")
-            else:
-                yield Label("[yellow]\u26a0 эпик не заскоуплен -> задача пойдёт на ВСЕ %d репо. Сузь список ниже, или заскоупь эпик (esc, e).[/yellow]" % n)
-            yield Input(value=self.default_repos, id="trepos")
             yield Label("prompt:")
             yield TextArea(id="prompt")
             with Horizontal(id="row"):
@@ -142,8 +135,7 @@ class NewTaskScreen(ModalScreen):
         if not title or not prompt:
             self.app.notify("title and prompt are required", severity="error")
             return
-        self.dismiss({"epic": self.epic, "title": title, "prompt": prompt,
-                      "repos": self.query_one("#trepos", Input).value.strip()})
+        self.dismiss({"epic": self.epic, "title": title, "prompt": prompt})
 
 
 def open_in_terminal(workdir, shell_cmd):
@@ -831,19 +823,12 @@ class CCApp(App):
         if not epic:
             self.notify("select an epic (or its task) first", severity="error")
             return
-        s = self.state()
-        e = s["epics"][epic]
-        proj = s["projects"][e["project"]]
-        scoped = bool(e.get("repos"))
-        repos = e.get("repos") or list(proj["repos"].keys())
-        self.push_screen(NewTaskScreen(epic, ",".join(repos), scoped), self._task_created)
+        self.push_screen(NewTaskScreen(epic), self._task_created)
 
     def _task_created(self, res):
         if not res:
             return
         args = [sys.executable, ENGINE, "task", "add", res["epic"], res["title"], "--prompt", res["prompt"]]
-        if res.get("repos"):
-            args += ["--repos", res["repos"]]
         self.notify("launching task '%s' ..." % res["title"])
         r = subprocess.run(args, capture_output=True, text=True)
         if r.returncode != 0:
