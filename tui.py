@@ -16,6 +16,19 @@ ENGINE = str(Path(__file__).parent / "cc.py")
 GLYPH = {"running": "~", "review": "*", "mr": "MR", "merged": "v", "idle": ".", "done": "v"}
 
 
+def fast_status(t):
+    """Cheap status for rendering (no git subprocesses). pid/flags only; the git-based
+    review/idle refinement is computed off-thread and cached in t['status']."""
+    pid = t.get("pid")
+    if pid and cc.pid_alive(pid):
+        return "running"
+    if t.get("merged"):
+        return "merged"
+    if t.get("mrs"):
+        return "mr"
+    return t.get("status") or "review"
+
+
 class NewEpicScreen(ModalScreen):
     CSS = """
     NewEpicScreen { align: center middle; }
@@ -868,8 +881,10 @@ class CCApp(App):
         self.title = "cc — multi-repo orchestrator"
         self._detail_urls = []
         self.build_tree()
-        self.set_interval(5.0, self.refresh_glyphs)
+        self.set_interval(5.0, self.refresh_glyphs)      # cheap (fast_status, no git)
         self.set_interval(90.0, self.kick_sync)
+        self.set_interval(12.0, self.kick_statuses)      # full status (git) off the main thread
+        self.kick_statuses()
 
     def action_open_url_idx(self, idx):
         try:
@@ -881,6 +896,22 @@ class CCApp(App):
 
     def kick_sync(self):
         self.run_worker(self._sync_mrs, thread=True, exclusive=True, group="mrsync")
+
+    def kick_statuses(self):
+        self.run_worker(self._refresh_statuses, thread=True, exclusive=True, group="statuses")
+
+    def _refresh_statuses(self):
+        # compute the git-heavy task_status off the main thread, cache into t['status']
+        snap = cc.load_state()
+        new = {tid: cc.task_status(t) for tid, t in snap["tasks"].items()}
+        if all(snap["tasks"][tid].get("status") == st for tid, st in new.items()):
+            return
+        def apply(s):
+            for tid, st in new.items():
+                if tid in s["tasks"]:
+                    s["tasks"][tid]["status"] = st
+        cc.mutate(apply)
+        self.call_from_thread(self.build_tree)
 
     def _sync_mrs(self):
         s = cc.load_state()
@@ -911,7 +942,7 @@ class CCApp(App):
         if dim:  # archived epic: flat dim list, no folders
             for tid, t in s["tasks"].items():
                 if t["epic"] == ekey:
-                    en.add_leaf("[dim]%s %s[/dim]" % (GLYPH.get(cc.task_status(t), "?"), t["title"]),
+                    en.add_leaf("[dim]%s %s[/dim]" % (GLYPH.get(fast_status(t), "?"), t["title"]),
                                 data={"type": "task", "id": tid})
             return en
         # group live tasks by state into collapsible folders
@@ -922,7 +953,7 @@ class CCApp(App):
                 continue
             if t.get("jira"):
                 linked.add(t["jira"])
-            st = cc.task_status(t)
+            st = fast_status(t)
             buckets[st if st in buckets else "review"].append((tid, t))
         for key, title, exp in self.TASK_GROUPS:
             items = buckets[key]
@@ -932,7 +963,7 @@ class CCApp(App):
                         data={"type": "taskgroup", "epic": ekey, "state": key}, expand=exp)
             for tid, t in items:
                 badge = "💬 " if (key == "review" and self._unseen(t)) else ""
-                gn.add_leaf("%s%s %s" % (badge, GLYPH.get(cc.task_status(t), "?"), t["title"]),
+                gn.add_leaf("%s%s %s" % (badge, GLYPH.get(fast_status(t), "?"), t["title"]),
                             data={"type": "task", "id": tid})
         # Jira child issues not yet started -> collapsed folder
         stubs = [c for c in e.get("jira_children", []) if c["key"] not in linked]
@@ -994,7 +1025,7 @@ class CCApp(App):
             return
         if data["type"] == "task" and data["id"] in s["tasks"]:
             t = s["tasks"][data["id"]]
-            L = ["[b]%s[/b]   status=%s" % (t["title"], cc.task_status(t)),
+            L = ["[b]%s[/b]   status=%s" % (t["title"], fast_status(t)),
                  "epic: %s    branch: %s" % (t["epic"], t["branch"]), "", "repos -> target:"]
             for r in t["repos"]:
                 L.append("  %s -> %s" % (r, t["base"][r]))
@@ -1072,7 +1103,7 @@ class CCApp(App):
                 dd = ch.data
                 if dd and dd.get("type") == "task" and dd["id"] in s["tasks"]:
                     t = s["tasks"][dd["id"]]
-                    ch.set_label("%s %s" % (GLYPH.get(cc.task_status(t), "?"), t["title"]))
+                    ch.set_label("%s %s" % (GLYPH.get(fast_status(t), "?"), t["title"]))
                 walk(ch)
         walk(self.query_one("#tree", Tree).root)
 
