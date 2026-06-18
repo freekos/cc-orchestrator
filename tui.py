@@ -534,8 +534,8 @@ class ProjectJiraScreen(ModalScreen):
         j = s["projects"][self.project].get("jira", {})
         with Vertical(id="dlg"):
             yield Label("Jira для проекта '%s'" % self.project)
-            yield Label("[dim]нет токена? создай тут (кнопка ниже открывает в браузере):[/dim]")
-            yield Static("https://id.atlassian.com/manage-profile/security/api-tokens")
+            yield Label("[dim]нет токена? кликни ссылку (или кнопку) — откроется в браузере:[/dim]")
+            yield Static("[@click=open_token][u]https://id.atlassian.com/manage-profile/security/api-tokens[/u][/]")
             yield Input(value=j.get("site", ""), placeholder="site (you.atlassian.net)", id="jsite")
             yield Input(value=j.get("email", ""), placeholder="email", id="jemail")
             yield Input(placeholder=("token: ••• (введи чтобы изменить)" if j.get("token") else "API-token (вставь сюда)"),
@@ -579,6 +579,10 @@ class ProjectJiraScreen(ModalScreen):
         else:
             self.app.notify("Jira сохранена для %s" % self.project)
         self.dismiss(True)
+
+    def action_open_token(self):
+        subprocess.Popen(["open", "https://id.atlassian.com/manage-profile/security/api-tokens"])
+        self.app.notify("открыл страницу создания токена в браузере")
 
     def action_close(self):
         self.dismiss(None)
