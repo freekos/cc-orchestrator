@@ -19,8 +19,12 @@ GLYPH = {"running": "~", "review": "*", "mr": "MR", "merged": "v", "idle": ".", 
 class NewEpicScreen(ModalScreen):
     CSS = """
     NewEpicScreen { align: center middle; }
-    #dlg { width: 78; height: auto; border: thick $accent; background: $surface; padding: 1 2; }
-    #dlg Input { margin-bottom: 1; }
+    #dlg { width: 82; max-width: 92%; height: auto; max-height: 90%; overflow-y: auto;
+           border: thick $accent; background: $surface; padding: 1 2; }
+    #dlg Label { margin-bottom: 1; }
+    #dlg Input { margin-bottom: 1; width: 1fr; }
+    #dlg Select { margin-bottom: 1; width: 1fr; }
+    #dlg Button { margin: 0 2 1 0; }
     #row { height: auto; }
     """
 
@@ -105,9 +109,13 @@ class NewEpicScreen(ModalScreen):
 class NewTaskScreen(ModalScreen):
     CSS = """
     NewTaskScreen { align: center middle; }
-    #dlg { width: 90; height: auto; border: thick $accent; background: $surface; padding: 1 2; }
-    #dlg Input { margin-bottom: 1; }
-    #dlg TextArea { height: 7; margin-bottom: 1; }
+    #dlg { width: 90; max-width: 92%; height: auto; max-height: 90%; overflow-y: auto;
+           border: thick $accent; background: $surface; padding: 1 2; }
+    #dlg Label { margin-bottom: 1; }
+    #dlg Input { margin-bottom: 1; width: 1fr; }
+    #dlg Select { margin-bottom: 1; width: 1fr; }
+    #dlg Button { margin: 0 2 1 0; }
+    #dlg TextArea { height: 8; margin-bottom: 1; }
     #row { height: auto; }
     """
 
@@ -359,8 +367,12 @@ class ChatScreen(ModalScreen):
 class AddProjectScreen(ModalScreen):
     CSS = """
     AddProjectScreen { align: center middle; }
-    #dlg { width: 86; height: auto; border: thick $accent; background: $surface; padding: 1 2; }
-    #dlg Input { margin-bottom: 1; }
+    #dlg { width: 86; max-width: 92%; height: auto; max-height: 90%; overflow-y: auto;
+           border: thick $accent; background: $surface; padding: 1 2; }
+    #dlg Label { margin-bottom: 1; }
+    #dlg Input { margin-bottom: 1; width: 1fr; }
+    #dlg Select { margin-bottom: 1; width: 1fr; }
+    #dlg Button { margin: 0 2 1 0; }
     #row { height: auto; }
     """
 
@@ -543,8 +555,12 @@ class ReviewersScreen(ModalScreen):
 class ProjectJiraScreen(ModalScreen):
     CSS = """
     ProjectJiraScreen { align: center middle; }
-    #dlg { width: 80; height: auto; border: thick $accent; background: $surface; padding: 1 2; }
-    #dlg Input { margin-bottom: 1; }
+    #dlg { width: 84; max-width: 92%; height: auto; max-height: 90%; overflow-y: auto;
+           border: thick $accent; background: $surface; padding: 1 2; }
+    #dlg Label { margin-bottom: 1; }
+    #dlg Input { margin-bottom: 1; width: 1fr; }
+    #dlg Select { margin-bottom: 1; width: 1fr; }
+    #dlg Button { margin: 0 2 1 0; }
     #row { height: auto; }
     """
     BINDINGS = [Binding("escape", "close", "Close")]
