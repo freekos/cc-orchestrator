@@ -362,7 +362,10 @@ def cmd_task_add(args):
         s = load_state(); s["tasks"][tid]["pid"] = proc.pid; save_state(s)
         print("  agent running in BACKGROUND (cwd=%s, pid=%s). log: %s" % (task_dir, proc.pid, log))
     jira = proj.get("jira")
-    if jira and jira.get("token"):
+    if getattr(args, "jira", None):
+        s = load_state(); s["tasks"][tid]["jira"] = args.jira; save_state(s)
+        print("  linked to existing jira issue: %s" % args.jira)
+    elif jira and jira.get("token"):
         try:
             jk = jira_create_task(jira, args.epic, args.title, args.prompt)
             if jk:
@@ -830,6 +833,24 @@ def jira_my_epics(cfg, query=""):
         out.append({"key": i["key"], "summary": f.get("summary", ""), "status": st})
     return out
 
+def jira_epic_children(cfg, epic_key, query=""):
+    """Issues whose parent is this epic (team-managed projects). [{key,summary,status}]."""
+    jql = "parent = %s" % epic_key
+    if query:
+        jql += ' AND summary ~ "%s"' % query.replace('"', "")
+    jql += " ORDER BY created DESC"
+    body = {"jql": jql, "maxResults": 50, "fields": ["summary", "status"]}
+    try:
+        data = jira_req(cfg, "POST", "/search/jql", body)
+    except Exception:
+        data = jira_req(cfg, "POST", "/search", body)
+    out = []
+    for i in data.get("issues", []):
+        f = i.get("fields", {})
+        out.append({"key": i["key"], "summary": f.get("summary", ""),
+                    "status": (f.get("status") or {}).get("name", "")})
+    return out
+
 def jira_adf(text):
     return {"type": "doc", "version": 1,
             "content": [{"type": "paragraph", "content": [{"type": "text", "text": (text or " ")[:4000]}]}]}
@@ -1040,6 +1061,7 @@ def build_parser():
     a = tk.add_parser("add"); a.add_argument("epic"); a.add_argument("title")
     a.add_argument("--prompt", required=True); a.add_argument("--repos")
     a.add_argument("--sync", action="store_true"); a.add_argument("--no-setup", action="store_true")
+    a.add_argument("--jira", help="link to an EXISTING Jira issue key instead of creating one")
     a.set_defaults(fn=cmd_task_add)
     a = tk.add_parser("ls"); a.add_argument("epic", nargs="?"); a.set_defaults(fn=cmd_task_ls)
     a = tk.add_parser("diff"); a.add_argument("task"); a.set_defaults(fn=cmd_task_diff)

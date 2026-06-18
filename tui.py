@@ -109,41 +109,100 @@ class NewEpicScreen(ModalScreen):
 class NewTaskScreen(ModalScreen):
     CSS = """
     NewTaskScreen { align: center middle; }
-    #dlg { width: 90; max-width: 92%; height: auto; max-height: 90%; overflow-y: auto;
+    #dlg { width: 92; max-width: 94%; height: auto; max-height: 92%;
            border: thick $accent; background: $surface; padding: 1 2; }
     #dlg Label { margin-bottom: 1; }
-    #dlg Input { margin-bottom: 1; width: 1fr; }
-    #dlg Select { margin-bottom: 1; width: 1fr; }
-    #dlg Button { margin: 0 2 1 0; }
-    #dlg TextArea { height: 8; margin-bottom: 1; }
-    #row { height: auto; }
+    #body { height: auto; max-height: 28; overflow-y: auto; margin-bottom: 1; }
+    #body Input { margin-bottom: 1; width: 1fr; }
+    #body Select { margin-bottom: 1; width: 1fr; }
+    #body TextArea { height: 7; margin-bottom: 0; width: 1fr; }
+    #jira { height: auto; border: round $primary 50%; padding: 0 1; margin-bottom: 1; }
+    #jira Label { margin-bottom: 0; }
+    #jira Button { margin: 0; width: 1fr; }
+    #row { height: auto; align-horizontal: right; }
+    #row Button { margin: 0 0 0 2; min-width: 14; }
     """
 
-    def __init__(self, epic):
+    def __init__(self, epic, jira_on=False, project=None):
         super().__init__()
         self.epic = epic
+        self.jira_on = jira_on
+        self.project = project
+        self._children = []
+        self._jira_key = None
 
     def compose(self) -> ComposeResult:
         with Vertical(id="dlg"):
-            yield Label("New task under epic '%s'" % self.epic)
-            yield Label("[dim]идёт по всем репо проекта; MR создаётся только там, где агент что-то менял[/dim]")
-            yield Input(placeholder="title (e.g. fix badge)", id="title")
-            yield Label("prompt:")
-            yield TextArea(id="prompt")
+            yield Label("[b]Новая задача[/b] под эпиком '%s'" % self.epic)
+            yield Label("[dim]идёт по всем репо проекта; MR — только где агент менял[/dim]")
+            with VerticalScroll(id="body"):
+                if self.jira_on:
+                    with Vertical(id="jira"):
+                        yield Label("[dim]из Jira (опц.): выбери задачу эпика → привяжем + засидим title/prompt[/dim]")
+                        yield Input(placeholder="поиск задач эпика (Enter)", id="tsearch")
+                        yield Select([("(загрузка задач эпика…)", "_")], id="tpick", allow_blank=True)
+                        yield Button("Подставить из Jira", id="seed")
+                yield Label("title:")
+                yield Input(placeholder="напр. fix loyalty badge", id="title")
+                yield Label("prompt (что сделать агенту):")
+                yield TextArea(id="prompt")
             with Horizontal(id="row"):
-                yield Button("Launch", variant="success", id="ok")
                 yield Button("Cancel", id="cancel")
+                yield Button("Launch", variant="success", id="ok")
+
+    def on_mount(self):
+        if self.jira_on:
+            self.run_worker(lambda: self._load_children(""), thread=True)
+
+    def _load_children(self, query):
+        try:
+            cfg = cc.load_state()["projects"][self.project].get("jira", {})
+            self._children = cc.jira_epic_children(cfg, self.epic, query)
+        except Exception:
+            self._children = []
+        self.app.call_from_thread(self._fill)
+
+    def _fill(self):
+        try:
+            sel = self.query_one("#tpick", Select)
+            opts = [("%s — %s [%s]" % (c["key"], c["summary"][:46], c["status"]), c["key"])
+                    for c in self._children]
+            sel.set_options(opts or [("(задач у эпика не найдено)", "_")])
+        except Exception:
+            pass
+
+    def on_input_submitted(self, event):
+        if self.jira_on and event.input.id == "tsearch":
+            self.run_worker(lambda: self._load_children(event.value.strip()), thread=True)
+
+    def _seed(self, key):
+        cfg = cc.load_state()["projects"][self.project].get("jira", {})
+        summary = next((c["summary"] for c in self._children if c["key"] == key), key)
+        try:
+            desc = cc.jira_epic_description(cfg, key)
+        except Exception:
+            desc = ""
+        def fill():
+            self.query_one("#title", Input).value = summary
+            seed = ("%s\n\n%s" % (summary, desc)).strip() if desc else summary
+            self.query_one("#prompt", TextArea).load_text(seed)
+            self.app.notify("подставлено из %s — отредактируй prompt и Launch" % key)
+        self.app.call_from_thread(fill)
 
     def on_button_pressed(self, event: Button.Pressed):
         if event.button.id == "cancel":
-            self.dismiss(None)
-            return
+            self.dismiss(None); return
+        if event.button.id == "seed":
+            val = self.query_one("#tpick", Select).value
+            if val in (None, "_", Select.BLANK):
+                self.app.notify("выбери задачу из списка", severity="error"); return
+            self._jira_key = str(val)
+            self.run_worker(lambda: self._seed(str(val)), thread=True); return
         title = self.query_one("#title", Input).value.strip()
         prompt = self.query_one("#prompt", TextArea).text.strip()
         if not title or not prompt:
-            self.app.notify("title and prompt are required", severity="error")
-            return
-        self.dismiss({"epic": self.epic, "title": title, "prompt": prompt})
+            self.app.notify("title and prompt are required", severity="error"); return
+        self.dismiss({"epic": self.epic, "title": title, "prompt": prompt, "jira": self._jira_key})
 
 
 def open_in_terminal(workdir, shell_cmd):
@@ -952,12 +1011,17 @@ class CCApp(App):
         if not epic:
             self.notify("select an epic (or its task) first", severity="error")
             return
-        self.push_screen(NewTaskScreen(epic), self._task_created)
+        s = self.state()
+        proj = s["epics"].get(epic, {}).get("project")
+        jira_on = bool(s["projects"].get(proj, {}).get("jira", {}).get("token"))
+        self.push_screen(NewTaskScreen(epic, jira_on=jira_on, project=proj), self._task_created)
 
     def _task_created(self, res):
         if not res:
             return
         args = [sys.executable, ENGINE, "task", "add", res["epic"], res["title"], "--prompt", res["prompt"]]
+        if res.get("jira"):
+            args += ["--jira", res["jira"]]
         self.notify("launching task '%s' ..." % res["title"])
         r = subprocess.run(args, capture_output=True, text=True)
         if r.returncode != 0:
