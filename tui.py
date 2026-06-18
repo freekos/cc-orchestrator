@@ -1045,7 +1045,9 @@ class CCApp(App):
             for r, ri in p["repos"].items():
                 dep = ri.get("deploy", {})
                 if dep.get("kind") == "eas":
-                    env = "[cyan]EAS[/cyan] staging:%s" % dep.get("channels", {}).get("staging", "?")
+                    ch = dep.get("channels", {})
+                    env = "[cyan]EAS[/cyan] staging:[green]%s[/green]  prod:[yellow]%s[/yellow]" % (
+                        ch.get("staging", "?"), ch.get("production", "?"))
                 elif dep.get("kind") == "gitlab":
                     e = dep.get("envs", {})
                     def _sr(k):

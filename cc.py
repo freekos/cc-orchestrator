@@ -1164,16 +1164,17 @@ def repo_deploy_state(ri):
     rp = ri.get("path", "")
     if os.path.exists(os.path.join(rp, "eas.json")) or os.path.exists(os.path.join(rp, "app.config.js")):
         st = {"kind": "eas", "channels": {}}
-        r = run(["eas", "update:list", "--branch", "staging", "--limit", "1", "--json", "--non-interactive"],
-                cwd=rp, check=False)
-        try:
-            out = r.stdout or ""
-            data = json.loads(out[out.index("{"):])  # eas prints an upgrade banner before the JSON
-            cp = data.get("currentPage") or []
-            msg = (cp[0].get("message") or "").strip().strip('"') if cp else ""
-            st["channels"]["staging"] = msg[:48] or "(no updates)"
-        except Exception:
-            st["channels"]["staging"] = "?"
+        for br in ("staging", "production"):
+            r = run(["eas", "update:list", "--branch", br, "--limit", "1", "--json", "--non-interactive"],
+                    cwd=rp, check=False)
+            try:
+                out = r.stdout or ""
+                data = json.loads(out[out.index("{"):])  # eas prints an upgrade banner before the JSON
+                cp = data.get("currentPage") or []
+                msg = (cp[0].get("message") or "").strip().strip('"') if cp else ""
+                st["channels"][br] = msg[:42] or "(no updates)"
+            except Exception:
+                st["channels"][br] = "?"
         return st
     enc = (ri.get("remote") or "").replace("/", "%2F")
     st = {"kind": "gitlab", "envs": {}}
@@ -1203,7 +1204,8 @@ def cmd_deploys(args):
         st = repo_deploy_state(ri)
         ri["deploy"] = st
         if st["kind"] == "eas":
-            print("%-22s EAS: staging=%s" % (r, st["channels"].get("staging", "?")))
+            ch = st.get("channels", {})
+            print("%-22s EAS staging=%s | prod=%s" % (r, ch.get("staging", "?"), ch.get("production", "?")))
         else:
             envs = st.get("envs", {})
             parts = ["%s=%s@%s" % (e, envs[e]["ref"], envs[e]["sha"]) for e in ("dev", "stage", "prod") if e in envs]
