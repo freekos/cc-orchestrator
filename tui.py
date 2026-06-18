@@ -583,17 +583,12 @@ class ProjectJiraScreen(ModalScreen):
             yield Input(value=j.get("project_key", ""), placeholder="project key (e.g. IK)", id="jkey")
             with Horizontal(id="row"):
                 yield Button("Сохранить", variant="success", id="save")
-                yield Button("Открыть страницу токена", id="tokenpage")
                 yield Button("Выключить Jira", id="off")
                 yield Button("Cancel", id="cancel")
 
     def on_button_pressed(self, event: Button.Pressed):
         if event.button.id == "cancel":
             self.dismiss(None); return
-        if event.button.id == "tokenpage":
-            subprocess.Popen(["open", "https://id.atlassian.com/manage-profile/security/api-tokens"])
-            self.app.notify("открыл страницу создания токена в браузере")
-            return
         if event.button.id == "off":
             subprocess.run([sys.executable, ENGINE, "project", "jira", self.project, "--off"], capture_output=True)
             self.app.notify("Jira выключена для %s" % self.project); self.dismiss(True); return
