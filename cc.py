@@ -404,7 +404,7 @@ def cmd_task_add(args):
     if getattr(args, "jira", None):
         s = load_state(); s["tasks"][tid]["jira"] = args.jira; save_state(s)
         print("  linked to existing jira issue: %s" % args.jira)
-    elif jira and jira.get("token"):
+    elif jira and jira.get("token") and not getattr(args, "no_jira", False):
         try:
             jk = jira_create_task(jira, args.epic, args.title, args.prompt)
             if jk:
@@ -1241,6 +1241,7 @@ def build_parser():
     a.add_argument("--prompt", required=True); a.add_argument("--repos")
     a.add_argument("--sync", action="store_true"); a.add_argument("--no-setup", action="store_true")
     a.add_argument("--jira", help="link to an EXISTING Jira issue key instead of creating one")
+    a.add_argument("--no-jira", action="store_true", help="do not create a Jira task")
     a.set_defaults(fn=cmd_task_add)
     a = tk.add_parser("ls"); a.add_argument("epic", nargs="?"); a.set_defaults(fn=cmd_task_ls)
     a = tk.add_parser("diff"); a.add_argument("task"); a.set_defaults(fn=cmd_task_diff)
