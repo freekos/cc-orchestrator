@@ -671,6 +671,49 @@ def mr_url(out, remote, branch, cwd):
     return find_mr(remote, branch, cwd) or "(MR exists — see `cc task mrs`)"
 
 
+def claude_text(cwd, prompt, timeout=120):
+    """Generate text via headless claude in cwd (loads that dir's CLAUDE.md). None on failure."""
+    if not shutil.which("claude"):
+        return None
+    try:
+        r = subprocess.run(["claude", "-p", "--permission-mode", "bypassPermissions", prompt],
+                           cwd=cwd, capture_output=True, text=True, timeout=timeout)
+        out = (r.stdout or "").strip()
+        return out or None
+    except Exception:
+        return None
+
+def gen_commit_msg(wt, fallback):
+    diff = git(["diff", "--cached"], cwd=wt, check=False).stdout or ""
+    if not diff.strip():
+        return fallback
+    prompt = ("Write ONE git commit message for the staged diff below, following this repo's "
+              "conventions in CLAUDE.md (if absent, use Conventional Commits: type(scope): subject). "
+              "Output ONLY the message: a subject line, optionally a blank line then a short body. "
+              "No backticks, no quotes, no preamble.\n\n=== staged diff ===\n" + diff[:12000])
+    msg = claude_text(wt, prompt)
+    return msg.strip() if msg else fallback
+
+def gen_mr_text(wt, cmp_ref, fallback_title, fallback_desc):
+    diff = git(["diff", cmp_ref + "..HEAD"], cwd=wt, check=False).stdout or ""
+    log = git(["log", "--oneline", cmp_ref + "..HEAD"], cwd=wt, check=False).stdout or ""
+    if not diff.strip():
+        return (fallback_title, fallback_desc)
+    prompt = ("Summarize this branch into a Merge Request, following the repo's CLAUDE.md conventions. "
+              "Output the MR title on the first line, then a line containing only '---', then the MR "
+              "description in markdown (what changed and why; concise, factual). No preamble.\n\n"
+              "=== commits ===\n" + log[:2000] + "\n\n=== diff ===\n" + diff[:14000])
+    out = claude_text(wt, prompt)
+    if not out:
+        return (fallback_title, fallback_desc)
+    if "---" in out:
+        a, b = out.split("---", 1)
+        title = (a.strip().splitlines()[0][:140] if a.strip() else fallback_title)
+        return (title, b.strip() or fallback_desc)
+    lines = out.strip().splitlines()
+    return (lines[0][:140], "\n".join(lines[1:]).strip() or fallback_desc)
+
+
 def cmd_task_mr(args):
     s = load_state()
     t = s["tasks"].get(args.task) or die("unknown task '%s'" % args.task)
@@ -702,11 +745,16 @@ def cmd_task_mr(args):
             print("[%s] pushing epic branch %s ..." % (r, target))
             push_epic_branch(proj["repos"][r]["path"], target)
         if _changed(wt):
-            print("[%s] commit (--no-verify) ..." % r)
             git(["add", "-A"], cwd=wt)
             git(["reset", "-q", "--", "node_modules", ".env", ".env.local", ".env.development",
                  ".env.example", ".cc-task.md"], cwd=wt, check=False)
-            git(["commit", "--no-verify", "-m", title], cwd=wt)
+            if getattr(args, "no_ai", False):
+                msg = title
+            else:
+                print("[%s] commit-сообщение через claude (CLAUDE.md репо) ..." % r)
+                msg = gen_commit_msg(wt, title)
+            git(["commit", "--no-verify", "-m", msg], cwd=wt)
+            print("[%s] commit: %s" % (r, (msg or title).splitlines()[0][:80]))
         print("[%s] push %s ..." % (r, branch))
         run(push, cwd=wt)
         existing = find_mr(ri["remote"], branch, wt)
@@ -715,13 +763,19 @@ def cmd_task_mr(args):
             print("[%s] MR уже есть -> запушены новые коммиты, обновлён: %s" % (r, existing))
             continue
         diffstat = run(["git", "diff", "--stat", cmp_ref + "..HEAD"], cwd=wt, check=False).stdout.strip()
-        desc = (t.get("prompt") or "").strip()
+        fb_desc = (t.get("prompt") or "").strip()
         if diffstat:
-            desc += "\n\n## Changes\n```\n" + diffstat + "\n```"
-        desc += "\n\n_MR by cc — epic %s_" % t["epic"]
+            fb_desc += "\n\n## Changes\n```\n" + diffstat + "\n```"
+        if getattr(args, "no_ai", False):
+            mr_title, mr_desc = title, fb_desc
+        else:
+            print("[%s] MR-текст через claude (CLAUDE.md репо) ..." % r)
+            ai_title, mr_desc = gen_mr_text(wt, cmp_ref, t["title"], fb_desc)
+            mr_title = "[%s] %s" % (t["epic"], ai_title)
+        mr_desc += "\n\n_MR by cc — epic %s_" % t["epic"]
         glab_cmd = ["glab", "mr", "create", "-R", ri["remote"],
                     "--source-branch", branch, "--target-branch", target,
-                    "--title", title, "--description", desc[:8000],
+                    "--title", mr_title, "--description", mr_desc[:8000],
                     "--label", t["epic"], "--yes"]
         if assignee:
             glab_cmd += ["--assignee", assignee]
@@ -1280,7 +1334,8 @@ def build_parser():
     a = tk.add_parser("diff"); a.add_argument("task"); a.set_defaults(fn=cmd_task_diff)
     a = tk.add_parser("open"); a.add_argument("task"); a.set_defaults(fn=cmd_task_open)
     a = tk.add_parser("done"); a.add_argument("task"); a.add_argument("--force", action="store_true"); a.set_defaults(fn=cmd_task_done)
-    a = tk.add_parser("mr"); a.add_argument("task"); a.add_argument("--dry-run", action="store_true"); a.set_defaults(fn=cmd_task_mr)
+    a = tk.add_parser("mr"); a.add_argument("task"); a.add_argument("--dry-run", action="store_true")
+    a.add_argument("--no-ai", action="store_true", help="static commit/MR text (skip claude generation)"); a.set_defaults(fn=cmd_task_mr)
     a = tk.add_parser("mrs"); a.add_argument("task"); a.set_defaults(fn=cmd_task_mrs)
     a = tk.add_parser("abort"); a.add_argument("task"); a.set_defaults(fn=cmd_task_abort)
     return p
