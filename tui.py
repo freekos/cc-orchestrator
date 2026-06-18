@@ -1048,8 +1048,14 @@ class CCApp(App):
                     env = "[cyan]EAS[/cyan] staging:%s" % dep.get("channels", {}).get("staging", "?")
                 elif dep.get("kind") == "gitlab":
                     e = dep.get("envs", {})
-                    env = "stage:[green]%s[/green] prod:[yellow]%s[/yellow]" % (
-                        e.get("stage", {}).get("ref", "—"), e.get("prod", {}).get("ref", "—"))
+                    def _sr(k):
+                        v = (e.get(k) or {}).get("ref")
+                        if not v:
+                            return "[dim]—[/dim]"
+                        m = re.match(r"refs/merge-requests/(\d+)/head", v)
+                        return "!" + m.group(1) if m else v
+                    env = "dev:%s  stage:[green]%s[/green]  prod:[yellow]%s[/yellow]" % (
+                        _sr("dev"), _sr("stage"), _sr("prod"))
                 else:
                     env = "[dim](D = загрузить деплои)[/dim]"
                 L.append("  %-20s %s  ·  rev:%s" % (r, env, ri.get("reviewer") or "—"))
