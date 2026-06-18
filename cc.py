@@ -387,7 +387,7 @@ def cmd_task_add(args):
                    + "\n\n[cc] This task spans the repo worktrees below (branch %s). "
                      "Edit files ONLY inside these subfolders (your cwd is their parent):\n%s"
                      "\nDo NOT run git; cc handles branches/commits/MRs." % (branch, repo_map))
-    claude_cmd = ["claude", "--permission-mode", "acceptEdits", "-p", full_prompt]
+    claude_cmd = ["claude", "--permission-mode", "bypassPermissions", "-p", full_prompt]
     STATE_DIR.mkdir(parents=True, exist_ok=True)
     if args.sync:
         print("  running agent (sync) ...")
@@ -494,7 +494,7 @@ def cmd_task_open(args):
             t.setdefault("claude_session", {})[t["primary"]] = sid
             save_state(s)
     if sid:
-        print("  follow-up:  (cd '%s' && claude --resume %s)" % (t["worktrees"][t["primary"]], sid))
+        print("  follow-up:  (cd '%s' && claude --resume %s --permission-mode bypassPermissions)" % (t["worktrees"][t["primary"]], sid))
     if t.get("log"):
         print("  watch log:  tail -f '%s'" % t["log"])
     if runnable:
