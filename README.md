@@ -42,12 +42,16 @@ cc project add ~/code/myproject                   # detect single/multi repo
 cc epic add myproject FEAT-1 --summary "Feature"  # epic (its own branch -> master)
 cc epic add myproject FEAT-1 --target web=develop --target api=release   # or route per repo
 cc task add FEAT-1 "add X" --prompt "..."         # background agent edits the repos
+cc task add FEAT-1 "add X" --prompt "..." --jira ABC-12   # link to an EXISTING Jira issue (no new one)
 cc task diff t_add-x                              # combined diff across repos
 cc task open t_add-x                              # Cursor multi-root + run hints
 cc task mrs t_add-x                               # MR links + state (open/merged)
 cc task mr  t_add-x --dry-run                     # preview the MR commands
 cc task mr  t_add-x                               # push + one MR per repo to the epic target
-cc task done t_add-x                              # safety-checked worktree cleanup
+cc task done t_add-x                              # safety-checked worktree cleanup (refuses if dirty)
+cc task abort t_add-x                             # remote teardown: close MRs + delete remote branches + local cleanup
+
+cc epic mr  FEAT-1                                # MR the epic branch -> master/main (after its tasks merged in)
 
 cc deploys myproject                              # what's live per repo: dev/stage/prod ref@sha (EAS for Expo repos)
 cc epic archive FEAT-1                            # archive: hide under "Архив" + push epic & its tasks to Done in Jira
@@ -75,14 +79,33 @@ Each epic carries notes (`cc epic note <KEY> "invariant/decision/gotcha"`,
 `cc epic memory <KEY>` to view) that `cc` injects into every task agent of that
 epic via a `CLAUDE.md` — so agents stay consistent and don't repeat mistakes.
 
+### Epics & archive
+Live epics sit at the top of each project; **archived** ones collapse under a
+**"🗄 Архив (N)"** node at the bottom (collapsed by default, dimmed). Archive — TUI
+`x` on an epic, or `cc epic archive <KEY>` — hides the epic locally **and** pushes it
+plus all its tasks to Done in Jira. `cc epic unarchive <KEY>` brings it back (Jira
+status is not reopened). Deleting epics is intentionally not in the UI; archive is the
+lifecycle end-state.
+
 ## Jira (optional)
 ```bash
 cc project jira myproject --site you.atlassian.net --email you@x.com --token <API_TOKEN> --project-key ABC
-cc jira epics myproject                # your epics
+cc jira epics myproject                # list project epics (most-recent first)
 ```
-With Jira on, the epic modal lists **your** epics to pick (with search) or
-creates a new one in Jira; tasks you fire are created as Jira tasks under the
-epic. The token is stored in `~/.cc/state.json` (chmod 600) and never logged.
+With Jira on:
+- **Epic modal** lists all the project's epics (most-recent first, with status) to
+  pick from; the search box narrows by name across **all** project epics. Or create a
+  brand-new epic in Jira from the same modal.
+- **Task modal** (under a Jira epic) can pull the epic's **child issues from Jira**:
+  pick one and *Подставить из Jira* seeds the title from its summary and the prompt
+  from its description, and links the cc task to that issue — no duplicate. Or just
+  type a title + prompt and `cc` creates a new Jira task under the epic.
+- **Archiving an epic** moves the epic issue **and all its child tasks** to Done in
+  Jira (matched by status category, so it works with "Готово"/"Done"; already-done
+  issues are skipped, each transition is reported).
+
+The token is stored in `~/.cc/state.json` (chmod 600) and is never logged or written
+to any repo/MR.
 
 ## How it works
 - **Isolation = git worktrees** (like Conductor) — shared `.git`, separate
