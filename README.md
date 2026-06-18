@@ -44,7 +44,7 @@ cc epic add myproject FEAT-1 --target web=develop --target api=release   # or ro
 cc task add FEAT-1 "add X" --prompt "..."         # background agent edits the repos
 cc task add FEAT-1 "add X" --prompt "..." --jira ABC-12   # link to an EXISTING Jira issue (no new one)
 cc task diff t_add-x                              # combined diff across repos
-cc task open t_add-x                              # Cursor multi-root + run hints
+cc task open t_add-x                              # Cursor multi-root workspace + embedded "Run Task" to start every repo
 cc task mrs t_add-x                               # MR links + state (open/merged)
 cc task mr  t_add-x --dry-run                     # preview the MR commands
 cc task mr  t_add-x                               # push + one MR per repo to the epic target
@@ -68,6 +68,15 @@ cc epic unarchive FEAT-1                          # bring it back to the live li
 The project panel shows, per repo, what's currently deployed — `stage:<ref> prod:<ref>`
 pulled from the GitLab Environments/Deployments API (the real "what's live", not just the
 latest pipeline), or the latest EAS staging update for Expo/mobile repos. `D` refreshes.
+
+### Running the repos in Cursor
+`c` (or `cc task open <task>`) writes a multi-root `.code-workspace` and opens it in
+Cursor — every repo of the task is a folder. It also **embeds VS Code/Cursor tasks**, so
+to start all the dev servers at once: **Cmd+Shift+P → "Tasks: Run Task" → "cc: dev all"**
+— each repo launches in its own dedicated terminal panel (using the repo's detected `run`
+command). Prefer one terminal? `cc task open` also prints a ready-to-paste
+`npx concurrently …` one-liner. Set/fix a repo's command with
+`cc repo set <proj> <repo> --run "npm run dev"`.
 
 ### Reviewers / assignee
 Assignee defaults to your `glab` user. Set a reviewer per repo from the GitLab

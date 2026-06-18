@@ -428,9 +428,24 @@ def cmd_task_open(args):
     t = s["tasks"].get(args.task) or die("unknown task '%s'" % args.task)
     proj = s["projects"][s["epics"][t["epic"]]["project"]]
     WS_DIR.mkdir(parents=True, exist_ok=True)
+    proj_name = s["epics"][t["epic"]]["project"]
     ws = WS_DIR / ("%s.code-workspace" % args.task)
     folders = [{"path": t["worktrees"][r]} for r in t["repos"]]
-    ws.write_text(json.dumps({"folders": folders, "settings": {"window.title": "cc:%s" % args.task}}, indent=2))
+    # repos with a known dev command -> embed Cursor/VS Code tasks so "Run Task" starts them all
+    runnable = [(r, proj["repos"].get(r, {}).get("run")) for r in t["repos"]]
+    runnable = [(r, rc) for r, rc in runnable if rc]
+    ws_obj = {"folders": folders, "settings": {"window.title": "cc:%s" % args.task}}
+    if runnable:
+        tasks = [{
+            "label": "dev: %s" % r, "type": "shell", "command": rc,
+            "options": {"cwd": t["worktrees"][r]},
+            "isBackground": True, "problemMatcher": [],
+            "presentation": {"panel": "dedicated", "group": "ccdev", "reveal": "always"},
+        } for r, rc in runnable]
+        tasks.append({"label": "cc: dev all", "dependsOrder": "parallel",
+                      "dependsOn": ["dev: %s" % r for r, _ in runnable], "problemMatcher": []})
+        ws_obj["tasks"] = {"version": "2.0.0", "tasks": tasks}
+    ws.write_text(json.dumps(ws_obj, indent=2))
     print("Cursor multi-root workspace written: %s" % ws)
     print("  open:   cursor '%s'" % ws)
     sid = t.get("claude_session", {}).get(t["primary"])
@@ -443,9 +458,20 @@ def cmd_task_open(args):
         print("  follow-up:  (cd '%s' && claude --resume %s)" % (t["worktrees"][t["primary"]], sid))
     if t.get("log"):
         print("  watch log:  tail -f '%s'" % t["log"])
-    print("  run locally:")
+    if runnable:
+        print("  run ALL repos in Cursor:  Cmd+Shift+P -> 'Tasks: Run Task' -> 'cc: dev all'")
+        print("    (each repo starts in its own dedicated terminal panel)")
+        oneliner = "npx -y concurrently --names %s --prefix-colors auto %s" % (
+            ",".join(r for r, _ in runnable),
+            " ".join(shlex.quote("cd %s && %s" % (shlex.quote(t["worktrees"][r]), rc))
+                     for r, rc in runnable))
+        print("  or paste into one Cursor terminal:")
+        print("    %s" % oneliner)
+    print("  run locally (per repo):")
     for r in t["repos"]:
-        rc = proj["repos"].get(r, {}).get("run") or "<dev cmd>"
+        rc = proj["repos"].get(r, {}).get("run")
+        if not rc:
+            rc = "<no dev cmd — set: cc repo set %s %s --run ...>" % (proj_name, r)
         print("    [%s]  cd '%s' && %s" % (r, t["worktrees"][r], rc))
 
 def cmd_task_ls(args):
