@@ -404,6 +404,16 @@ def cmd_task_add(args):
     if getattr(args, "jira", None):
         s = load_state(); s["tasks"][tid]["jira"] = args.jira; save_state(s)
         print("  linked to existing jira issue: %s" % args.jira)
+        jira = proj.get("jira")
+        if jira and jira.get("token") and args.epic.split("-")[0] == jira.get("project_key"):
+            try:
+                cur = jira_issue_parent(jira, args.jira)
+                if cur != args.epic:
+                    jira_set_parent(jira, args.jira, args.epic)
+                    print("  jira: %s -> moved under epic %s (was %s)" % (
+                        args.jira, args.epic, cur or "no parent"))
+            except Exception as ex:
+                print("  (jira reparent failed: %s)" % str(ex)[:80])
     elif jira and jira.get("token") and not getattr(args, "no_jira", False):
         try:
             jk = jira_create_task(jira, args.epic, args.title, args.prompt)
@@ -1079,6 +1089,37 @@ def jira_epic_children(cfg, epic_key, query="", limit=50):
                     "status": st.get("name", ""),
                     "done": ((st.get("statusCategory") or {}).get("key") or "").lower() == "done"})
     return out
+
+def jira_orphan_tasks(cfg, query="", limit=30):
+    """Project tasks with NO parent epic (candidates to move under an epic). [{key,summary,status,done,orphan}]."""
+    jql = "project = %s AND issuetype != Epic AND parent is EMPTY" % cfg["project_key"]
+    if query:
+        jql += ' AND summary ~ "%s"' % query.replace('"', "")
+    jql += " ORDER BY created DESC"
+    body = {"jql": jql, "maxResults": limit, "fields": ["summary", "status"]}
+    try:
+        data = jira_req(cfg, "POST", "/search/jql", body)
+    except Exception:
+        data = jira_req(cfg, "POST", "/search", body)
+    out = []
+    for i in data.get("issues", []):
+        f = i.get("fields", {})
+        st = f.get("status") or {}
+        out.append({"key": i["key"], "summary": f.get("summary", ""),
+                    "status": st.get("name", ""),
+                    "done": ((st.get("statusCategory") or {}).get("key") or "").lower() == "done",
+                    "orphan": True})
+    return out
+
+def jira_issue_parent(cfg, key):
+    try:
+        f = jira_req(cfg, "GET", "/issue/%s?fields=parent" % key).get("fields", {})
+        return (f.get("parent") or {}).get("key")
+    except Exception:
+        return None
+
+def jira_set_parent(cfg, key, epic_key):
+    jira_req(cfg, "PUT", "/issue/%s" % key, {"fields": {"parent": {"key": epic_key}}})
 
 def jira_status_category(cfg, key):
     try:

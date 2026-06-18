@@ -162,7 +162,7 @@ class NewTaskScreen(ModalScreen):
             with VerticalScroll(id="body"):
                 if self.jira_on:
                     with Vertical(id="jira"):
-                        yield Label("[dim]из Jira (опц.): выбери задачу эпика → привяжем + засидим title/prompt[/dim]")
+                        yield Label("[dim]из Jira (опц.): задача эпика ИЛИ без эпика (перенесём под эпик) → привяжем + засидим[/dim]")
                         yield Input(placeholder="поиск задач эпика (Enter)", id="tsearch")
                         yield Select([("(загрузка задач эпика…)", "_")], id="tpick", allow_blank=True)
                         yield Button("Подставить из Jira", id="seed")
@@ -199,7 +199,10 @@ class NewTaskScreen(ModalScreen):
     def _load_children(self, query):
         try:
             cfg = cc.load_state()["projects"][self.project].get("jira", {})
-            self._children = cc.jira_epic_children(cfg, self.epic, query)
+            children = cc.jira_epic_children(cfg, self.epic, query)
+            seen = {c["key"] for c in children}
+            orphans = [o for o in cc.jira_orphan_tasks(cfg, query) if o["key"] not in seen]
+            self._children = children + orphans   # epic tasks first, then parentless ones
         except Exception:
             self._children = []
         self.app.call_from_thread(self._fill)
@@ -207,9 +210,11 @@ class NewTaskScreen(ModalScreen):
     def _fill(self):
         try:
             sel = self.query_one("#tpick", Select)
-            opts = [("%s — %s [%s]" % (c["key"], c["summary"][:46], c["status"]), c["key"])
-                    for c in self._children]
-            sel.set_options(opts or [("(задач у эпика не найдено)", "_")])
+            opts = []
+            for c in self._children:
+                tag = "  · БЕЗ ЭПИКА (перенесём)" if c.get("orphan") else ""
+                opts.append(("%s — %s [%s]%s" % (c["key"], c["summary"][:38], c["status"], tag), c["key"]))
+            sel.set_options(opts or [("(задач не найдено)", "_")])
         except Exception:
             pass
 
