@@ -583,7 +583,7 @@ class ProjectJiraScreen(ModalScreen):
             yield Input(value=j.get("project_key", ""), placeholder="project key (e.g. IK)", id="jkey")
             with Horizontal(id="row"):
                 yield Button("Сохранить", variant="success", id="save")
-                yield Button("Выключить Jira", id="off")
+                yield Button("Отвязать Jira", id="off")
                 yield Button("Cancel", id="cancel")
 
     def on_button_pressed(self, event: Button.Pressed):
