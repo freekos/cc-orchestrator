@@ -656,9 +656,18 @@ class CCApp(App):
 
     def on_mount(self):
         self.title = "cc — multi-repo orchestrator"
+        self._detail_urls = []
         self.build_tree()
         self.set_interval(5.0, self.refresh_glyphs)
         self.set_interval(90.0, self.kick_sync)
+
+    def action_open_url_idx(self, idx):
+        try:
+            url = self._detail_urls[int(idx)]
+            subprocess.Popen(["open", url])
+            self.notify("открыл %s" % url)
+        except Exception:
+            self.notify("ссылка недоступна", severity="error")
 
     def kick_sync(self):
         self.run_worker(self._sync_mrs, thread=True, exclusive=True, group="mrsync")
@@ -706,6 +715,7 @@ class CCApp(App):
 
     def show_detail(self, data):
         d = self.query_one("#detail", Static)
+        self._detail_urls = []
         if not data:
             d.update("")
             return
@@ -717,7 +727,10 @@ class CCApp(App):
             for r in t["repos"]:
                 L.append("  %s -> %s" % (r, t["base"][r]))
                 if t["mrs"].get(r):
-                    L.append("     MR: %s" % t["mrs"][r])
+                    url = t["mrs"][r]
+                    i = len(self._detail_urls)
+                    self._detail_urls.append(url)
+                    L.append("     [@click=app.open_url_idx(%d)][u]MR: %s[/u][/]" % (i, url))
             if t.get("merged"):
                 L += ["", "[bold green]✓ все MR влиты — x = очистить worktrees[/bold green]"]
             L += ["", "[b]changes:[/b]"]
