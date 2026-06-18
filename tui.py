@@ -1164,10 +1164,11 @@ class CCApp(App):
         return cwd, ("claude --resume %s" % sid if sid else "claude")
 
     def _mark_seen(self, tid):
-        s = cc.load_state()
-        if tid in s["tasks"]:
-            s["tasks"][tid]["seen_at"] = time.time()
-            cc.save_state(s)
+        now = time.time()
+        def _set(s):
+            if tid in s["tasks"]:
+                s["tasks"][tid]["seen_at"] = now
+        cc.mutate(_set)
 
     def action_view_chat(self):
         tid = self._cur_task()

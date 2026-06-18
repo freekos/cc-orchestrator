@@ -5,7 +5,8 @@ Model:  Project > Repos   and   Project > Epic > Task > RepoWork
 Rule:   the agent only EDITS files; cc owns ALL git (branch/commit/push/MR).
 State:  ~/.cc/state.json holds intent + pointers; git/jsonl hold the truth.
 """
-import argparse, base64, json, os, re, shlex, shutil, subprocess, sys, time, urllib.request
+import argparse, base64, fcntl, json, os, re, shlex, shutil, subprocess, sys, time, urllib.request
+from contextlib import contextmanager
 from pathlib import Path
 
 HOME = Path.home()
@@ -42,12 +43,41 @@ def load_state():
     return {"projects": {}, "epics": {}, "tasks": {}}
 
 def save_state(s):
+    """Atomic write (tmp + os.replace) so concurrent readers never see a torn file."""
     STATE_DIR.mkdir(parents=True, exist_ok=True)
-    STATE_FILE.write_text(json.dumps(s, indent=2, ensure_ascii=False))
+    tmp = STATE_FILE.with_name(STATE_FILE.name + ".tmp.%d" % os.getpid())
+    tmp.write_text(json.dumps(s, indent=2, ensure_ascii=False))
     try:
-        os.chmod(STATE_FILE, 0o600)   # may hold a Jira API token
+        os.chmod(tmp, 0o600)          # may hold a Jira API token
     except OSError:
         pass
+    os.replace(tmp, STATE_FILE)       # atomic on POSIX
+
+_LOCK_PATH = STATE_DIR / ".state.lock"
+
+@contextmanager
+def state_lock():
+    """Exclusive cross-process lock so load->modify->save can't lose updates.
+    Held only around mutations; reads stay lock-free (writes are atomic)."""
+    STATE_DIR.mkdir(parents=True, exist_ok=True)
+    f = open(_LOCK_PATH, "w")
+    try:
+        fcntl.flock(f.fileno(), fcntl.LOCK_EX)
+        yield
+    finally:
+        try:
+            fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+        except Exception:
+            pass
+        f.close()
+
+def mutate(fn):
+    """Run fn(state) under the lock against a FRESH read, then save. Returns fn's result."""
+    with state_lock():
+        s = load_state()
+        r = fn(s)
+        save_state(s)
+    return r
 
 # ----------------------------- helpers -----------------------------
 
@@ -1202,9 +1232,18 @@ def build_parser():
     a = tk.add_parser("abort"); a.add_argument("task"); a.set_defaults(fn=cmd_task_abort)
     return p
 
+# commands that only read state -> no lock; everything else mutates -> serialize
+_READONLY = {cmd_task_diff, cmd_task_ls, cmd_repo_ls, cmd_repo_members,
+             cmd_epic_ls, cmd_epic_memory, cmd_project_ls, cmd_jira_epics}
+
 def main(argv=None):
     args = build_parser().parse_args(argv)
-    args.fn(args)
+    fn = args.fn
+    if fn in _READONLY:
+        fn(args)
+    else:
+        with state_lock():
+            fn(args)
 
 if __name__ == "__main__":
     main()

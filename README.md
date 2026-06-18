@@ -135,7 +135,9 @@ to any repo/MR.
   (copied) and `node_modules` (symlinked) per worktree.
 - **Agent session** runs headless in the background (autonomous); `o` opens an
   interactive session (skills + pickers) to steer it.
-- State lives in `~/.cc/state.json`; git/MRs are the source of truth (statuses
-  are derived live: running / review / mr / merged).
+- State lives in `~/.cc/state.json`, written **atomically** (tmp + `os.replace`) under a
+  cross-process **file lock** so concurrent `cc` commands + the TUI never lose updates
+  (reads stay lock-free). git/MRs are the source of truth (statuses are derived live:
+  running / review / mr / merged).
 
 MIT licensed. Not affiliated with Anthropic, GitLab, or Atlassian.
