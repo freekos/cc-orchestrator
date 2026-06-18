@@ -1186,7 +1186,19 @@ def repo_deploy_state(ri):
             arr = json.loads(r.stdout)
             if isinstance(arr, list) and arr:
                 dp = arr[0].get("deployable") or {}
-                st["envs"][env] = {"ref": dp.get("ref", "?"),
+                ref = dp.get("ref", "?")
+                # a deployment from an MR pipeline has ref refs/merge-requests/N/head —
+                # resolve it to that MR's source branch (what's actually deployed)
+                m = re.match(r"refs/merge-requests/(\d+)/head", ref or "")
+                if m:
+                    mrr = run(["glab", "api", "projects/%s/merge_requests/%s" % (enc, m.group(1))], check=False)
+                    try:
+                        sb = json.loads(mrr.stdout).get("source_branch")
+                        if sb:
+                            ref = sb
+                    except Exception:
+                        pass
+                st["envs"][env] = {"ref": ref,
                                    "sha": ((dp.get("commit") or {}).get("short_id") or "")[:8],
                                    "at": (arr[0].get("created_at") or "")[:10]}
         except Exception:
