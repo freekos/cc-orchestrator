@@ -1136,14 +1136,14 @@ class CCApp(App):
     def _task_created(self, res):
         if not res:
             return
-        args = [sys.executable, ENGINE, "task", "add", res["epic"], res["title"], "--prompt", res["prompt"]]
+        # provisioning N worktrees + Jira + agent launch takes 10-30s; stream it in a
+        # worker (OutputScreen) so the TUI doesn't freeze and progress/errors are visible.
+        args = [sys.executable, "-u", ENGINE, "task", "add", res["epic"], res["title"],
+                "--prompt", res["prompt"]]
         if res.get("jira"):
             args += ["--jira", res["jira"]]
-        self.notify("launching task '%s' ..." % res["title"])
-        r = subprocess.run(args, capture_output=True, text=True)
-        if r.returncode != 0:
-            self.notify("task failed: %s" % (r.stderr.strip()[:120]), severity="error")
-        self.build_tree()
+        self.push_screen(OutputScreen("task: %s" % res["title"], args),
+                         lambda _: self.build_tree())
 
     # ---- task actions ----
     def _cur_task(self):
