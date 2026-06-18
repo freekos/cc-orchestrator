@@ -817,7 +817,9 @@ def jira_req(cfg, method, path, body=None):
     return json.loads(raw) if raw.strip() else {}
 
 def jira_my_epics(cfg, query=""):
-    jql = "project = %s AND issuetype = Epic AND assignee = currentUser()" % cfg["project_key"]
+    # all project epics, most-recently-updated first (assignee filter dropped: leads often
+    # aren't the assignee of the epics they pick up). Search narrows by summary.
+    jql = "project = %s AND issuetype = Epic" % cfg["project_key"]
     if query:
         jql += ' AND summary ~ "%s"' % query.replace('"', "")
     jql += " ORDER BY updated DESC"

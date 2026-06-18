@@ -19,13 +19,17 @@ GLYPH = {"running": "~", "review": "*", "mr": "MR", "merged": "v", "idle": ".", 
 class NewEpicScreen(ModalScreen):
     CSS = """
     NewEpicScreen { align: center middle; }
-    #dlg { width: 82; max-width: 92%; height: auto; max-height: 90%; overflow-y: auto;
+    #dlg { width: 88; max-width: 94%; height: auto; max-height: 92%;
            border: thick $accent; background: $surface; padding: 1 2; }
-    #dlg Label { margin-bottom: 1; }
-    #dlg Input { margin-bottom: 1; width: 1fr; }
-    #dlg Select { margin-bottom: 1; width: 1fr; }
-    #dlg Button { margin: 0 2 1 0; }
-    #row { height: auto; }
+    #dlg > Label { margin-bottom: 1; }
+    #body { height: auto; max-height: 26; overflow-y: auto; margin-bottom: 1; }
+    #body Label { margin-bottom: 0; }
+    #body Input { margin-bottom: 1; width: 1fr; }
+    #body Select { margin-bottom: 1; width: 1fr; }
+    #body Button { margin: 0 0 1 0; min-width: 18; }
+    .sep { margin: 1 0 0 0; text-align: center; color: $text-disabled; }
+    #row { height: auto; align-horizontal: right; }
+    #row Button { margin: 0 0 0 2; min-width: 14; }
     """
 
     def __init__(self, project, jira_on=False):
@@ -37,24 +41,28 @@ class NewEpicScreen(ModalScreen):
     def compose(self) -> ComposeResult:
         with Vertical(id="dlg"):
             if self.jira_on:
-                yield Label("Epic из Jira для '%s' — выбери свой эпик или создай новый" % self.project)
-                yield Input(placeholder="поиск по названию (Enter)", id="esearch")
-                yield Select([("(загрузка моих эпиков…)", "_")], id="epick", allow_blank=True)
-                with Horizontal(id="row"):
+                yield Label("[b]Epic из Jira[/b] для '%s'" % self.project)
+                with VerticalScroll(id="body"):
+                    yield Label("[dim]Взять существующий эпик (свежие сверху; поиск — по названию):[/dim]")
+                    yield Input(placeholder="поиск по названию — Enter (по всем эпикам проекта)", id="esearch")
+                    yield Select([("(загрузка эпиков проекта…)", "_")], id="epick", allow_blank=True)
                     yield Button("Взять выбранный", variant="success", id="use")
-                    yield Button("Cancel", id="cancel")
-                yield Label("— или создать новый эпик в Jira: —")
-                yield Input(placeholder="название нового эпика", id="enew")
-                yield Button("Создать в Jira", variant="primary", id="createnew")
-            else:
-                yield Label("New epic under project '%s'" % self.project)
-                yield Input(placeholder="key (e.g. IK-8631)", id="key")
-                yield Input(placeholder="summary", id="summary")
-                yield Input(placeholder="targets repo=branch,... (EMPTY = epic gets its own branch)", id="targets")
-                yield Input(placeholder="repos (optional, comma); empty = ALL", id="erepos")
+                    yield Static("──────────  или  ──────────", classes="sep")
+                    yield Label("[dim]Создать новый эпик в Jira:[/dim]")
+                    yield Input(placeholder="название нового эпика", id="enew")
+                    yield Button("Создать в Jira", variant="primary", id="createnew")
                 with Horizontal(id="row"):
-                    yield Button("Create", variant="success", id="ok")
                     yield Button("Cancel", id="cancel")
+            else:
+                yield Label("[b]Новый эпик[/b] в проекте '%s'" % self.project)
+                with VerticalScroll(id="body"):
+                    yield Input(placeholder="key (напр. IK-8631)", id="key")
+                    yield Input(placeholder="summary", id="summary")
+                    yield Input(placeholder="targets repo=branch,… (пусто = эпик получит свою ветку)", id="targets")
+                    yield Input(placeholder="repos через запятую; пусто = ВСЕ", id="erepos")
+                with Horizontal(id="row"):
+                    yield Button("Cancel", id="cancel")
+                    yield Button("Create", variant="success", id="ok")
 
     def on_mount(self):
         if self.jira_on:
@@ -72,8 +80,9 @@ class NewEpicScreen(ModalScreen):
     def _fill(self):
         try:
             sel = self.query_one("#epick", Select)
-            opts = [("%s — %s" % (e["key"], e["summary"]), e["key"]) for e in self._epics]
-            sel.set_options(opts or [("(эпиков не найдено)", "_")])
+            opts = [("%s — %s [%s]" % (e["key"], e["summary"][:42], e.get("status", "")), e["key"])
+                    for e in self._epics]
+            sel.set_options(opts or [("(нет — впиши поиск или создай новый ниже)", "_")])
         except Exception:
             pass
 
