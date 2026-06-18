@@ -749,6 +749,37 @@ class EpicManageScreen(ModalScreen):
         self.dismiss(None)
 
 
+class TaskManageScreen(ModalScreen):
+    """Cleanup (local worktrees) or Abort (close MRs + delete remote branches + remove) a task."""
+    CSS = """
+    TaskManageScreen { align: center middle; }
+    #dlg { width: 70; max-width: 92%; height: auto; padding: 1 2;
+           border: round $accent; background: $surface; }
+    #dlg Label { margin-bottom: 1; }
+    #dlg Button { margin: 0 2 0 0; min-width: 14; }
+    """
+    BINDINGS = [Binding("escape", "cancel", "Cancel")]
+
+    def __init__(self, tid):
+        super().__init__()
+        self.tid = tid
+
+    def compose(self):
+        with Vertical(id="dlg"):
+            yield Label("[b]Задача %s[/b]" % self.tid)
+            yield Label("[dim]Cleanup = снять локальные worktrees (ветки/MR на remote НЕ трогаем; откажет если есть незакоммиченное).\nAbort = закрыть MR + удалить remote-ветки + снести worktrees + убрать из cc (для выбросить/тест).[/dim]")
+            with Horizontal():
+                yield Button("Cleanup", id="done", variant="primary")
+                yield Button("Abort", id="abort", variant="error")
+                yield Button("Cancel", id="cancel")
+
+    def on_button_pressed(self, event):
+        self.dismiss(None if event.button.id == "cancel" else event.button.id)
+
+    def action_cancel(self):
+        self.dismiss(None)
+
+
 class EpicTargetsScreen(ModalScreen):
     """Set per-repo integration branches (targets) for an epic — repo -> branch."""
     CSS = """
@@ -1314,11 +1345,21 @@ class CCApp(App):
             return
         tid = self._cur_task()
         if not tid:
-            self.notify("выбери задачу (очистить) или эпик (архив/разархив)")
+            self.notify("выбери задачу (cleanup/abort) или эпик (архив/разархив)")
             return
-        self.push_screen(OutputScreen("cleanup: %s" % tid,
-                         [sys.executable, "-u", ENGINE, "task", "done", tid]),
-                         lambda _: self.build_tree())
+        self.push_screen(TaskManageScreen(tid), lambda res: self._task_manage(tid, res))
+
+    def _task_manage(self, tid, res):
+        if not res:
+            return
+        if res == "done":
+            self.push_screen(OutputScreen("cleanup: %s" % tid,
+                             [sys.executable, "-u", ENGINE, "task", "done", tid]),
+                             lambda _: self.build_tree())
+        elif res == "abort":
+            self.push_screen(OutputScreen("abort: %s" % tid,
+                             [sys.executable, "-u", ENGINE, "task", "abort", tid]),
+                             lambda _: self.build_tree())
 
     def _epic_manage(self, ekey, res):
         if not res:
