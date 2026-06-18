@@ -709,6 +709,11 @@ def cmd_task_mr(args):
             git(["commit", "--no-verify", "-m", title], cwd=wt)
         print("[%s] push %s ..." % (r, branch))
         run(push, cwd=wt)
+        existing = find_mr(ri["remote"], branch, wt)
+        if existing:
+            t["mrs"][r] = existing
+            print("[%s] MR уже есть -> запушены новые коммиты, обновлён: %s" % (r, existing))
+            continue
         diffstat = run(["git", "diff", "--stat", cmp_ref + "..HEAD"], cwd=wt, check=False).stdout.strip()
         desc = (t.get("prompt") or "").strip()
         if diffstat:
