@@ -1172,7 +1172,7 @@ def repo_deploy_state(ri):
                 data = json.loads(out[out.index("{"):])  # eas prints an upgrade banner before the JSON
                 cp = data.get("currentPage") or []
                 msg = (cp[0].get("message") or "").strip().strip('"') if cp else ""
-                st["channels"][br] = msg[:42] or "(no updates)"
+                st["channels"][br] = msg[:22] or "(no updates)"
             except Exception:
                 st["channels"][br] = "?"
         return st
