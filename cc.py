@@ -387,19 +387,23 @@ def cmd_task_add(args):
                    + "\n\n[cc] This task spans the repo worktrees below (branch %s). "
                      "Edit files ONLY inside these subfolders (your cwd is their parent):\n%s"
                      "\nDo NOT run git; cc handles branches/commits/MRs." % (branch, repo_map))
-    claude_cmd = ["claude", "--permission-mode", "bypassPermissions", "-p", full_prompt]
     STATE_DIR.mkdir(parents=True, exist_ok=True)
     if args.sync:
-        print("  running agent (sync) ...")
-        rr = subprocess.run(claude_cmd, cwd=task_dir, text=True, capture_output=True)
+        print("  running agent (sync, headless) ...")
+        rr = subprocess.run(["claude", "--permission-mode", "bypassPermissions", "-p", full_prompt],
+                            cwd=task_dir, text=True, capture_output=True)
         log.write_text((rr.stdout or "") + "\n" + (rr.stderr or ""))
         s = load_state(); s["tasks"][tid]["status"] = "review"; save_state(s)
         print("  done.")
     else:
-        with open(log, "w") as lf:
-            proc = subprocess.Popen(claude_cmd, cwd=task_dir, stdout=lf, stderr=lf)
-        s = load_state(); s["tasks"][tid]["pid"] = proc.pid; save_state(s)
-        print("  agent running in BACKGROUND (cwd=%s, pid=%s). log: %s" % (task_dir, proc.pid, log))
+        promptfile = STATE_DIR / (tid + ".prompt")
+        promptfile.write_text(full_prompt)
+        tmux_name = "cc_" + re.sub(r"[^A-Za-z0-9_-]", "-", tid)
+        print("  starting LIVE agent in tmux '%s' (auto mode) ..." % tmux_name)
+        ok = spawn_tmux_agent(tmux_name, task_dir, promptfile, "auto")
+        s = load_state(); s["tasks"][tid]["tmux"] = tmux_name; s["tasks"][tid].pop("pid", None); save_state(s)
+        print("  agent LIVE in tmux '%s' (cwd=%s) — open with `cc task open %s` / o (normal session)" % (tmux_name, task_dir, tid)
+              if ok else "  WARNING: tmux spawn failed (tmux installed?)")
     jira = proj.get("jira")
     if getattr(args, "jira", None):
         s = load_state(); s["tasks"][tid]["jira"] = args.jira; save_state(s)
@@ -439,6 +443,40 @@ def _changed(wt):
     lines = [l for l in out.splitlines() if l[3:].strip().strip('"') and not _cc_artifact(l[3:].strip().strip('"'))]
     return "\n".join(lines).strip()
 
+def tmux_alive(name):
+    return bool(name) and subprocess.run(["tmux", "has-session", "-t", name],
+                                         capture_output=True).returncode == 0
+
+def tmux_pane(name):
+    return subprocess.run(["tmux", "capture-pane", "-p", "-t", name],
+                          capture_output=True, text=True).stdout
+
+def tmux_busy(name):
+    # Claude shows "esc to interrupt" while a turn is running; idle = input box only
+    return "esc to interrupt" in tmux_pane(name).lower()
+
+def spawn_tmux_agent(name, cwd, promptfile, mode="auto"):
+    """Start a LIVE interactive claude in a detached tmux session, auto-accepting the
+    one-time trust dialog. Returns True on success."""
+    if not shutil.which("tmux"):
+        return False
+    subprocess.run(["tmux", "kill-session", "-t", name], capture_output=True)
+    inner = "claude --permission-mode %s \"$(cat %s)\"" % (mode, shlex.quote(str(promptfile)))
+    if subprocess.run(["tmux", "new-session", "-d", "-s", name, "-c", cwd, "bash", "-lc", inner],
+                      capture_output=True).returncode != 0:
+        return False
+    for _ in range(40):                      # ~16s: wait for & answer "trust this folder"
+        time.sleep(0.4)
+        pane = tmux_pane(name).lower()
+        if "trust this folder" in pane or "trust the files" in pane:
+            subprocess.run(["tmux", "send-keys", "-t", name, "1", "Enter"], capture_output=True)
+            break
+        if "auto mode on" in pane or "esc to interrupt" in pane:
+            break
+        if not tmux_alive(name):
+            return False
+    return True
+
 def pid_alive(pid):
     try:
         os.kill(int(pid), 0)
@@ -447,14 +485,17 @@ def pid_alive(pid):
         return False
 
 def task_status(t):
-    """Derive status from reality: running > merged > mr > review > idle."""
-    pid = t.get("pid")
-    if pid and pid_alive(pid):
-        return "running"
+    """Derive status from reality. Live tmux session: busy=running, waiting=review (needs you)."""
     if t.get("merged"):
         return "merged"
     if t.get("mrs"):
         return "mr"
+    name = t.get("tmux")
+    if name and tmux_alive(name):
+        return "running" if tmux_busy(name) else "review"
+    pid = t.get("pid")
+    if pid and pid_alive(pid):
+        return "running"
     for r, wt in t.get("worktrees", {}).items():
         if not os.path.isdir(wt):
             continue

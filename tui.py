@@ -17,16 +17,13 @@ GLYPH = {"running": "~", "review": "*", "mr": "MR", "merged": "v", "idle": ".", 
 
 
 def fast_status(t):
-    """Cheap status for rendering (no git subprocesses). pid/flags only; the git-based
-    review/idle refinement is computed off-thread and cached in t['status']."""
-    pid = t.get("pid")
-    if pid and cc.pid_alive(pid):
-        return "running"
+    """Cheap status for rendering (no tmux/git subprocesses). flags + cached t['status'];
+    the live tmux/git status is computed off-thread by _refresh_statuses."""
     if t.get("merged"):
         return "merged"
     if t.get("mrs"):
         return "mr"
-    return t.get("status") or "review"
+    return t.get("status") or "running"
 
 
 class NewEpicScreen(ModalScreen):
@@ -1333,12 +1330,17 @@ class CCApp(App):
         if not tid:
             return
         t = self.state()["tasks"][tid]
-        cwd, chat = self._chat_cmd(t)
+        cwd = t.get("dir") or t["worktrees"][t["primary"]]
         if not os.path.isdir(cwd):
             self.notify("worktree missing — recreate the task", severity="error"); return
         self._mark_seen(tid)
+        name = t.get("tmux")
+        if name and cc.tmux_alive(name):
+            chat = "tmux attach -t %s" % name          # LIVE session
+        else:
+            _, chat = self._chat_cmd(t)                # session ended -> resume transcript
         where = open_cmux("%s chat" % tid, cwd, chat)
-        self.notify("чат задачи открыт (%s) — печатай там, отвечай на вопросы агента" % where)
+        self.notify("чат задачи открыт (%s) — живая сессия, печатай/отвечай агенту" % where)
 
     def action_epic_chat(self):
         ekey = self._current_epic()
