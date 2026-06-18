@@ -746,17 +746,45 @@ def cmd_epic_rm(args):
     s = load_state()
     if args.key not in s["epics"]:
         die("unknown epic '%s'" % args.key)
+    proj = s["projects"][s["epics"][args.key]["project"]]
     tasks = [t for t, v in s["tasks"].items() if v.get("epic") == args.key]
     if tasks and not args.force:
-        die("epic %s has %d task(s): %s\nClean them (cc task done/abort) or use --force." % (
-            args.key, len(tasks), ", ".join(tasks)))
+        die("epic %s has %d task(s): %s\n"
+            "Use --force to delete the epic AND its tasks (local worktrees removed). "
+            "Remote MRs/branches are left intact — run `cc task abort <task>` first if you want those gone."
+            % (args.key, len(tasks), ", ".join(tasks)))
+    # --force: tear down each task's LOCAL worktrees + dirs (remote side untouched)
+    for tid in tasks:
+        t = s["tasks"][tid]
+        dirty = [r for r in t.get("repos", []) if _changed(t.get("worktrees", {}).get(r, ""))]
+        if dirty:
+            print("  ! task %s has uncommitted changes in: %s (removing anyway)" % (tid, ", ".join(dirty)))
+        task_dir = Path(next(iter(t["worktrees"].values()))).parent if t.get("worktrees") else None
+        sess = t.get("tmux")
+        if sess:
+            subprocess.run(["tmux", "kill-session", "-t", sess], capture_output=True)
+        for r in t.get("repos", []):
+            rp = proj["repos"].get(r, {}).get("path")
+            wt = t.get("worktrees", {}).get(r)
+            if rp and wt:
+                git(["worktree", "remove", wt, "--force"], cwd=rp, check=False)
+                git(["worktree", "prune"], cwd=rp, check=False)
+                git(["branch", "-D", t["branch"]], cwd=rp, check=False)
+        if task_dir and task_dir.exists():
+            shutil.rmtree(task_dir, ignore_errors=True)
+        s["tasks"].pop(tid, None)
+        print("  removed task %s (worktrees + dir)" % tid)
+    # remove the epic's cctui dir if it's now empty (never touch sibling epics)
+    epic_dir = Path(proj.get("path", "")) / "cctui" / args.key
+    try:
+        if epic_dir.exists() and not any(epic_dir.iterdir()):
+            epic_dir.rmdir()
+    except Exception:
+        pass
     s["epics"].pop(args.key, None)
-    if args.force:
-        for t in tasks:
-            s["tasks"].pop(t, None)
     save_state(s)
-    print("epic %s removed from cc%s (Jira NOT touched)" % (
-        args.key, (" + %d task(s)" % len(tasks)) if (args.force and tasks) else ""))
+    print("epic %s removed from cc%s (Jira + remote MRs/branches NOT touched)" % (
+        args.key, (" + %d task(s) incl. their worktrees" % len(tasks)) if tasks else ""))
 
 
 def cmd_epic_set(args):

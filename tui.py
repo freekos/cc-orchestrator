@@ -712,7 +712,7 @@ class EpicManageScreen(ModalScreen):
             yield Label("[b]Эпик %s[/b]" % self.key)
             note = ("%d задач(и) в эпике — Удалить потребует подтверждения (force)." % self.ntasks
                     if self.ntasks else "Задач нет.")
-            yield Label("[dim]Архив = скрыть из дерева (вернуть: cc epic unarchive).\nУдалить = убрать из cc. Jira и ветки не трогаются.\n%s[/dim]" % note)
+            yield Label("[dim]Архив = скрыть из дерева (вернуть: cc epic unarchive).\nУдалить = убрать эпик + задачи из cc и снести их локальные worktrees.\nRemote MR/ветки и Jira НЕ трогаются (для них — cc task abort).\n%s[/dim]" % note)
             with Horizontal():
                 yield Button("Архивировать", id="arch", variant="primary")
                 yield Button("Удалить", id="del", variant="error")
