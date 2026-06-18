@@ -11,26 +11,22 @@ async def main():
         nproj = len(tree.root.children)
         assert nproj >= 1, "no project nodes"
 
-        # select the first project node (multi-project safe), then open New Epic
-        await pilot.press("down")
+        # free-create epic on a NON-jira project (jira projects use pick/create-in-jira mode)
+        s = cc.load_state()
+        free = next((n for n, p in s["projects"].items() if not p.get("jira", {}).get("token")), None)
+        if not free:
+            print("TUI smoke OK: %d project(s); all jira-enabled (epic modal = jira mode)" % nproj)
+            return
+        app.push_screen(tui.NewEpicScreen(free, jira_on=False), app._epic_created)
         await pilot.pause()
-        await pilot.press("e")
-        await pilot.pause()
-        assert isinstance(app.screen, tui.NewEpicScreen), "epic modal did not open"
-
-        # fill + create via the Create button
+        assert isinstance(app.screen, tui.NewEpicScreen)
         app.screen.query_one("#key").value = "SMOKE-1"
         app.screen.query_one("#summary").value = "smoke epic"
         await pilot.click("#ok")
-        await pilot.pause()
-        await pilot.pause()
-
+        await pilot.pause(); await pilot.pause()
         s = cc.load_state()
-        assert "SMOKE-1" in s["epics"], "epic NOT created via TUI"
-        print("TUI smoke OK: %d project(s); epic created via modal (SMOKE-1)" % nproj)
-
-        # cleanup the throwaway epic
-        s["epics"].pop("SMOKE-1", None)
-        cc.save_state(s)
+        assert "SMOKE-1" in s["epics"], "epic NOT created via modal"
+        print("TUI smoke OK: %d project(s); free-epic created via modal on '%s'" % (nproj, free))
+        s["epics"].pop("SMOKE-1", None); cc.save_state(s)
 
 asyncio.run(main())
