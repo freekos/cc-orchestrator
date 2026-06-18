@@ -231,8 +231,11 @@ def cmd_epic_add(args):
     s["epics"][args.key] = {"project": args.project, "summary": args.summary or "",
                             "targets": targets, "mode": mode, "branch": args.key, "repos": erepos,
                             "memory": (args.summary or "").strip()}
+    n = sync_epic_children(s, args.key)
     save_state(s)
     print("epic '%s' added under '%s'  [mode=%s]" % (args.key, args.project, mode))
+    if n > 0:
+        print("  pulled %d Jira child issue(s) — visible as stubs under the epic (activate with n)" % n)
     if targets:
         print("  routing (repo -> target branch):")
         for r, b in targets.items():
@@ -754,6 +757,31 @@ def cmd_epic_mrs(args):
         print("(MR ветки эпика ещё нет — нажми M / cc epic mr %s)" % args.key)
 
 
+def sync_epic_children(s, key):
+    """Cache the epic's Jira child issues into epic['jira_children']. Returns count or -1."""
+    e = s["epics"].get(key)
+    if not e:
+        return -1
+    jira = s["projects"][e["project"]].get("jira")
+    if not (jira and jira.get("token") and key.split("-")[0] == jira.get("project_key")):
+        return -1
+    try:
+        e["jira_children"] = jira_epic_children(jira, key, limit=100)
+        return len(e["jira_children"])
+    except Exception:
+        return -1
+
+def cmd_epic_sync(args):
+    s = load_state()
+    if args.key not in s["epics"]:
+        die("unknown epic '%s'" % args.key)
+    n = sync_epic_children(s, args.key)
+    if n < 0:
+        die("epic %s is not a Jira epic (or Jira not configured)" % args.key)
+    save_state(s)
+    print("epic %s: cached %d Jira child issue(s)" % (args.key, n))
+
+
 def cmd_epic_archive(args):
     s = load_state()
     e = s["epics"].get(args.key) or die("unknown epic '%s'" % args.key)
@@ -910,13 +938,13 @@ def jira_my_epics(cfg, query=""):
         out.append({"key": i["key"], "summary": f.get("summary", ""), "status": st})
     return out
 
-def jira_epic_children(cfg, epic_key, query=""):
-    """Issues whose parent is this epic (team-managed projects). [{key,summary,status}]."""
+def jira_epic_children(cfg, epic_key, query="", limit=50):
+    """Issues whose parent is this epic (team-managed). [{key,summary,status,done}]."""
     jql = "parent = %s" % epic_key
     if query:
         jql += ' AND summary ~ "%s"' % query.replace('"', "")
     jql += " ORDER BY created DESC"
-    body = {"jql": jql, "maxResults": 50, "fields": ["summary", "status"]}
+    body = {"jql": jql, "maxResults": limit, "fields": ["summary", "status"]}
     try:
         data = jira_req(cfg, "POST", "/search/jql", body)
     except Exception:
@@ -924,8 +952,10 @@ def jira_epic_children(cfg, epic_key, query=""):
     out = []
     for i in data.get("issues", []):
         f = i.get("fields", {})
+        st = f.get("status") or {}
         out.append({"key": i["key"], "summary": f.get("summary", ""),
-                    "status": (f.get("status") or {}).get("name", "")})
+                    "status": st.get("name", ""),
+                    "done": ((st.get("statusCategory") or {}).get("key") or "").lower() == "done"})
     return out
 
 def jira_status_category(cfg, key):
@@ -1152,6 +1182,7 @@ def build_parser():
     a = ep.add_parser("set"); a.add_argument("key"); a.add_argument("--summary"); a.add_argument("--repos"); a.set_defaults(fn=cmd_epic_set)
     a = ep.add_parser("note"); a.add_argument("key"); a.add_argument("text"); a.set_defaults(fn=cmd_epic_note)
     a = ep.add_parser("memory"); a.add_argument("key"); a.set_defaults(fn=cmd_epic_memory)
+    a = ep.add_parser("sync"); a.add_argument("key"); a.set_defaults(fn=cmd_epic_sync)
     a = ep.add_parser("archive"); a.add_argument("key"); a.set_defaults(fn=cmd_epic_archive)
     a = ep.add_parser("unarchive"); a.add_argument("key"); a.set_defaults(fn=cmd_epic_unarchive)
     a = ep.add_parser("rm"); a.add_argument("key"); a.add_argument("--force", action="store_true"); a.set_defaults(fn=cmd_epic_rm)

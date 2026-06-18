@@ -105,10 +105,16 @@ With Jira on:
 - **Epic modal** lists all the project's epics (most-recent first, with status) to
   pick from; the search box narrows by name across **all** project epics. Or create a
   brand-new epic in Jira from the same modal.
-- **Task modal** (under a Jira epic) can pull the epic's **child issues from Jira**:
-  pick one and *Подставить из Jira* seeds the title from its summary and the prompt
-  from its description, and links the cc task to that issue — no duplicate. Or just
-  type a title + prompt and `cc` creates a new Jira task under the epic.
+- **Jira epic children as stubs**: when you add/pick a Jira epic, cc pulls its child
+  issues and shows the ones you haven't started as dim **📋 stubs** under the epic
+  (alongside your real cc-tasks). Press `n` on a stub to **activate** it — that opens
+  the task modal pre-seeded (title from summary, prompt from description, linked via
+  `--jira`); review and Launch creates the worktree+agent. Children aren't auto-run as
+  agents — you activate them one at a time. `r` on an epic re-syncs from Jira;
+  `cc epic sync <KEY>` does it from the CLI.
+- **Task modal** (under a Jira epic) can also pull the epic's children directly: pick
+  one and *Подставить из Jira* seeds title+prompt and links it. Or just type a
+  title + prompt and `cc` creates a new Jira task under the epic.
 - **Archiving an epic** moves the epic issue **and all its child tasks** to Done in
   Jira (matched by status category, so it works with "Готово"/"Done"; already-done
   issues are skipped, each transition is reported).

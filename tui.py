@@ -132,11 +132,13 @@ class NewTaskScreen(ModalScreen):
     #row Button { margin: 0 0 0 2; min-width: 14; }
     """
 
-    def __init__(self, epic, jira_on=False, project=None):
+    def __init__(self, epic, jira_on=False, project=None, preset_key=None, preset_summary=""):
         super().__init__()
         self.epic = epic
         self.jira_on = jira_on
         self.project = project
+        self.preset_key = preset_key
+        self.preset_summary = preset_summary
         self._children = []
         self._jira_key = None
 
@@ -162,6 +164,24 @@ class NewTaskScreen(ModalScreen):
     def on_mount(self):
         if self.jira_on:
             self.run_worker(lambda: self._load_children(""), thread=True)
+        if self.preset_key:
+            self._jira_key = self.preset_key
+            self.run_worker(self._seed_preset, thread=True)
+
+    def _seed_preset(self):
+        key = self.preset_key
+        summary = self.preset_summary or key
+        cfg = cc.load_state()["projects"][self.project].get("jira", {})
+        try:
+            desc = cc.jira_epic_description(cfg, key)
+        except Exception:
+            desc = ""
+        def fill():
+            self.query_one("#title", Input).value = summary
+            seed = ("%s\n\n%s" % (summary, desc)).strip() if desc else summary
+            self.query_one("#prompt", TextArea).load_text(seed)
+            self.app.notify("из %s — отредактируй prompt и Launch" % key)
+        self.app.call_from_thread(fill)
 
     def _load_children(self, query):
         try:
@@ -794,11 +814,24 @@ class CCApp(App):
         label = "# %s  %s" % (ekey, e.get("summary", ""))
         en = parent.add("[dim]%s[/dim]" % label if dim else label,
                         data={"type": "epic", "id": ekey}, expand=expand)
+        linked = set()
         for tid, t in s["tasks"].items():
             if t["epic"] != ekey:
                 continue
+            if t.get("jira"):
+                linked.add(t["jira"])
             tl = "%s %s" % (GLYPH.get(cc.task_status(t), "?"), t["title"])
             en.add_leaf("[dim]%s[/dim]" % tl if dim else tl, data={"type": "task", "id": tid})
+        # Jira child issues not yet turned into cc-tasks (stubs you can activate with n)
+        if not dim:
+            for c in e.get("jira_children", []):
+                if c["key"] in linked:
+                    continue
+                mark = "[green]✓[/green]" if c.get("done") else "·"
+                lbl = "📋 %s %s  %s" % (mark, c["key"], c.get("summary", "")[:48])
+                en.add_leaf("[dim]%s[/dim]" % lbl,
+                            data={"type": "jira_stub", "epic": ekey, "key": c["key"],
+                                  "summary": c.get("summary", ""), "done": c.get("done", False)})
         return en
 
     def build_tree(self):
@@ -835,6 +868,11 @@ class CCApp(App):
             d.update("")
             return
         s = self.state()
+        if data["type"] == "jira_stub":
+            st = "Done" if data.get("done") else "не начата"
+            d.update("[b]%s[/b]  (Jira — %s)\n%s\n\n[dim]n — активировать: создаст cc-задачу (worktree+агент), prompt засеян из Jira[/dim]"
+                     % (data["key"], st, data.get("summary", "")))
+            return
         if data["type"] == "archive":
             n = sum(1 for e in s["epics"].values() if e["project"] == data["id"] and e.get("archived"))
             d.update("[b]Архив[/b] — %d архивн. эпик(ов) в '%s'\n[dim]разверни узел; на эпике x → Разархивировать[/dim]" % (n, data["id"]))
@@ -916,8 +954,21 @@ class CCApp(App):
         walk(self.query_one("#tree", Tree).root)
 
     def action_refresh(self):
+        ekey = self._current_epic()
+        if ekey:
+            s = self.state()
+            proj = s["epics"].get(ekey, {}).get("project")
+            if s["projects"].get(proj, {}).get("jira", {}).get("token"):
+                self.notify("синхронизирую задачи эпика из Jira …")
+                self.run_worker(lambda: self._sync_epic(ekey), thread=True, exclusive=True, group="esync")
+                return
         self.build_tree()
         self.notify("refreshed")
+
+    def _sync_epic(self, ekey):
+        subprocess.run([sys.executable, ENGINE, "epic", "sync", ekey], capture_output=True)
+        self.call_from_thread(self.build_tree)
+        self.call_from_thread(lambda: self.notify("задачи эпика обновлены"))
 
     # ---- project/epic resolution from current selection ----
     def _current_project(self):
@@ -942,6 +993,8 @@ class CCApp(App):
                 return data["id"]
             if data["type"] == "task":
                 return s["tasks"][data["id"]]["epic"]
+            if data["type"] == "jira_stub":
+                return data["epic"]
         return None
 
     # ---- create epic ----
@@ -1030,11 +1083,18 @@ class CCApp(App):
 
     # ---- create task ----
     def action_new_task(self):
+        data = self.current()
+        s = self.state()
+        if data and data["type"] == "jira_stub":
+            ekey = data["epic"]; proj = s["epics"][ekey]["project"]
+            self.push_screen(NewTaskScreen(ekey, jira_on=True, project=proj,
+                             preset_key=data["key"], preset_summary=data.get("summary", "")),
+                             self._task_created)
+            return
         epic = self._current_epic()
         if not epic:
             self.notify("select an epic (or its task) first", severity="error")
             return
-        s = self.state()
         proj = s["epics"].get(epic, {}).get("project")
         jira_on = bool(s["projects"].get(proj, {}).get("jira", {}).get("token"))
         self.push_screen(NewTaskScreen(epic, jira_on=jira_on, project=proj), self._task_created)
