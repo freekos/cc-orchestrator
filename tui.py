@@ -284,9 +284,10 @@ def open_cmux(name, cwd, cmd):
             subprocess.run([cm, "send", "--surface", ref, "--",
                             "cd %s && %s\n" % (shlex.quote(cwd), cmd)], capture_output=True, text=True)
             subprocess.run([cm, "rename-tab", "--surface", ref, name], capture_output=True, text=True)
-            return "cmux"
+            return ref
     open_in_terminal(cwd, cmd)
     return "terminal"
+
 
 
 class DiffScreen(ModalScreen):
@@ -1336,11 +1337,19 @@ class CCApp(App):
         self._mark_seen(tid)
         name = t.get("tmux")
         if name and cc.tmux_alive(name):
-            chat = "tmux attach -t %s" % name          # LIVE session
+            clients = subprocess.run(["tmux", "list-clients", "-F", "#{client_name}"],
+                                     capture_output=True, text=True).stdout.split()
+            if clients:
+                # one tmux tab already open -> switch its session in place (no new tab)
+                subprocess.run(["tmux", "switch-client", "-c", clients[0], "-t", name], capture_output=True)
+                self.notify("сессия %s — переключил cc-tmux вкладку (без новой), глянь её" % tid)
+            else:
+                open_cmux("cc sessions", cwd, "tmux attach -t %s" % name)
+                self.notify("открыл cc-сессии (tmux); дальше o переключает эту же вкладку")
         else:
             _, chat = self._chat_cmd(t)                # session ended -> resume transcript
-        where = open_cmux("%s chat" % tid, cwd, chat)
-        self.notify("чат задачи открыт (%s) — живая сессия, печатай/отвечай агенту" % where)
+            open_cmux("%s chat" % tid, cwd, chat)
+            self.notify("сессия %s завершена — открыл resume" % tid)
 
     def action_epic_chat(self):
         ekey = self._current_epic()
