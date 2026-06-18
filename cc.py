@@ -298,8 +298,14 @@ def _provision(epic_key, epic, proj, r, branch, slug, epic_mode, no_setup):
     if ri.get("provider") in (None, "unknown") or not ri.get("remote"):
         return (r, None, None, "no git remote")
     wt = worktree_path(proj["path"], epic_key, slug, r)
+    # self-heal leftovers from a clobbered/aborted add: stale worktree registrations
+    # (dir gone) and orphaned worktree dirs would otherwise skip the repo ("worktree exists")
+    git(["worktree", "prune"], cwd=rp, check=False)
     if wt.exists():
-        return (r, None, None, "worktree exists")
+        git(["worktree", "remove", "--force", str(wt)], cwd=rp, check=False)
+        git(["worktree", "prune"], cwd=rp, check=False)
+        if wt.exists():
+            shutil.rmtree(wt, ignore_errors=True)
     try:
         wt.parent.mkdir(parents=True, exist_ok=True)
         if epic_mode == "epic_branch":
