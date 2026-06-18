@@ -415,10 +415,19 @@ def cmd_task_add(args):
     print("done: cc task open %s   |   cc task diff %s" % (tid, tid))
 
 
+def _cc_artifact(path):
+    """cc's own provisioning leftovers — not the agent's work."""
+    parts = path.replace("\\", "/").split("/")
+    base = parts[-1] if parts else ""
+    return "node_modules" in parts or base == ".cc-task.md" or base.startswith(".env")
+
 def _changed(wt):
     if not os.path.isdir(wt):
         return ""
-    return git(["status", "--short"], cwd=wt, check=False).stdout.strip()
+    out = git(["status", "--short"], cwd=wt, check=False).stdout
+    # ignore cc-provisioned artifacts (node_modules symlink, copied .env, task file)
+    lines = [l for l in out.splitlines() if l[3:].strip().strip('"') and not _cc_artifact(l[3:].strip().strip('"'))]
+    return "\n".join(lines).strip()
 
 def pid_alive(pid):
     try:
