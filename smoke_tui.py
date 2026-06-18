@@ -23,7 +23,15 @@ async def main():
         app.screen.query_one("#key").value = "SMOKE-1"
         app.screen.query_one("#summary").value = "smoke epic"
         await pilot.click("#ok")
-        await pilot.pause(); await pilot.pause()
+        # _epic_created runs a blocking subprocess in the dismiss callback;
+        # poll a few frames so the smoke is deterministic, not timing-flaky.
+        # _epic_created spawns a cold `python cc.py` subprocess in the dismiss callback;
+        # first cold spawn can take ~1-2s, so wait generously (this is harness timing, not app behavior).
+        for _ in range(100):
+            await pilot.pause()
+            await asyncio.sleep(0.1)
+            if "SMOKE-1" in cc.load_state()["epics"]:
+                break
         s = cc.load_state()
         assert "SMOKE-1" in s["epics"], "epic NOT created via modal"
         print("TUI smoke OK: %d project(s); free-epic created via modal on '%s'" % (nproj, free))

@@ -623,6 +623,40 @@ class ProjectJiraScreen(ModalScreen):
         self.dismiss(None)
 
 
+class EpicManageScreen(ModalScreen):
+    """Archive (hide) or delete an epic from cc. Jira is never touched."""
+    CSS = """
+    EpicManageScreen { align: center middle; }
+    #dlg { width: 64; max-width: 92%; height: auto; padding: 1 2;
+           border: round $accent; background: $surface; }
+    #dlg Label { margin-bottom: 1; }
+    #dlg Button { margin: 0 2 0 0; }
+    """
+    BINDINGS = [Binding("escape", "cancel", "Cancel")]
+
+    def __init__(self, key, ntasks):
+        super().__init__()
+        self.key = key
+        self.ntasks = ntasks
+
+    def compose(self):
+        with Vertical(id="dlg"):
+            yield Label("[b]Эпик %s[/b]" % self.key)
+            note = ("%d задач(и) в эпике — Удалить потребует подтверждения (force)." % self.ntasks
+                    if self.ntasks else "Задач нет.")
+            yield Label("[dim]Архив = скрыть из дерева (вернуть: cc epic unarchive).\nУдалить = убрать из cc. Jira и ветки не трогаются.\n%s[/dim]" % note)
+            with Horizontal():
+                yield Button("Архивировать", id="arch", variant="primary")
+                yield Button("Удалить", id="del", variant="error")
+                yield Button("Отмена", id="cancel")
+
+    def on_button_pressed(self, event):
+        self.dismiss(None if event.button.id == "cancel" else event.button.id)
+
+    def action_cancel(self):
+        self.dismiss(None)
+
+
 class CCApp(App):
     CSS = """
     Tree { width: 44%; border-right: solid $accent; }
@@ -631,6 +665,7 @@ class CCApp(App):
     BINDINGS = [
         Binding("a", "add_project", "+Project"),
         Binding("R", "reviewers", "Reviewers"),
+        Binding("D", "deploys", "Deploys"),
         Binding("j", "project_jira", "Jira/settings"),
         Binding("e", "new_epic", "+Epic"),
         Binding("n", "new_task", "+Task"),
@@ -641,7 +676,7 @@ class CCApp(App):
         Binding("m", "mr", "MR dry"),
         Binding("M", "mr_real", "MR!"),
         Binding("g", "mrs", "MR links"),
-        Binding("x", "cleanup", "Cleanup"),
+        Binding("x", "cleanup", "Cleanup/Epic"),
         Binding("r", "refresh", "Refresh"),
         Binding("q", "quit", "Quit"),
     ]
@@ -694,6 +729,8 @@ class CCApp(App):
             has_epic = False
             for ekey, e in s["epics"].items():
                 if e["project"] != pname:
+                    continue
+                if e.get("archived"):
                     continue
                 has_epic = True
                 en = pn.add("# %s  %s" % (ekey, e.get("summary", "")),
@@ -769,9 +806,19 @@ class CCApp(App):
             L = ["[b]project %s[/b]  (%s, %d repos)" % (data["id"], p["kind"], len(p["repos"])),
                  "assignee: %s    Jira: %s" % (p.get("default_assignee") or "-", jira_line),
                  "", "repos (reviewer):"]
+            L += ["repos — deploy / reviewer:"]
             for r, ri in p["repos"].items():
-                L.append("  %-22s %s" % (r, ri.get("reviewer") or "— (R чтобы задать)"))
-            L += ["", "[dim]e=новый эпик   R=ревьюеры   j=Jira/настройки[/dim]"]
+                dep = ri.get("deploy", {})
+                if dep.get("kind") == "eas":
+                    env = "[cyan]EAS[/cyan] staging:%s" % dep.get("channels", {}).get("staging", "?")
+                elif dep.get("kind") == "gitlab":
+                    e = dep.get("envs", {})
+                    env = "stage:[green]%s[/green] prod:[yellow]%s[/yellow]" % (
+                        e.get("stage", {}).get("ref", "—"), e.get("prod", {}).get("ref", "—"))
+                else:
+                    env = "[dim](D = загрузить деплои)[/dim]"
+                L.append("  %-20s %s  ·  rev:%s" % (r, env, ri.get("reviewer") or "—"))
+            L += ["", "[dim]e=эпик  R=ревьюеры  j=Jira  D=обновить деплои[/dim]"]
             d.update("\n".join(L))
 
     def refresh_glyphs(self):
@@ -824,6 +871,18 @@ class CCApp(App):
         if not proj:
             self.notify("select a project node first", severity="error"); return
         self.push_screen(ReviewersScreen(proj))
+
+    def action_deploys(self):
+        proj = self._current_project()
+        if not proj:
+            self.notify("выбери проект", severity="error"); return
+        self.notify("обновляю статусы деплоя (dev/stage/prod) …")
+        self.run_worker(lambda: self._do_deploys(proj), thread=True, exclusive=True, group="deploys")
+
+    def _do_deploys(self, proj):
+        subprocess.run([sys.executable, ENGINE, "deploys", proj], capture_output=True)
+        self.call_from_thread(self.build_tree)
+        self.call_from_thread(lambda: self.notify("деплои обновлены"))
 
     def action_project_jira(self):
         proj = self._current_project()
@@ -978,12 +1037,39 @@ class CCApp(App):
             self.notify("выбери задачу или эпик")
 
     def action_cleanup(self):
+        data = self.current()
+        if data and data["type"] == "epic":
+            ekey = data["id"]
+            s = self.state()
+            ntasks = sum(1 for t in s["tasks"].values() if t.get("epic") == ekey)
+            self.push_screen(EpicManageScreen(ekey, ntasks),
+                             lambda res: self._epic_manage(ekey, res, ntasks))
+            return
         tid = self._cur_task()
         if not tid:
+            self.notify("выбери задачу (очистить) или эпик (архив/удалить)")
             return
         self.push_screen(OutputScreen("cleanup: %s" % tid,
                          [sys.executable, "-u", ENGINE, "task", "done", tid]),
                          lambda _: self.build_tree())
+
+    def _epic_manage(self, ekey, res, ntasks):
+        if not res:
+            return
+        if res == "arch":
+            subprocess.run([sys.executable, ENGINE, "epic", "archive", ekey], capture_output=True)
+            self.notify("эпик %s в архиве" % ekey)
+            self.build_tree()
+        elif res == "del":
+            argv = [sys.executable, ENGINE, "epic", "rm", ekey]
+            if ntasks:
+                argv.append("--force")
+            r = subprocess.run(argv, capture_output=True, text=True)
+            if r.returncode == 0:
+                self.notify("эпик %s удалён" % ekey)
+            else:
+                self.notify((r.stderr or r.stdout or "не удалось").strip()[:120], severity="error")
+            self.build_tree()
 
     def _mr(self, dry):
         data = self.current()

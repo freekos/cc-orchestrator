@@ -725,6 +725,37 @@ def cmd_epic_mrs(args):
         print("(MR ветки эпика ещё нет — нажми M / cc epic mr %s)" % args.key)
 
 
+def cmd_epic_archive(args):
+    s = load_state()
+    e = s["epics"].get(args.key) or die("unknown epic '%s'" % args.key)
+    e["archived"] = True
+    save_state(s)
+    print("epic %s archived (hidden; `cc epic unarchive %s` to restore)" % (args.key, args.key))
+
+def cmd_epic_unarchive(args):
+    s = load_state()
+    e = s["epics"].get(args.key) or die("unknown epic '%s'" % args.key)
+    e.pop("archived", None)
+    save_state(s)
+    print("epic %s unarchived" % args.key)
+
+def cmd_epic_rm(args):
+    s = load_state()
+    if args.key not in s["epics"]:
+        die("unknown epic '%s'" % args.key)
+    tasks = [t for t, v in s["tasks"].items() if v.get("epic") == args.key]
+    if tasks and not args.force:
+        die("epic %s has %d task(s): %s\nClean them (cc task done/abort) or use --force." % (
+            args.key, len(tasks), ", ".join(tasks)))
+    s["epics"].pop(args.key, None)
+    if args.force:
+        for t in tasks:
+            s["tasks"].pop(t, None)
+    save_state(s)
+    print("epic %s removed from cc%s (Jira NOT touched)" % (
+        args.key, (" + %d task(s)" % len(tasks)) if (args.force and tasks) else ""))
+
+
 def cmd_epic_set(args):
     s = load_state()
     e = s["epics"].get(args.key) or die("unknown epic '%s'" % args.key)
@@ -908,6 +939,59 @@ def cmd_jira_epics(args):
         print("(no epics found for you in %s)" % cfg["project_key"])
 
 
+# ----------------------------- deploys -----------------------------
+
+def repo_deploy_state(ri):
+    """What's deployed per env. GitLab repos -> dev/stage/prod (ref@sha); Expo repos -> EAS staging."""
+    rp = ri.get("path", "")
+    if os.path.exists(os.path.join(rp, "eas.json")) or os.path.exists(os.path.join(rp, "app.config.js")):
+        st = {"kind": "eas", "channels": {}}
+        r = run(["eas", "update:list", "--branch", "staging", "--limit", "1", "--json", "--non-interactive"],
+                cwd=rp, check=False)
+        try:
+            data = json.loads(r.stdout)
+            grp = (data[0] if isinstance(data, list) and data else data)
+            g = (grp.get("currentPage") or grp) if isinstance(grp, dict) else {}
+            st["channels"]["staging"] = (grp.get("createdAt", "") if isinstance(grp, dict) else "")[:10] or "?"
+        except Exception:
+            st["channels"]["staging"] = "?"
+        return st
+    enc = (ri.get("remote") or "").replace("/", "%2F")
+    st = {"kind": "gitlab", "envs": {}}
+    for env in ("dev", "stage", "prod"):
+        r = run(["glab", "api",
+                 "projects/%s/deployments?environment=%s&status=success&sort=desc&per_page=1" % (enc, env)],
+                check=False)
+        try:
+            arr = json.loads(r.stdout)
+            if isinstance(arr, list) and arr:
+                dp = arr[0].get("deployable") or {}
+                st["envs"][env] = {"ref": dp.get("ref", "?"),
+                                   "sha": ((dp.get("commit") or {}).get("short_id") or "")[:8],
+                                   "at": (arr[0].get("created_at") or "")[:10]}
+        except Exception:
+            pass
+    return st
+
+def cmd_deploys(args):
+    s = load_state()
+    proj = s["projects"].get(args.project) or die("unknown project '%s'" % args.project)
+    repos = [args.repo] if args.repo else list(proj["repos"].keys())
+    for r in repos:
+        ri = proj["repos"].get(r)
+        if not ri:
+            continue
+        st = repo_deploy_state(ri)
+        ri["deploy"] = st
+        if st["kind"] == "eas":
+            print("%-22s EAS: staging=%s" % (r, st["channels"].get("staging", "?")))
+        else:
+            envs = st.get("envs", {})
+            parts = ["%s=%s@%s" % (e, envs[e]["ref"], envs[e]["sha"]) for e in ("dev", "stage", "prod") if e in envs]
+            print("%-22s %s" % (r, "  ".join(parts) or "(no deployments)"))
+    save_state(s)
+
+
 # ----------------------------- cli -----------------------------
 
 def build_parser():
@@ -921,6 +1005,9 @@ def build_parser():
     a.add_argument("--site"); a.add_argument("--email"); a.add_argument("--token")
     a.add_argument("--project-key", dest="project_key"); a.add_argument("--off", action="store_true")
     a.set_defaults(fn=cmd_project_jira)
+
+    a = sub.add_parser("deploys"); a.add_argument("project"); a.add_argument("repo", nargs="?")
+    a.set_defaults(fn=cmd_deploys)
 
     jr = sub.add_parser("jira").add_subparsers(dest="cmd", required=True)
     a = jr.add_parser("epics"); a.add_argument("project"); a.add_argument("--search")
@@ -944,6 +1031,9 @@ def build_parser():
     a = ep.add_parser("set"); a.add_argument("key"); a.add_argument("--summary"); a.add_argument("--repos"); a.set_defaults(fn=cmd_epic_set)
     a = ep.add_parser("note"); a.add_argument("key"); a.add_argument("text"); a.set_defaults(fn=cmd_epic_note)
     a = ep.add_parser("memory"); a.add_argument("key"); a.set_defaults(fn=cmd_epic_memory)
+    a = ep.add_parser("archive"); a.add_argument("key"); a.set_defaults(fn=cmd_epic_archive)
+    a = ep.add_parser("unarchive"); a.add_argument("key"); a.set_defaults(fn=cmd_epic_unarchive)
+    a = ep.add_parser("rm"); a.add_argument("key"); a.add_argument("--force", action="store_true"); a.set_defaults(fn=cmd_epic_rm)
 
     tk = sub.add_parser("task").add_subparsers(dest="cmd", required=True)
     a = tk.add_parser("add"); a.add_argument("epic"); a.add_argument("title")
