@@ -863,6 +863,7 @@ class CCApp(App):
         Binding("e", "new_epic", "+Epic"),
         Binding("n", "new_task", "+Task"),
         Binding("o", "open", "Chat"),
+        Binding("O", "epic_chat", "Epic chat"),
         Binding("v", "view_chat", "View"),
         Binding("c", "cursor", "Cursor"),
         Binding("d", "diff", "Diff"),
@@ -1338,6 +1339,24 @@ class CCApp(App):
         self._mark_seen(tid)
         where = open_cmux("%s chat" % tid, cwd, chat)
         self.notify("чат задачи открыт (%s) — печатай там, отвечай на вопросы агента" % where)
+
+    def action_epic_chat(self):
+        ekey = self._current_epic()
+        if not ekey:
+            self.notify("выбери эпик (или его задачу)", severity="error"); return
+        subprocess.run([sys.executable, ENGINE, "epic", "open", ekey], capture_output=True)
+        s = self.state()
+        e = s["epics"].get(ekey, {})
+        proj = s["projects"].get(e.get("project"), {})
+        edir = os.path.join(proj.get("path", ""), "cctui", ekey, "_release")
+        if not os.path.isdir(edir):
+            self.notify("не удалось подготовить чат эпика", severity="error"); return
+        repos = e.get("repos") or list(proj.get("repos", {}).keys())
+        adds = " ".join("--add-dir %s" % shlex.quote(proj["repos"][r]["path"])
+                        for r in repos if proj.get("repos", {}).get(r, {}).get("path"))
+        cmd = "claude --permission-mode bypassPermissions %s" % adds
+        where = open_cmux("%s release" % ekey, edir, cmd)
+        self.notify("чат эпика %s открыт (%s) — релиз/координация" % (ekey, where))
 
     def action_cursor(self):
         tid = self._cur_task()

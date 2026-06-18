@@ -981,6 +981,59 @@ def cmd_epic_rm(args):
         args.key, (" + %d task(s) incl. their worktrees" % len(tasks)) if tasks else ""))
 
 
+RELEASE_RUNBOOK = """# Epic %s: %s — release & coordination chat
+
+You drive RELEASES and cross-repo coordination for THIS epic. The repos are added with
+--add-dir (their MAIN checkouts). cc does NOT own git here — you run git/glab/eas yourself.
+
+## Repos & integration branches (release source / MR target)
+%s
+
+## Epic notes
+%s
+
+## Release runbook (when asked to release this epic)
+Per repo (NEVER disturb the user's working checkout — use a temp `git worktree` off the
+integration branch for the version bump):
+1. Confirm the integration branch is green on stage (CI) before releasing.
+2. Bump version (package.json / equivalent) on a release branch off the integration branch.
+3. MR integration -> main (reviewer = area lead); merge once the pipeline is green.
+4. Tag vX.Y.Z on main -> the tag pipeline runs the prod jobs.
+5. Play/await `Containerize Prod` + `Deploy ECS Prod` (GitLab), or `eas update --branch production` (Expo/mobile).
+6. New website routes (e.g. /loyalty): POST build-website-routes so they register on prod.
+7. Close the epic's Jira tasks + the epic -> Done.
+
+## Release train & safety (read before prod)
+- Backend has no API versioning: web/admin must not hit prod before backend+mobile. Release
+  the train together; verify the backend prod actually has the endpoints the frontend calls.
+- Feature-flag-gated surfaces ship DARK; flip the flag only after the backend is live on prod.
+- glab: use canonical `invictusfitness/*` paths (moved forks return 405 on POST). eas for mobile.
+- Full autonomy through prod is authorized for this chat — still narrate every step and the result.
+"""
+
+def cmd_epic_open(args):
+    s = load_state()
+    e = s["epics"].get(args.key) or die("unknown epic '%s'" % args.key)
+    proj = s["projects"][e["project"]]
+    repos = e.get("repos") or list(proj["repos"].keys())
+    targets = e.get("targets") or {}
+    edir = Path(proj["path"]) / "cctui" / args.key / "_release"
+    edir.mkdir(parents=True, exist_ok=True)
+    lines = []
+    for r in repos:
+        ri = proj["repos"].get(r, {})
+        lines.append("- %s: integration `%s`  (checkout: %s, reviewer: %s)" % (
+            r, targets.get(r) or "(default branch)", ri.get("path", ""), ri.get("reviewer") or "-"))
+    (edir / "CLAUDE.md").write_text(
+        RELEASE_RUNBOOK % (args.key, e.get("summary", ""), "\n".join(lines),
+                           (e.get("memory") or "").strip() or "(no epic notes)"))
+    adds = " ".join("--add-dir %s" % shlex.quote(proj["repos"][r]["path"])
+                    for r in repos if proj["repos"].get(r, {}).get("path"))
+    print("epic chat dir: %s" % edir)
+    print("  release runbook CLAUDE.md written (%d repo(s))" % len(repos))
+    print("  open:  cd %s && claude --permission-mode bypassPermissions %s" % (shlex.quote(str(edir)), adds))
+
+
 def cmd_epic_set(args):
     s = load_state()
     e = s["epics"].get(args.key) or die("unknown epic '%s'" % args.key)
@@ -1360,6 +1413,7 @@ def build_parser():
     a = ep.add_parser("note"); a.add_argument("key"); a.add_argument("text"); a.set_defaults(fn=cmd_epic_note)
     a = ep.add_parser("memory"); a.add_argument("key"); a.set_defaults(fn=cmd_epic_memory)
     a = ep.add_parser("sync"); a.add_argument("key"); a.set_defaults(fn=cmd_epic_sync)
+    a = ep.add_parser("open"); a.add_argument("key"); a.set_defaults(fn=cmd_epic_open)
     a = ep.add_parser("archive"); a.add_argument("key"); a.set_defaults(fn=cmd_epic_archive)
     a = ep.add_parser("unarchive"); a.add_argument("key"); a.set_defaults(fn=cmd_epic_unarchive)
     a = ep.add_parser("rm"); a.add_argument("key"); a.add_argument("--force", action="store_true"); a.set_defaults(fn=cmd_epic_rm)
