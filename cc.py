@@ -346,7 +346,14 @@ def cmd_task_add(args):
             die("repo '%s' not in project '%s'" % (r, epic["project"]))
     slug = slugify(args.title)
     branch = "%s-%s" % (args.epic, slug)
+    # tid is the state key — must be unique. Same slug under a different epic used to
+    # COLLIDE (t_<slug>) and silently overwrite; disambiguate by epic, then by number.
     tid = "t_" + slug
+    if tid in s["tasks"] and s["tasks"][tid].get("epic") != args.epic:
+        tid = "t_" + slugify(args.epic) + "_" + slug
+    base_tid, _i = tid, 2
+    while tid in s["tasks"]:
+        tid = base_tid + "-" + str(_i); _i += 1
     epic_mode = epic.get("mode") or ("targets" if epic.get("targets") else "epic_branch")
     print("task '%s' under epic %s [%s] - provisioning %d repo(s) in parallel ..." % (
         args.title, args.epic, epic_mode, len(repos)))
