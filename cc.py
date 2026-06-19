@@ -453,6 +453,8 @@ def ensure_cc_session():
         return False
     if subprocess.run(["tmux", "has-session", "-t", CC_TMUX], capture_output=True).returncode != 0:
         subprocess.run(["tmux", "new-session", "-d", "-s", CC_TMUX, "-n", "tui"], capture_output=True)
+        subprocess.run(["tmux", "set-option", "-t", CC_TMUX, "mouse", "on"], capture_output=True)
+        subprocess.run(["tmux", "set-option", "-t", CC_TMUX, "renumber-windows", "on"], capture_output=True)
     return True
 
 def tmux_alive(win):

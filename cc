@@ -15,7 +15,11 @@ if [ "$1" = "tui" ]; then
     exec tmux attach -t cc
   fi
   if command -v tmux >/dev/null 2>&1; then
-    exec tmux new-session -s cc -n tui "$TUI_CMD"
+    tmux new-session -d -s cc -n tui "$TUI_CMD"
+    tmux set-option -t cc mouse on
+    tmux set-option -t cc status-left "#[bold] cc \xe2\x96\xb8 "
+    tmux set-option -t cc renumber-windows on
+    exec tmux attach -t cc
   fi
   exec $TUI_CMD                                     # no tmux -> run bare
 fi
