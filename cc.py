@@ -112,6 +112,28 @@ def mutate(fn):
         save_state(s)
     return r
 
+def mutate_try(fn):
+    """Non-blocking mutate for BACKGROUND pollers: if the lock is busy, skip (return False) instead
+    of queuing — so the TUI's periodic writes never starve a foreground `cc` command (fcntl flock
+    isn't fair). Best-effort: the next tick retries. Returns True if it wrote."""
+    STATE_DIR.mkdir(parents=True, exist_ok=True)
+    f = open(_LOCK_PATH, "w")
+    try:
+        try:
+            fcntl.flock(f.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            return False
+        s = load_state()
+        fn(s)
+        save_state(s)
+        return True
+    finally:
+        try:
+            fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+        except Exception:
+            pass
+        f.close()
+
 # ----------------------------- helpers -----------------------------
 
 class _FakeProc:
@@ -239,7 +261,7 @@ def detect_repos(path):
         if child.is_dir() and (child / ".git").is_dir():
             repos[child.name] = repo_info(child)
     if not repos:
-        die("no git repos at %s (neither a repo nor a folder of repos)" % path)
+        return "empty", {}, path     # empty folder -> a new project you fill via `cc repo add`
     return "multi", repos, path
 
 # ----------------------------- session capture -----------------------------
@@ -268,6 +290,63 @@ def resolve_session(primary_wt):
 
 # ----------------------------- project cmds -----------------------------
 
+def cmd_project_new(args):
+    """Create a brand-new EMPTY project (the folder too), ready to fill with repos via `cc repo add`."""
+    base = (Path(args.path).expanduser().resolve() if args.path
+            else (Path.home() / "Codebase" / "work" / args.name))
+    base.mkdir(parents=True, exist_ok=True)
+    def fn(s):
+        if args.name in s["projects"]:
+            die("project '%s' already exists" % args.name)
+        s["projects"][args.name] = {"path": str(base), "kind": "multi", "repos": {},
+                                    "default_assignee": glab_user()}
+    mutate(fn)
+    print("пустой проект '%s' создан (%s).\n"
+          "Добавь репо раздельно: `cc repo add %s frontend --new`, `cc repo add %s backend --new`.\n"
+          "Remote проставишь позже: `cc repo set %s <repo> --remote <group/proj>`."
+          % (args.name, base, args.name, args.name, args.name))
+
+def cmd_repo_add(args):
+    """Add a repo to an existing project: --new (git init fresh), --clone <url>, or --path <dir>."""
+    s = load_state()
+    proj = s["projects"].get(args.project) or die("unknown project '%s'" % args.project)
+    base = Path(proj["path"])
+    name = args.name
+    if name in proj["repos"]:
+        die("repo '%s' уже в проекте '%s'" % (name, args.project))
+    if args.path:
+        dest = Path(args.path).expanduser().resolve()
+        if not (dest / ".git").exists():
+            die("не git-репозиторий: %s" % dest)
+    elif args.clone:
+        dest = base / name
+        base.mkdir(parents=True, exist_ok=True)
+        print("clone %s -> %s …" % (args.clone, dest))
+        run(["git", "clone", args.clone, str(dest)], check=True, timeout=600)
+    else:  # --new (default): fresh git init
+        dest = base / name
+        if dest.exists() and any(dest.iterdir()):
+            die("%s уже существует и не пуст" % dest)
+        dest.mkdir(parents=True, exist_ok=True)
+        run(["git", "init", str(dest)], check=True)
+        c = run(["git", "commit", "--allow-empty", "-m", "chore: init %s" % name], cwd=dest, check=False)
+        if c.returncode != 0:
+            print("  (заметка: пустой initial commit не создан — настрой git user.name/email; "
+                  "без коммита worktrees задач не создадутся)")
+    info = repo_info(dest)
+    if args.remote:
+        info["remote"] = args.remote
+        info["provider"] = ("gitlab" if "gitlab" in args.remote
+                            else "github" if "github" in args.remote else info.get("provider", "unknown"))
+    if args.run:
+        info["run"] = args.run
+    def fn(st):
+        st["projects"][args.project]["repos"][name] = info
+    mutate(fn)
+    tail = "" if info.get("remote") else ("  — remote пуст: `cc repo set %s %s --remote <group/proj>`"
+                                          % (args.project, name))
+    print("repo '%s' добавлен в '%s' (%s)%s" % (name, args.project, dest, tail))
+
 def cmd_project_add(args):
     s = load_state()
     kind, repos, path = detect_repos(args.path)
@@ -275,6 +354,12 @@ def cmd_project_add(args):
     s["projects"][name] = {"path": str(path), "kind": kind, "repos": repos,
                            "default_assignee": glab_user()}
     save_state(s)
+    if kind == "empty":
+        print("проект '%s' создан ПУСТЫМ (%s — репозиториев пока нет).\n"
+              "Добавь репо раздельно: `cc repo add %s frontend --new`, `cc repo add %s backend --new` "
+              "(или --clone <url> / --path <dir>). Remote позже: `cc repo set %s <repo> --remote <slug>`."
+              % (name, path, name, name, name))
+        return
     print("project '%s' added - %s, %d repo(s)  (assignee=%s):" % (
         name, kind, len(repos), s["projects"][name]["default_assignee"] or "-"))
     for rn, ri in repos.items():
@@ -847,6 +932,9 @@ def cmd_task_mr(args):
     for r in t["repos"]:
         wt = t["worktrees"][r]
         ri = proj["repos"][r]
+        if not ri.get("remote"):
+            print("[%s] remote не задан — пропуск MR (`cc repo set %s %s --remote <slug>`)" % (r, epic["project"], r))
+            continue
         target = t["base"][r]
         branch = t["branch"]
         cmp_ref = ("origin/" + target) if have_ref(wt, "origin/" + target) else target
@@ -990,6 +1078,9 @@ def cmd_epic_mr(args):
         if not (have_ref(rp, key) or have_ref(rp, "origin/" + key)):
             continue
         have_any += 1
+        if not ri.get("remote"):
+            print("[%s] remote не задан — пропуск (`cc repo set %s %s --remote <slug>`)" % (r, e["project"], r))
+            continue
         db = default_branch(rp)
         ahead = _ahead_count(rp, key, db)
         if ahead == 0:
@@ -1289,8 +1380,14 @@ def cmd_repo_set(args):
         r["run"] = args.run
     if args.reviewer is not None:
         r["reviewer"] = args.reviewer
+    if getattr(args, "remote", None) is not None:
+        r["remote"] = args.remote
+        if args.remote:
+            r["provider"] = ("gitlab" if "gitlab" in args.remote
+                            else "github" if "github" in args.remote else r.get("provider", "unknown"))
     save_state(s)
-    print("%s/%s  setup=%r  run=%r  reviewer=%r" % (args.project, args.repo, r.get("setup", ""), r.get("run", ""), r.get("reviewer", "")))
+    print("%s/%s  remote=%r  run=%r  reviewer=%r" % (
+        args.project, args.repo, r.get("remote", ""), r.get("run", ""), r.get("reviewer", "")))
 
 def cmd_repo_ls(args):
     s = load_state()
@@ -1590,6 +1687,7 @@ def build_parser():
 
     pj = sub.add_parser("project").add_subparsers(dest="cmd", required=True)
     a = pj.add_parser("add"); a.add_argument("path"); a.add_argument("name", nargs="?"); a.set_defaults(fn=cmd_project_add)
+    a = pj.add_parser("new"); a.add_argument("name"); a.add_argument("path", nargs="?"); a.set_defaults(fn=cmd_project_new)
     pj.add_parser("ls").set_defaults(fn=cmd_project_ls)
     a = pj.add_parser("jira"); a.add_argument("project")
     a.add_argument("--site"); a.add_argument("--email"); a.add_argument("--token")
@@ -1608,8 +1706,12 @@ def build_parser():
     a.set_defaults(fn=cmd_jira_create_epic)
 
     rp_ = sub.add_parser("repo").add_subparsers(dest="cmd", required=True)
+    a = rp_.add_parser("add"); a.add_argument("project"); a.add_argument("name")
+    g = a.add_mutually_exclusive_group()
+    g.add_argument("--new", action="store_true"); g.add_argument("--clone"); g.add_argument("--path")
+    a.add_argument("--remote"); a.add_argument("--run"); a.set_defaults(fn=cmd_repo_add)
     a = rp_.add_parser("set"); a.add_argument("project"); a.add_argument("repo")
-    a.add_argument("--setup"); a.add_argument("--run"); a.add_argument("--reviewer"); a.set_defaults(fn=cmd_repo_set)
+    a.add_argument("--setup"); a.add_argument("--run"); a.add_argument("--reviewer"); a.add_argument("--remote"); a.set_defaults(fn=cmd_repo_set)
     a = rp_.add_parser("ls"); a.add_argument("project"); a.set_defaults(fn=cmd_repo_ls)
     a = rp_.add_parser("members"); a.add_argument("project"); a.add_argument("repo"); a.set_defaults(fn=cmd_repo_members)
 

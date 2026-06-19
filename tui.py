@@ -955,8 +955,9 @@ class CCApp(App):
             for tid, st in new.items():
                 if tid in s["tasks"]:
                     s["tasks"][tid]["status"] = st
-        cc.mutate(apply)
-        self._safe_build_tree()
+        # best-effort: never block/starve a foreground `cc` command; retry next tick if busy
+        if cc.mutate_try(apply):
+            self._safe_build_tree()
 
     def _sync_mrs(self):
         st = cc.load_state()
