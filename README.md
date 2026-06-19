@@ -62,7 +62,7 @@ cc epic unarchive FEAT-1                          # bring it back to the live li
 `a` +Project · `e` +Epic · `n` +Task · `o` chat (interactive, new terminal/cmux tab) ·
 `v` view chat (read-only) · `c` Cursor · `d` diff · `m`/`M` MR dry/create ·
 `g` MR links · `D` refresh deploy status · `x` cleanup task / archive epic ·
-`R` reviewers · `r` refresh · `q` quit.
+`R` reviewers · `r` refresh (on a task: re-fetch its changes; on an epic: re-sync Jira) · `q` quit.
 
 ### Deploy status
 The project panel shows, per repo, what's currently deployed — `stage:<ref> prod:<ref>`
@@ -142,8 +142,11 @@ to any repo/MR.
 - **Lightweight status polling.** The TUI never shells `git` on a loop in steady state: a
   cheap pid check (8s) tracks running agents and detects the moment one finishes; the
   expensive git probe runs **once** per task on that running→finished edge (or on manual
-  `r`), then the verdict is cached until you act on it. Background pollers run on daemon
-  threads and every `git`/`glab` call is timeout-bounded, so quitting `cc tui` is instant
-  and it doesn't thrash your CPU.
+  `r`), then the verdict is cached until you act on it. Likewise the detail pane's
+  per-repo **working-tree changes** are fetched **once** (lazily, off-thread) the first
+  time you rest on a task and then cached — moving the cursor around the tree never
+  re-shells `git`; press `r` on a task to re-fetch its changes. Background pollers run on
+  daemon threads and every `git`/`glab` call is timeout-bounded, so quitting `cc tui` is
+  instant and it doesn't thrash your CPU.
 
 MIT licensed. Not affiliated with Anthropic, GitLab, or Atlassian.

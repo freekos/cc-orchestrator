@@ -871,6 +871,8 @@ class CCApp(App):
         self._closing = False
         self._busy = set()           # daemon-thread dedup (replaces run_worker exclusive=)
         self._force_status = False   # set by manual refresh to re-probe git for every task
+        self._changes = {}           # tid -> {repo: git-status text}; lazily filled, never on every focus
+        self._changes_timer = None   # debounce handle for the focus -> lazy-fetch
         self.build_tree()
         self.set_interval(8.0, self.refresh_glyphs)      # cheap (pid-based fast_status, no git)
         self.set_interval(90.0, self.kick_sync)
@@ -1053,7 +1055,49 @@ class CCApp(App):
         return node.data if node and node.data else None
 
     def on_tree_node_highlighted(self, event):
-        self.show_detail(event.node.data if event.node else None)
+        data = event.node.data if event.node else None
+        self.show_detail(data)
+        # First time you rest on a task, fetch its working-tree changes ONCE (debounced, off-thread)
+        # and cache them. We never re-shell git on subsequent focuses — only `r` re-fetches. This is
+        # what used to lag: git status ran for every repo on every cursor move across the tree.
+        if data and data.get("type") == "task" and data["id"] not in self._changes:
+            self._schedule_changes(data["id"])
+
+    def _schedule_changes(self, tid):
+        if self._changes_timer is not None:
+            try:
+                self._changes_timer.stop()
+            except Exception:
+                pass
+        self._changes_timer = self.set_timer(0.35, lambda: self._fetch_changes(tid))
+
+    def _fetch_changes(self, tid, force=False):
+        if force:
+            self._changes.pop(tid, None)
+        self._bg("changes:" + tid, lambda: self._compute_changes(tid))
+
+    def _compute_changes(self, tid):
+        snap = cc.load_state()
+        t = snap["tasks"].get(tid)
+        if not t:
+            return
+        res = {}
+        for r in t.get("repos", []):
+            if self._closing:
+                return
+            wt = t.get("worktrees", {}).get(r)
+            res[r] = cc._changed(wt) if wt else ""
+        self._changes[tid] = res
+        if self._closing:
+            return
+        def upd():
+            cur = self.current()
+            if cur and cur.get("type") == "task" and cur.get("id") == tid:
+                self.show_detail(cur)
+        try:
+            self.call_from_thread(upd)
+        except Exception:
+            pass
 
     def show_detail(self, data):
         d = self.query_one("#detail", Static)
@@ -1088,9 +1132,13 @@ class CCApp(App):
             if t.get("merged"):
                 L += ["", "[bold green]✓ все MR влиты — x = очистить worktrees[/bold green]"]
             L += ["", "[b]changes:[/b]"]
-            for r in t["repos"]:
-                st = cc._changed(t["worktrees"][r])
-                L.append("  [%s] %s" % (r, st.replace("\n", "; ") if st else "(none)"))
+            cached = self._changes.get(data["id"])
+            if cached is None:
+                L.append("  [dim]…(r — показать локальные изменения)[/dim]")
+            else:
+                for r in t["repos"]:
+                    st = cached.get(r, "")
+                    L.append("  [%s] %s" % (r, st.replace("\n", "; ") if st else "(none)"))
             L += ["", "[dim]o=chat v=view c=cursor d=diff m=dry M=create g=links x=cleanup[/dim]"]
             d.update("\n".join(L))
         elif data["type"] == "epic":
@@ -1165,14 +1213,19 @@ class CCApp(App):
         walk(self.query_one("#tree", Tree).root)
 
     def action_refresh(self):
-        ekey = self._current_epic()
-        if ekey:
+        cur = self.current()
+        # `r` on an EPIC node = re-sync its children from Jira
+        if cur and cur.get("type") == "epic":
+            ekey = cur["id"]
             s = self.state()
             proj = s["epics"].get(ekey, {}).get("project")
             if s["projects"].get(proj, {}).get("jira", {}).get("token"):
                 self.notify("синхронизирую задачи эпика из Jira …")
                 self.run_worker(lambda: self._sync_epic(ekey), thread=True, exclusive=True, group="esync")
                 return
+        # `r` on a TASK node = re-probe just that task's working-tree changes (the only on-demand git)
+        if cur and cur.get("type") == "task":
+            self._fetch_changes(cur["id"], force=True)
         self._force_status = True
         self.kick_statuses()
         self.build_tree()
