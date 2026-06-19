@@ -454,6 +454,12 @@ def _changed(wt):
     lines = [l for l in out.splitlines() if l[3:].strip().strip('"') and not _cc_artifact(l[3:].strip().strip('"'))]
     return "\n".join(lines).strip()
 
+def _head_sha(wt):
+    if not os.path.isdir(wt):
+        return None
+    r = run(["git", "rev-parse", "HEAD"], cwd=wt, check=False)
+    return r.stdout.strip() if r.returncode == 0 else None
+
 def pid_alive(pid):
     try:
         os.kill(int(pid), 0)
@@ -462,19 +468,31 @@ def pid_alive(pid):
         return False
 
 def task_status(t):
-    """Derive status from reality: running(bg agent alive) > merged > mr > review > idle."""
+    """Derive status from reality:
+       running (agent alive) > review (NEW local work) > merged > mr > review (committed, no MR) > idle.
+    'NEW local work' = uncommitted changes anywhere, OR — for an already-merged task — commits beyond
+    the point we recorded at merge time (merged_sha; squash-merge proof). So a task you already merged
+    flips back to 🟡 the moment you touch it again, instead of staying ✅ forever."""
     pid = t.get("pid")
     if pid and pid_alive(pid):
         return "running"
+    wts = t.get("worktrees", {})
+    # uncommitted changes -> needs you, regardless of MR/merge state
+    for r, wt in wts.items():
+        if os.path.isdir(wt) and _changed(wt):
+            return "review"
     if t.get("merged"):
+        msha = t.get("merged_sha", {}) or {}
+        for r, wt in wts.items():
+            rec = msha.get(r)
+            if rec and _head_sha(wt) not in (None, rec):   # new commits after the merge
+                return "review"
         return "merged"
     if t.get("mrs"):
         return "mr"
-    for r, wt in t.get("worktrees", {}).items():
+    for r, wt in wts.items():
         if not os.path.isdir(wt):
             continue
-        if _changed(wt):
-            return "review"
         base = t.get("base", {}).get(r)
         if base:
             cmp_ref = ("origin/" + base) if have_ref(wt, "origin/" + base) else base
@@ -589,12 +607,21 @@ def cmd_task_mrs(args):
         else:
             print("[%s] (no MR)" % r)
     all_merged = any_url > 0 and open_ == 0
+    merged_sha = {}
+    if all_merged:
+        for r in t["repos"]:
+            wt = t.get("worktrees", {}).get(r)
+            sha = _head_sha(wt) if wt else None
+            if sha:
+                merged_sha[r] = sha
     def apply(st):
         tt = st["tasks"].get(args.task)
         if tt is not None:
             tt.setdefault("mrs", {}).update(found)
             tt["mr_state"] = states
             tt["merged"] = all_merged
+            if all_merged:
+                tt["merged_sha"] = merged_sha
     mutate(apply)
     if not any_url:
         print("(no MRs found — create with M)")
@@ -650,31 +677,40 @@ def cmd_task_abort(args):
 
 
 def cmd_task_done(args):
+    """Готово и убрать с доски: Jira(task)->Done, snap local worktrees, drop the task from cc.
+    Remote MR/branch are left intact (merged work stays). Refuses if uncommitted, unless --force."""
     s = load_state()
     t = s["tasks"].get(args.task) or die("unknown task '%s'" % args.task)
     proj = s["projects"][s["epics"][t["epic"]]["project"]]
     problems = [("%s has uncommitted changes" % r) for r in t["repos"] if _changed(t["worktrees"][r])]
     if problems and not args.force:
-        die("refusing cleanup:\n  - " + "\n  - ".join(problems) + "\n(use --force to override)")
+        die("refusing — есть незакоммиченное:\n  - " + "\n  - ".join(problems) + "\n(--force чтобы убрать всё равно)")
     if t.get("pid") and pid_alive(t["pid"]):
         try:
             os.kill(int(t["pid"]), 15)
         except Exception:
             pass
-    task_dir = Path(next(iter(t["worktrees"].values()))).parent
+    jira = proj.get("jira"); jkey = t.get("jira")
+    if jira and jira.get("token") and jkey:
+        if jira_status_category(jira, jkey) == "done":
+            print("jira %s уже Done" % jkey)
+        else:
+            ok, info = jira_transition_done(jira, jkey)
+            print(("jira %s -> Done (%s)" % (jkey, info)) if ok else ("jira %s не смог: %s" % (jkey, info)))
+    task_dir = Path(next(iter(t["worktrees"].values()))).parent if t.get("worktrees") else None
     for r in t["repos"]:
         rp = proj["repos"].get(r, {}).get("path")
-        if not rp:
-            continue
-        git(["worktree", "remove", t["worktrees"][r], "--force"], cwd=rp, check=False)
-        git(["worktree", "prune"], cwd=rp, check=False)
-        print("removed worktree: %s" % t["worktrees"][r])
-    if task_dir.exists():
+        wt = t["worktrees"].get(r)
+        if rp and wt:
+            git(["worktree", "remove", wt, "--force"], cwd=rp, check=False)
+            git(["worktree", "prune"], cwd=rp, check=False)
+            print("removed worktree: %s" % wt)
+    if task_dir and task_dir.exists():
         shutil.rmtree(task_dir, ignore_errors=True)
         print("removed task dir: %s" % task_dir)
-    t["status"] = "done"
+    s["tasks"].pop(args.task, None)
     save_state(s)
-    print("task %s archived." % args.task)
+    print("task %s готово и убрано с доски (Jira->Done; remote MR/ветка не тронуты)." % args.task)
 
 def find_mr(remote, branch, cwd):
     """Web URL of the MR for this branch (or None) — looks up existing via glab mr list."""
@@ -988,6 +1024,70 @@ def cmd_epic_sync(args):
     print("epic %s: cached %d Jira child issue(s)" % (args.key, n))
 
 
+def _jira_done_keys(jira, keys):
+    print("  jira: перевожу в Done %d issue(s) …" % len(keys))
+    done = skipped = failed = 0
+    for k in keys:
+        if jira_status_category(jira, k) == "done":
+            print("    %-10s уже Done" % k); skipped += 1; continue
+        ok, info = jira_transition_done(jira, k)
+        if ok:
+            print("    %-10s -> Done (%s)" % (k, info)); done += 1
+        else:
+            print("    %-10s не смог: %s" % (k, info)); failed += 1
+    print("  jira итог: %d переведено, %d уже Done, %d не смог" % (done, skipped, failed))
+
+def _epic_teardown(s, proj, key):
+    """Remove an epic + its tasks from cc LOCALLY (worktrees, branches, dirs, state). Remote
+    MRs/branches untouched. Returns the list of removed task ids."""
+    tasks = [t for t, v in s["tasks"].items() if v.get("epic") == key]
+    for tid in tasks:
+        t = s["tasks"][tid]
+        dirty = [r for r in t.get("repos", []) if _changed(t.get("worktrees", {}).get(r, ""))]
+        if dirty:
+            print("  ! task %s незакоммичено в: %s (убираю всё равно)" % (tid, ", ".join(dirty)))
+        task_dir = Path(next(iter(t["worktrees"].values()))).parent if t.get("worktrees") else None
+        for r in t.get("repos", []):
+            rp = proj["repos"].get(r, {}).get("path")
+            wt = t.get("worktrees", {}).get(r)
+            if rp and wt:
+                git(["worktree", "remove", wt, "--force"], cwd=rp, check=False)
+                git(["worktree", "prune"], cwd=rp, check=False)
+                git(["branch", "-D", t["branch"]], cwd=rp, check=False)
+        if task_dir and task_dir.exists():
+            shutil.rmtree(task_dir, ignore_errors=True)
+        s["tasks"].pop(tid, None)
+        print("  removed task %s" % tid)
+    epic_dir = Path(proj.get("path", "")) / "cctui" / key
+    try:
+        if epic_dir.exists() and not any(epic_dir.iterdir()):
+            epic_dir.rmdir()
+    except Exception:
+        pass
+    s["epics"].pop(key, None)
+    return tasks
+
+def cmd_epic_done(args):
+    """Готово и убрать с доски: Jira(epic + children/linked)->Done, then remove the epic and its
+    tasks from cc locally. Remote MRs/branches are NOT touched (merged work stays)."""
+    s = load_state()
+    e = s["epics"].get(args.key) or die("unknown epic '%s'" % args.key)
+    proj = s["projects"][e["project"]]
+    jira = proj.get("jira")
+    if jira and jira.get("token") and args.key.split("-")[0] == jira.get("project_key"):
+        try:
+            children = [c["key"] for c in jira_epic_children(jira, args.key)]
+        except Exception:
+            children = []
+        local = [t.get("jira") for t in s["tasks"].values()
+                 if t.get("epic") == args.key and t.get("jira")]
+        keys = list(dict.fromkeys([args.key] + children + local))
+        _jira_done_keys(jira, keys)
+    removed = _epic_teardown(s, proj, args.key)
+    save_state(s)
+    print("epic %s готово и убрано с доски%s (remote MR/ветки не тронуты)." % (
+        args.key, (" + %d задач(и)" % len(removed)) if removed else ""))
+
 def cmd_epic_archive(args):
     s = load_state()
     e = s["epics"].get(args.key) or die("unknown epic '%s'" % args.key)
@@ -1003,18 +1103,7 @@ def cmd_epic_archive(args):
         children = [c["key"] for c in jira_epic_children(jira, args.key)]
     except Exception:
         children = []
-    keys = [args.key] + children
-    print("  jira: перевожу в Done %d issue(s) …" % len(keys))
-    done = skipped = failed = 0
-    for k in keys:
-        if jira_status_category(jira, k) == "done":
-            print("    %-10s уже Done" % k); skipped += 1; continue
-        ok, info = jira_transition_done(jira, k)
-        if ok:
-            print("    %-10s -> Done (%s)" % (k, info)); done += 1
-        else:
-            print("    %-10s не смог: %s" % (k, info)); failed += 1
-    print("  jira итог: %d переведено, %d уже Done, %d не смог" % (done, skipped, failed))
+    _jira_done_keys(jira, [args.key] + children)
 
 def cmd_epic_unarchive(args):
     s = load_state()
@@ -1035,34 +1124,7 @@ def cmd_epic_rm(args):
             "Remote MRs/branches are left intact — run `cc task abort <task>` first if you want those gone."
             % (args.key, len(tasks), ", ".join(tasks)))
     # --force: tear down each task's LOCAL worktrees + dirs (remote side untouched)
-    for tid in tasks:
-        t = s["tasks"][tid]
-        dirty = [r for r in t.get("repos", []) if _changed(t.get("worktrees", {}).get(r, ""))]
-        if dirty:
-            print("  ! task %s has uncommitted changes in: %s (removing anyway)" % (tid, ", ".join(dirty)))
-        task_dir = Path(next(iter(t["worktrees"].values()))).parent if t.get("worktrees") else None
-        sess = t.get("tmux")
-        if sess:
-            subprocess.run(["tmux", "kill-session", "-t", sess], capture_output=True)
-        for r in t.get("repos", []):
-            rp = proj["repos"].get(r, {}).get("path")
-            wt = t.get("worktrees", {}).get(r)
-            if rp and wt:
-                git(["worktree", "remove", wt, "--force"], cwd=rp, check=False)
-                git(["worktree", "prune"], cwd=rp, check=False)
-                git(["branch", "-D", t["branch"]], cwd=rp, check=False)
-        if task_dir and task_dir.exists():
-            shutil.rmtree(task_dir, ignore_errors=True)
-        s["tasks"].pop(tid, None)
-        print("  removed task %s (worktrees + dir)" % tid)
-    # remove the epic's cctui dir if it's now empty (never touch sibling epics)
-    epic_dir = Path(proj.get("path", "")) / "cctui" / args.key
-    try:
-        if epic_dir.exists() and not any(epic_dir.iterdir()):
-            epic_dir.rmdir()
-    except Exception:
-        pass
-    s["epics"].pop(args.key, None)
+    _epic_teardown(s, proj, args.key)
     save_state(s)
     print("epic %s removed from cc%s (Jira + remote MRs/branches NOT touched)" % (
         args.key, (" + %d task(s) incl. their worktrees" % len(tasks)) if tasks else ""))
@@ -1501,6 +1563,7 @@ def build_parser():
     a = ep.add_parser("memory"); a.add_argument("key"); a.set_defaults(fn=cmd_epic_memory)
     a = ep.add_parser("sync"); a.add_argument("key"); a.set_defaults(fn=cmd_epic_sync)
     a = ep.add_parser("open"); a.add_argument("key"); a.set_defaults(fn=cmd_epic_open)
+    a = ep.add_parser("done"); a.add_argument("key"); a.set_defaults(fn=cmd_epic_done)
     a = ep.add_parser("archive"); a.add_argument("key"); a.set_defaults(fn=cmd_epic_archive)
     a = ep.add_parser("unarchive"); a.add_argument("key"); a.set_defaults(fn=cmd_epic_unarchive)
     a = ep.add_parser("rm"); a.add_argument("key"); a.add_argument("--force", action="store_true"); a.set_defaults(fn=cmd_epic_rm)

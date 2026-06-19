@@ -14,20 +14,24 @@ from textual.binding import Binding
 import threading
 
 ENGINE = str(Path(__file__).parent / "cc.py")
-GLYPH = {"running": "~", "review": "*", "mr": "MR", "merged": "v", "idle": ".", "done": "v"}
+GLYPH = {"running": "🔵", "review": "🟡", "mr": "🟣", "merged": "✅", "idle": "⚪", "done": "✅"}
 
 
 def fast_status(t):
-    """Cheap status for rendering: bg agent pid alive -> running; else flags; else cached
-    (the git-based review/idle refinement is computed off-thread by _refresh_statuses)."""
+    """Cheap status for rendering: live agent -> running; otherwise the cached status computed
+    off-thread by _refresh_statuses (it encodes merged-with-new-edits -> review). Falls back to
+    flags only before the first refresh."""
     pid = t.get("pid")
     if pid and cc.pid_alive(pid):
         return "running"
+    st = t.get("status")
+    if st in ("review", "mr", "merged", "idle"):
+        return st
     if t.get("merged"):
         return "merged"
     if t.get("mrs"):
         return "mr"
-    return t.get("status") or "review"
+    return "review"
 
 
 class NewEpicScreen(ModalScreen):
@@ -712,35 +716,28 @@ class ProjectJiraScreen(ModalScreen):
 
 
 class EpicManageScreen(ModalScreen):
-    """Archive (hide under 'Архив') or unarchive an epic.
-    Archiving also moves the epic + all its child tasks to Done in Jira."""
+    """Готово и убрать с доски: Jira(эпик + все задачи) -> Done, затем убрать эпик и его задачи
+    из cc локально (worktrees/ветки/папки). Remote MR/ветки не трогаем."""
     CSS = """
     EpicManageScreen { align: center middle; }
-    #dlg { width: 68; max-width: 92%; height: auto; padding: 1 2;
+    #dlg { width: 72; max-width: 92%; height: auto; padding: 1 2;
            border: round $accent; background: $surface; }
     #dlg Label { margin-bottom: 1; }
-    #dlg Button { margin: 0 2 0 0; min-width: 18; }
+    #dlg Button { margin: 0 2 0 0; min-width: 22; }
     """
     BINDINGS = [Binding("escape", "cancel", "Cancel")]
 
-    def __init__(self, key, archived):
+    def __init__(self, key):
         super().__init__()
         self.key = key
-        self.archived = archived
 
     def compose(self):
         with Vertical(id="dlg"):
             yield Label("[b]Эпик %s[/b]" % self.key)
-            if self.archived:
-                yield Label("[dim]Эпик в архиве. Разархивировать вернёт его в список живых.\n(статусы в Jira обратно не меняются)[/dim]")
-                with Horizontal():
-                    yield Button("Разархивировать", id="unarch", variant="primary")
-                    yield Button("Отмена", id="cancel")
-            else:
-                yield Label("[dim]Архив = убрать эпик в раздел 'Архив' (свёрнут внизу проекта).\nВ Jira переведём в Done сам эпик и ВСЕ его задачи (уже-Done пропустим).\nRemote MR/ветки не трогаем.[/dim]")
-                with Horizontal():
-                    yield Button("Архивировать", id="arch", variant="primary")
-                    yield Button("Отмена", id="cancel")
+            yield Label("[dim]«Готово и убрать с доски»:\n  • в Jira переведём в Done сам эпик и ВСЕ его задачи (уже-Done пропустим)\n  • снимем локальные worktrees/ветки/папки задач\n  • эпик исчезнет из cc (история остаётся в Jira + git; remote MR/ветки целы)[/dim]")
+            with Horizontal():
+                yield Button("Готово и убрать с доски", id="done", variant="primary")
+                yield Button("Отмена", id="cancel")
 
     def on_button_pressed(self, event):
         self.dismiss(None if event.button.id == "cancel" else event.button.id)
@@ -767,10 +764,10 @@ class TaskManageScreen(ModalScreen):
     def compose(self):
         with Vertical(id="dlg"):
             yield Label("[b]Задача %s[/b]" % self.tid)
-            yield Label("[dim]Cleanup = снять локальные worktrees (ветки/MR на remote НЕ трогаем; откажет если есть незакоммиченное).\nAbort = закрыть MR + удалить remote-ветки + снести worktrees + убрать из cc (для выбросить/тест).[/dim]")
+            yield Label("[dim]«Готово и убрать с доски» = Jira задачи -> Done + снять локальные worktrees + убрать из cc (remote MR/ветка целы; откажет если незакоммичено).\nAbort = выбросить: закрыть MR + удалить remote-ветки + снести worktrees + убрать из cc.[/dim]")
             with Horizontal():
-                yield Button("Cleanup", id="done", variant="primary")
-                yield Button("Abort", id="abort", variant="error")
+                yield Button("Готово и убрать с доски", id="done", variant="primary")
+                yield Button("Abort (выбросить)", id="abort", variant="error")
                 yield Button("Cancel", id="cancel")
 
     def on_button_pressed(self, event):
@@ -869,7 +866,6 @@ class CCApp(App):
         self.title = "cc — multi-repo orchestrator"
         self._detail_urls = []
         self._busy = set()           # daemon-thread dedup (replaces run_worker exclusive=)
-        self._force_status = False   # set by manual refresh to re-probe git for every task
         self._changes = {}           # tid -> {repo: git-status text}; lazily filled, never on every focus
         self._changes_timer = None   # debounce handle for the focus -> lazy-fetch
         self._epic_synced = set()    # epics whose master-MRs we've already looked up this session
@@ -877,7 +873,7 @@ class CCApp(App):
         self.build_tree()
         self.set_interval(8.0, self.refresh_glyphs)      # cheap (pid-based fast_status, no git)
         self.set_interval(90.0, self.kick_sync)
-        self.set_interval(30.0, self.kick_statuses)      # full status (git) on a daemon thread
+        self.set_interval(15.0, self.kick_statuses)      # full status (git) on a daemon thread
         self.kick_statuses()
 
     def _bg(self, name, fn):
@@ -932,30 +928,17 @@ class CCApp(App):
         self._bg("statuses", self._refresh_statuses)
 
     def _refresh_statuses(self):
-        # Status worker. The only EXPENSIVE branch is the git probe (status --short + rev-list per
-        # worktree) for a task with no live agent and no MR. We run it ONLY for tasks that just
-        # transitioned (running -> finished, or unknown): a task already settled as review/idle/mr/
-        # merged only changes on a user action (MR/cleanup/manual refresh), never with time — so we
-        # reuse its cached verdict instead of re-shelling git every tick. That removes the constant
-        # git-process storm that was lagging the machine.
-        force = self._force_status
-        self._force_status = False
+        # Off-thread status sweep over the (small, active) board: full git-based task_status for
+        # every non-running task, so a merged task you re-touched flips back to review, and new
+        # finishes surface. Runs on a daemon thread; the board stays small because finished work is
+        # removed via "Готово и убрать с доски", so this isn't the per-focus git storm we killed.
         snap = cc.load_state()
         new = {}
         for tid, t in snap["tasks"].items():
             if self._closing:
                 return
             pid = t.get("pid")
-            if pid and cc.pid_alive(pid):
-                new[tid] = "running"; continue
-            if t.get("merged"):
-                new[tid] = "merged"; continue
-            if t.get("mrs"):
-                new[tid] = "mr"; continue
-            cached = t.get("status")
-            if not force and cached in ("review", "idle", "mr", "merged"):
-                new[tid] = cached; continue       # settled — skip the git probe
-            new[tid] = cc.task_status(t)           # finished this cycle: decide review/idle once
+            new[tid] = "running" if (pid and cc.pid_alive(pid)) else cc.task_status(t)
         if self._closing:
             return
         if all(snap["tasks"][tid].get("status") == st for tid, st in new.items()):
@@ -983,8 +966,8 @@ class CCApp(App):
     def state(self):
         return cc.load_state()
 
-    TASK_GROUPS = [("review", "🟡 Ждут тебя", True), ("running", "🔵 В работе", True),
-                   ("mr", "🟣 На ревью (MR)", True), ("merged", "✅ Готово", False)]
+    # flat ordering under an epic: needs-you first, finished last
+    TASK_ORDER = {"review": 0, "running": 1, "mr": 2, "idle": 3, "merged": 4}
 
     def _unseen(self, t):
         """Agent finished and wrote output you haven't opened yet."""
@@ -994,46 +977,20 @@ class CCApp(App):
         except Exception:
             return False
 
-    def _add_epic_node(self, parent, ekey, e, s, expand=True, dim=False):
-        label = "# %s  %s" % (ekey, e.get("summary", ""))
-        en = parent.add("[dim]%s[/dim]" % label if dim else label,
+    def _add_epic_node(self, parent, ekey, e, s, expand=True):
+        en = parent.add("# %s  %s" % (ekey, e.get("summary", "")),
                         data={"type": "epic", "id": ekey}, expand=expand)
-        if dim:  # archived epic: flat dim list, no folders
-            for tid, t in s["tasks"].items():
-                if t["epic"] == ekey:
-                    en.add_leaf("[dim]%s %s[/dim]" % (GLYPH.get(fast_status(t), "?"), t["title"]),
-                                data={"type": "task", "id": tid})
-            return en
-        # group live tasks by state into collapsible folders
-        buckets = {"review": [], "running": [], "mr": [], "merged": []}
-        linked = set()
-        for tid, t in s["tasks"].items():
-            if t["epic"] != ekey:
-                continue
-            if t.get("jira"):
-                linked.add(t["jira"])
+        # flat list of this epic's tasks, sorted needs-you -> finished; finished is dimmed.
+        tasks = [(tid, t) for tid, t in s["tasks"].items() if t["epic"] == ekey]
+        tasks.sort(key=lambda it: self.TASK_ORDER.get(fast_status(it[1]), 0))
+        for tid, t in tasks:
             st = fast_status(t)
-            buckets[st if st in buckets else "review"].append((tid, t))
-        for key, title, exp in self.TASK_GROUPS:
-            items = buckets[key]
-            if not items:
-                continue
-            gn = en.add("%s (%d)" % (title, len(items)),
-                        data={"type": "taskgroup", "epic": ekey, "state": key}, expand=exp)
-            for tid, t in items:
-                badge = "💬 " if (key == "review" and self._unseen(t)) else ""
-                gn.add_leaf("%s%s %s" % (badge, GLYPH.get(fast_status(t), "?"), t["title"]),
-                            data={"type": "task", "id": tid})
-        # Jira child issues not yet started -> collapsed folder
-        stubs = [c for c in e.get("jira_children", []) if c["key"] not in linked]
-        if stubs:
-            jn = en.add("📋 Jira-задачи (%d)" % len(stubs),
-                        data={"type": "jiragroup", "epic": ekey}, expand=False)
-            for c in stubs:
-                mark = "[green]✓[/green]" if c.get("done") else "·"
-                jn.add_leaf("[dim]%s %s  %s[/dim]" % (mark, c["key"], c.get("summary", "")[:46]),
-                            data={"type": "jira_stub", "epic": ekey, "key": c["key"],
-                                  "summary": c.get("summary", ""), "done": c.get("done", False)})
+            badge = "💬 " if (st == "review" and self._unseen(t)) else ""
+            row = "%s%s %s" % (badge, GLYPH.get(st, "?"), t["title"])
+            en.add_leaf("[dim]%s[/dim]" % row if st == "merged" else row,
+                        data={"type": "task", "id": tid})
+        if not tasks:
+            en.add_leaf("[dim](нет задач — n чтобы добавить)[/dim]", data=None)
         return en
 
     def build_tree(self):
@@ -1044,16 +1001,11 @@ class CCApp(App):
         for pname, p in s["projects"].items():
             pn = tree.root.add("%s  [%d repo]" % (pname, len(p["repos"])),
                                data={"type": "project", "id": pname}, expand=True)
-            live = [(k, e) for k, e in s["epics"].items() if e["project"] == pname and not e.get("archived")]
-            arch = [(k, e) for k, e in s["epics"].items() if e["project"] == pname and e.get("archived")]
-            for ekey, e in live:
+            epics = [(k, e) for k, e in s["epics"].items()
+                     if e["project"] == pname and not e.get("archived")]
+            for ekey, e in epics:
                 self._add_epic_node(pn, ekey, e, s, expand=True)
-            if arch:
-                an = pn.add("🗄  Архив (%d)" % len(arch),
-                            data={"type": "archive", "id": pname}, expand=False)
-                for ekey, e in arch:
-                    self._add_epic_node(an, ekey, e, s, expand=False, dim=True)
-            if not live and not arch:
+            if not epics:
                 pn.add_leaf("(no epics — press 'e' to add one)", data=None)
 
     def current(self):
@@ -1287,7 +1239,6 @@ class CCApp(App):
         # `r` on a TASK node = re-probe just that task's working-tree changes (the only on-demand git)
         if cur and cur.get("type") == "task":
             self._fetch_changes(cur["id"], force=True)
-        self._force_status = True
         self.kick_statuses()
         self.build_tree()
         self.notify("refreshed")
@@ -1586,16 +1537,11 @@ class CCApp(App):
         data = self.current()
         if data and data["type"] == "epic":
             ekey = data["id"]
-            archived = bool(self.state()["epics"].get(ekey, {}).get("archived"))
-            self.push_screen(EpicManageScreen(ekey, archived),
-                             lambda res: self._epic_manage(ekey, res))
-            return
-        if data and data["type"] == "archive":
-            self.notify("разверни 'Архив', встань на эпик и нажми x → Разархивировать")
+            self.push_screen(EpicManageScreen(ekey), lambda res: self._epic_manage(ekey, res))
             return
         tid = self._cur_task()
         if not tid:
-            self.notify("выбери задачу (cleanup/abort) или эпик (архив/разархив)")
+            self.notify("встань на задачу (Готово/Abort) или эпик (Готово и убрать с доски)")
             return
         self.push_screen(TaskManageScreen(tid), lambda res: self._task_manage(tid, res))
 
@@ -1603,7 +1549,7 @@ class CCApp(App):
         if not res:
             return
         if res == "done":
-            self.push_screen(OutputScreen("cleanup: %s" % tid,
+            self.push_screen(OutputScreen("Готово и убрать: %s" % tid,
                              [sys.executable, "-u", ENGINE, "task", "done", tid]),
                              lambda _: self.build_tree())
         elif res == "abort":
@@ -1612,17 +1558,12 @@ class CCApp(App):
                              lambda _: self.build_tree())
 
     def _epic_manage(self, ekey, res):
-        if not res:
+        if res != "done":
             return
-        if res == "arch":
-            # archive + push epic and its tasks to Done in Jira — stream so the result is visible
-            self.push_screen(OutputScreen("archive: %s (+ Jira Done)" % ekey,
-                             [sys.executable, "-u", ENGINE, "epic", "archive", ekey]),
-                             lambda _: self.build_tree())
-        elif res == "unarch":
-            subprocess.run([sys.executable, ENGINE, "epic", "unarchive", ekey], capture_output=True)
-            self.notify("эпик %s разархивирован" % ekey)
-            self.build_tree()
+        # Jira(эпик+задачи)->Done + локальная уборка эпика и задач из cc — стримим вывод
+        self.push_screen(OutputScreen("Готово и убрать: %s (+ Jira Done)" % ekey,
+                         [sys.executable, "-u", ENGINE, "epic", "done", ekey]),
+                         lambda _: self.build_tree())
 
     def _mr(self, dry):
         data = self.current()
