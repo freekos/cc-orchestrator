@@ -252,18 +252,18 @@ class NewTaskScreen(ModalScreen):
 def in_tmux():
     return bool(os.environ.get("TMUX"))
 
-def tmux_select(win):
-    subprocess.run(["tmux", "select-window", "-t", "%s:%s" % (cc.CC_TMUX, win)], capture_output=True)
+def tmux_switch(name):
+    subprocess.run(["tmux", "switch-client", "-t", name], capture_output=True)
 
-def tmux_window(win, cwd, cmd):
-    """Create/recreate a tmux WINDOW in the cc session running cmd, then select it.
-    cc tui runs inside the cc session, so select switches the screen in place."""
-    if not cc.ensure_cc_session():
+def tmux_session_run(name, cwd, cmd):
+    """Spawn (or recreate) a detached tmux SESSION running cmd, then switch the client to it.
+    Tasks/epic-chats are separate sessions -> the cc dashboard's window line stays clean."""
+    if not cc.tmux_ok():
         return False
-    cc.tmux_kill(win)
-    subprocess.run(["tmux", "new-window", "-t", cc.CC_TMUX, "-n", win, "-c", cwd, "bash", "-lc", cmd],
-                   capture_output=True)
-    tmux_select(win)
+    subprocess.run(["tmux", "kill-session", "-t", name], capture_output=True)
+    subprocess.run(["tmux", "new-session", "-d", "-s", name, "-c", cwd, "bash", "-lc", cmd], capture_output=True)
+    cc.ensure_cc_session()      # dashboard session + F12 back-key + mouse
+    tmux_switch(name)
     return True
 
 
@@ -442,13 +442,13 @@ class ChatScreen(ModalScreen):
             self.app.notify("worktree missing", severity="error"); return
         win = t.get("tmux")
         if win and cc.tmux_alive(win):
-            tmux_select(win)
+            tmux_switch(win)
         else:
             sid = t.get("claude_session", {}).get(t["primary"]) or cc.resolve_session(pw)
             chat = ("claude --resume %s --permission-mode auto" % sid) if sid else "claude --permission-mode auto"
-            tmux_window(win or re.sub(r"[^A-Za-z0-9_-]", "-", self.tid), pw, chat)
+            tmux_session_run(win or "cc_" + re.sub(r"[^A-Za-z0-9_-]", "-", self.tid), pw, chat)
         self.dismiss(None)
-        self.app.notify("→ %s (Ctrl-B 0 / Ctrl-B w — назад в cc tui)" % self.tid)
+        self.app.notify("→ %s (F12 → назад в cc дашборд)" % self.tid)
 
 
 class AddProjectScreen(ModalScreen):
@@ -1322,13 +1322,13 @@ class CCApp(App):
             self.notify("запусти cc через `cc tui` (он откроет tmux) — тогда o переключает экран", severity="error"); return
         win = t.get("tmux")
         if win and cc.tmux_alive(win):
-            tmux_select(win)
-            self.notify("→ %s (Ctrl-B 0 / Ctrl-B w — назад в cc tui)" % tid)
+            tmux_switch(win)
+            self.notify("→ %s (F12 → назад в cc дашборд)" % tid)
         else:
             sid = (t.get("claude_session") or {}).get(t["primary"]) or cc.resolve_session(cwd)
             chat = "claude --resume %s --permission-mode auto" % sid if sid else "claude --permission-mode auto"
-            tmux_window(win or re.sub(r"[^A-Za-z0-9_-]", "-", tid), cwd, chat)
-            self.notify("→ возобновил %s (Ctrl-B 0 назад)" % tid)
+            tmux_session_run(win or "cc_" + re.sub(r"[^A-Za-z0-9_-]", "-", tid), cwd, chat)
+            self.notify("→ возобновил %s (F12 → назад)" % tid)
 
     def action_epic_chat(self):
         ekey = self._current_epic()
@@ -1347,8 +1347,8 @@ class CCApp(App):
         if not in_tmux():
             self.notify("запусти cc через `cc tui` (tmux) для чата эпика", severity="error"); return
         cmd = "claude --permission-mode auto %s" % adds
-        tmux_window("epic-" + re.sub(r"[^A-Za-z0-9_-]", "-", ekey), edir, cmd)
-        self.notify("→ чат эпика %s (релиз/координация; Ctrl-B 0 назад)" % ekey)
+        tmux_session_run("epic-" + re.sub(r"[^A-Za-z0-9_-]", "-", ekey), edir, cmd)
+        self.notify("→ чат эпика %s (релиз/координация; F12 → назад)" % ekey)
 
     def action_cursor(self):
         tid = self._cur_task()

@@ -398,12 +398,12 @@ def cmd_task_add(args):
     else:
         promptfile = STATE_DIR / (tid + ".prompt")
         promptfile.write_text(full_prompt)
-        win = re.sub(r"[^A-Za-z0-9_-]", "-", tid)
-        print("  starting LIVE agent as tmux window '%s' in session cc (auto mode) ..." % win)
-        ok = spawn_tmux_agent(win, task_dir, promptfile, "auto")
-        s = load_state(); s["tasks"][tid]["tmux"] = win; s["tasks"][tid].pop("pid", None); save_state(s)
-        print("  agent LIVE (tmux window cc:%s) — press o in cc tui to switch to it, Ctrl-B 0 to return"
-              % win if ok else "  WARNING: tmux spawn failed (tmux installed?)")
+        sess = "cc_" + re.sub(r"[^A-Za-z0-9_-]", "-", tid)
+        print("  starting LIVE agent in its own tmux session '%s' (auto mode) ..." % sess)
+        ok = spawn_tmux_agent(sess, task_dir, promptfile, "auto")
+        s = load_state(); s["tasks"][tid]["tmux"] = sess; s["tasks"][tid].pop("pid", None); save_state(s)
+        print("  agent LIVE (tmux session %s) — o switches to it, F12 returns to cc dashboard"
+              % sess if ok else "  WARNING: tmux spawn failed (tmux installed?)")
     jira = proj.get("jira")
     if getattr(args, "jira", None):
         s = load_state(); s["tasks"][tid]["jira"] = args.jira; save_state(s)
@@ -443,57 +443,63 @@ def _changed(wt):
     lines = [l for l in out.splitlines() if l[3:].strip().strip('"') and not _cc_artifact(l[3:].strip().strip('"'))]
     return "\n".join(lines).strip()
 
-CC_TMUX = "cc"   # the single tmux session that hosts cc tui (window "tui") + task windows
+CC_TMUX = "cc"   # the dashboard session (cc tui in window "tui"); tasks are SEPARATE sessions
 
 def tmux_ok():
     return bool(shutil.which("tmux"))
+
+def _cc_setup():
+    """Make the cc session ergonomic + bind a no-prefix 'back to dashboard' key (F12)."""
+    subprocess.run(["tmux", "set-option", "-t", CC_TMUX, "mouse", "on"], capture_output=True)
+    subprocess.run(["tmux", "set-option", "-t", CC_TMUX, "renumber-windows", "on"], capture_output=True)
+    # exiting a task's claude destroys its session -> jump back to the dashboard (don't detach)
+    subprocess.run(["tmux", "set-option", "-g", "detach-on-destroy", "off"], capture_output=True)
+    # F12 from ANY session -> jump back to the cc dashboard (no prefix; cmux often eats C-b)
+    subprocess.run(["tmux", "bind-key", "-n", "F12", "switch-client", "-t", CC_TMUX], capture_output=True)
+    subprocess.run(["tmux", "set-option", "-g", "status-right", " F12 → cc dashboard "], capture_output=True)
 
 def ensure_cc_session():
     if not tmux_ok():
         return False
     if subprocess.run(["tmux", "has-session", "-t", CC_TMUX], capture_output=True).returncode != 0:
         subprocess.run(["tmux", "new-session", "-d", "-s", CC_TMUX, "-n", "tui"], capture_output=True)
-        subprocess.run(["tmux", "set-option", "-t", CC_TMUX, "mouse", "on"], capture_output=True)
-        subprocess.run(["tmux", "set-option", "-t", CC_TMUX, "renumber-windows", "on"], capture_output=True)
+    _cc_setup()
     return True
 
-def tmux_alive(win):
-    """A task WINDOW exists in the cc session."""
-    if not win or not tmux_ok():
-        return False
-    out = subprocess.run(["tmux", "list-windows", "-t", CC_TMUX, "-F", "#{window_name}"],
-                         capture_output=True, text=True).stdout
-    return win in out.split()
+def tmux_alive(name):
+    return bool(name) and tmux_ok() and subprocess.run(
+        ["tmux", "has-session", "-t", name], capture_output=True).returncode == 0
 
-def tmux_pane(win):
-    return subprocess.run(["tmux", "capture-pane", "-p", "-t", "%s:%s" % (CC_TMUX, win)],
+def tmux_pane(name):
+    return subprocess.run(["tmux", "capture-pane", "-p", "-t", name],
                           capture_output=True, text=True).stdout
 
-def tmux_busy(win):
-    return "esc to interrupt" in tmux_pane(win).lower()
+def tmux_busy(name):
+    return "esc to interrupt" in tmux_pane(name).lower()
 
-def tmux_kill(win):
-    subprocess.run(["tmux", "kill-window", "-t", "%s:%s" % (CC_TMUX, win)], capture_output=True)
+def tmux_kill(name):
+    subprocess.run(["tmux", "kill-session", "-t", name], capture_output=True)
 
-def spawn_tmux_agent(win, cwd, promptfile, mode="auto"):
-    """Start a LIVE interactive claude as a WINDOW in the cc session (auto-accept trust).
-    Returns True on success."""
-    if not ensure_cc_session():
+def spawn_tmux_agent(name, cwd, promptfile, mode="auto"):
+    """Start a LIVE interactive claude in its OWN detached tmux session (auto-accept trust).
+    Tasks are separate sessions so they never clutter the cc dashboard's window line."""
+    if not tmux_ok():
         return False
-    tmux_kill(win)
+    subprocess.run(["tmux", "kill-session", "-t", name], capture_output=True)
     inner = "claude --permission-mode %s \"$(cat %s)\"" % (mode, shlex.quote(str(promptfile)))
-    if subprocess.run(["tmux", "new-window", "-t", CC_TMUX, "-d", "-n", win, "-c", cwd, "bash", "-lc", inner],
+    if subprocess.run(["tmux", "new-session", "-d", "-s", name, "-c", cwd, "bash", "-lc", inner],
                       capture_output=True).returncode != 0:
         return False
+    _cc_setup()   # ensure mouse/F12/hint apply server-wide (incl this session)
     for _ in range(40):                      # ~16s: wait for & answer "trust this folder"
         time.sleep(0.4)
-        pane = tmux_pane(win).lower()
+        pane = tmux_pane(name).lower()
         if "trust this folder" in pane or "trust the files" in pane:
-            subprocess.run(["tmux", "send-keys", "-t", "%s:%s" % (CC_TMUX, win), "1", "Enter"], capture_output=True)
+            subprocess.run(["tmux", "send-keys", "-t", name, "1", "Enter"], capture_output=True)
             break
         if "auto mode on" in pane or "esc to interrupt" in pane:
             break
-        if not tmux_alive(win):
+        if not tmux_alive(name):
             return False
     return True
 
