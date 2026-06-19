@@ -130,6 +130,12 @@ the throw-away path). Press `x` on an **epic** → *Готово и убрать
 the epic **and all its tasks** → Done in Jira, then remove them from cc locally; remote
 untouched). There is no archive/hide state and no delete-but-keep — finishing == removing.
 
+**Knowledge survives.** Finishing an epic first stashes its accumulated notes/decisions
+(`cc epic note` memory + mode/targets/done-date) into a local `epic_knowledge` store **and**
+mirrors them as a comment on the Jira epic. Re-add the same epic later (`cc epic add <KEY>`)
+for follow-up work and cc **restores its notes automatically** ("↻ восстановлены знания
+закрытого эпика") — the board stays an active set, the feature's wisdom isn't lost.
+
 ## Jira (optional)
 ```bash
 cc project jira myproject --site you.atlassian.net --email you@x.com --token <API_TOKEN> --project-key ABC
