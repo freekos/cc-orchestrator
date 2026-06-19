@@ -11,6 +11,7 @@ from textual.screen import ModalScreen
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.widgets import Header, Footer, Tree, Static, Input, Button, Label, TextArea, Select
 from textual.binding import Binding
+from textual.worker import get_current_worker
 
 ENGINE = str(Path(__file__).parent / "cc.py")
 GLYPH = {"running": "~", "review": "*", "mr": "MR", "merged": "v", "idle": ".", "done": "v"}
@@ -888,10 +889,17 @@ class CCApp(App):
         self.run_worker(self._refresh_statuses, thread=True, exclusive=True, group="statuses")
 
     def _refresh_statuses(self):
-        # compute the git-heavy task_status off the main thread, cache into t['status']
+        # git-heavy task_status off the main thread; bail immediately if the app is quitting
+        worker = get_current_worker()
         snap = cc.load_state()
-        new = {tid: cc.task_status(t) for tid, t in snap["tasks"].items()}
+        new = {}
+        for tid, t in snap["tasks"].items():
+            if worker.is_cancelled:
+                return
+            new[tid] = cc.task_status(t)
         if all(snap["tasks"][tid].get("status") == st for tid, st in new.items()):
+            return
+        if worker.is_cancelled:
             return
         def apply(s):
             for tid, st in new.items():
@@ -901,11 +909,17 @@ class CCApp(App):
         self.call_from_thread(self.build_tree)
 
     def _sync_mrs(self):
-        s = cc.load_state()
-        tids = [tid for tid, t in s["tasks"].items() if t.get("mrs") and not t.get("merged")]
+        worker = get_current_worker()
+        st = cc.load_state()
+        tids = [tid for tid, t in st["tasks"].items() if t.get("mrs") and not t.get("merged")]
         for tid in tids:
-            subprocess.run([sys.executable, ENGINE, "task", "mrs", tid], capture_output=True)
-        if tids:
+            if worker.is_cancelled:
+                return
+            try:
+                subprocess.run([sys.executable, ENGINE, "task", "mrs", tid], capture_output=True, timeout=15)
+            except Exception:
+                pass
+        if tids and not worker.is_cancelled:
             self.call_from_thread(self.build_tree)
 
     def state(self):
