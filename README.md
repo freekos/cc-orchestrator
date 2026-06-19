@@ -55,14 +55,14 @@ cc epic mr  FEAT-1                                # MR the epic branch -> master
 cc epic mrs FEAT-1                                # show this epic's MR(s) to master/main (any state, incl. merged)
 
 cc deploys myproject                              # what's live per repo: dev/stage/prod ref@sha (EAS for Expo repos)
-cc epic archive FEAT-1                            # archive: hide under "Архив" + push epic & its tasks to Done in Jira
-cc epic unarchive FEAT-1                          # bring it back to the live list
+cc task done t_add-x                              # "done & remove from board": Jira->Done + snap worktrees + drop from cc
+cc epic done FEAT-1                               # finish epic: Jira(epic+tasks)->Done + remove epic & its tasks from cc
 ```
 
 ### TUI keys
 `a` +Project · `e` +Epic · `n` +Task · `o` chat (interactive, new terminal/cmux tab) ·
 `v` view chat (read-only) · `c` Cursor · `d` diff · `m`/`M` MR dry/create ·
-`g` MR links (task & epic→master) · `D` refresh deploy status · `x` cleanup task / archive epic ·
+`g` MR links (task & epic→master) · `D` refresh deploy status · `x` finish (task/epic → done & remove) ·
 `R` reviewers · `r` refresh (on a task: re-fetch its changes; on an epic: re-sync Jira) · `q` quit.
 
 ### Deploy status
@@ -89,14 +89,17 @@ Each epic carries notes (`cc epic note <KEY> "invariant/decision/gotcha"`,
 `cc epic memory <KEY>` to view) that `cc` injects into every task agent of that
 epic via a `CLAUDE.md` — so agents stay consistent and don't repeat mistakes.
 
-### Task list — grouped by state
-Under each epic, tasks are grouped into collapsible folders, **"🟡 Ждут тебя" first**
-(agent finished, needs your review), then **🔵 В работе** (agent running), **🟣 На ревью
-(MR)**, **✅ Готово** (collapsed). A **💬** badge marks tasks whose agent wrote output you
-haven't opened yet (cleared when you open the chat with `o`/`v`). Not-yet-started Jira
-children sit in a collapsed **📋 Jira-задачи** folder at the bottom.
+### Task list — flat, sorted by what needs you
+Under each epic the tasks are a **flat list, sorted by attention**: 🟡 review (agent
+finished / has new local edits — needs you) first, then 🔵 running, 🟣 MR open, and ✅ done
+(dimmed, at the bottom). The status emoji is the signal — no folders to expand. A **💬**
+badge marks tasks whose agent wrote output you haven't opened yet (cleared on `o`/`v`).
+A merged task that you **edit again flips back to 🟡** (new uncommitted changes, or commits
+beyond the merge point — squash-merge proof via a recorded merge sha), so "done" never hides
+fresh work. Add a Jira issue as a task via search in the create-task modal (`n`); there's no
+separate Jira-stub list cluttering the tree.
 
-### Epics & archive
+### Epics — MR view & finishing
 Selecting an epic shows its **MR(s) to master/main** in the detail pane (clickable, with
 state — opened/merged), looked up lazily from GitLab the first time you focus it and on `g`.
 In **targets** mode this is each integration branch's MR to master (or a `<KEY>/…` release
@@ -104,12 +107,13 @@ branch); in **epic-branch** mode it's the epic branch's MR. `M` on an epic creat
 epic-branch mode, or just finds the existing release MRs in targets mode (those branches are
 team-owned and released by their own flow).
 
-Live epics sit at the top of each project; **archived** ones collapse under a
-**"🗄 Архив (N)"** node at the bottom (collapsed by default, dimmed). Archive — TUI
-`x` on an epic, or `cc epic archive <KEY>` — hides the epic locally **and** pushes it
-plus all its tasks to Done in Jira. `cc epic unarchive <KEY>` brings it back (Jira
-status is not reopened). Deleting epics is intentionally not in the UI; archive is the
-lifecycle end-state.
+**Finishing — "done & remove from board".** The cc board is your active working set; finished
+work leaves it (the record lives in Jira + git, not in cc). Press `x` on a **task** →
+*Готово и убрать с доски* (`cc task done`: its Jira issue → Done, snap worktrees, drop from
+cc; refuses on uncommitted changes unless forced; remote MR/branch left intact; *Abort* is
+the throw-away path). Press `x` on an **epic** → *Готово и убрать с доски* (`cc epic done`:
+the epic **and all its tasks** → Done in Jira, then remove them from cc locally; remote
+untouched). There is no archive/hide state and no delete-but-keep — finishing == removing.
 
 ## Jira (optional)
 ```bash
@@ -120,13 +124,11 @@ With Jira on:
 - **Epic modal** lists all the project's epics (most-recent first, with status) to
   pick from; the search box narrows by name across **all** project epics. Or create a
   brand-new epic in Jira from the same modal.
-- **Jira epic children as stubs**: when you add/pick a Jira epic, cc pulls its child
-  issues and shows the ones you haven't started as dim **📋 stubs** under the epic
-  (alongside your real cc-tasks). Press `n` on a stub to **activate** it — that opens
-  the task modal pre-seeded (title from summary, prompt from description, linked via
-  `--jira`); review and Launch creates the worktree+agent. Children aren't auto-run as
-  agents — you activate them one at a time. `r` on an epic re-syncs from Jira;
-  `cc epic sync <KEY>` does it from the CLI.
+- **Add a Jira child as a task**: press `n` under a Jira epic and the create-task modal
+  lists the epic's child issues — pick one and *Подставить из Jira* seeds the title+prompt
+  and links it (`--jira`); Launch creates the worktree+agent. Jira children are **not**
+  rendered in the tree as stubs — you pull them on demand when creating a task. `r` on an
+  epic still re-syncs the child list from Jira for the modal.
 - **Task modal** (under a Jira epic) can also pull the epic's children directly: pick
   one and *Подставить из Jira* seeds title+prompt and links it. Or just type a
   title + prompt and `cc` creates a new Jira task under the epic.
