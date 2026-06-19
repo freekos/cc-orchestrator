@@ -873,6 +873,8 @@ class CCApp(App):
         self._force_status = False   # set by manual refresh to re-probe git for every task
         self._changes = {}           # tid -> {repo: git-status text}; lazily filled, never on every focus
         self._changes_timer = None   # debounce handle for the focus -> lazy-fetch
+        self._epic_synced = set()    # epics whose master-MRs we've already looked up this session
+        self._epic_timer = None      # debounce handle for the epic-focus -> MR lookup
         self.build_tree()
         self.set_interval(8.0, self.refresh_glyphs)      # cheap (pid-based fast_status, no git)
         self.set_interval(90.0, self.kick_sync)
@@ -1062,6 +1064,8 @@ class CCApp(App):
         # what used to lag: git status ran for every repo on every cursor move across the tree.
         if data and data.get("type") == "task" and data["id"] not in self._changes:
             self._schedule_changes(data["id"])
+        elif data and data.get("type") == "epic" and data["id"] not in self._epic_synced:
+            self._schedule_epic_mrs(data["id"])
 
     def _schedule_changes(self, tid):
         if self._changes_timer is not None:
@@ -1098,6 +1102,47 @@ class CCApp(App):
             self.call_from_thread(upd)
         except Exception:
             pass
+
+    def _schedule_epic_mrs(self, ekey):
+        if self._epic_timer is not None:
+            try:
+                self._epic_timer.stop()
+            except Exception:
+                pass
+        self._epic_timer = self.set_timer(0.4, lambda: self._fetch_epic_mrs(ekey))
+
+    def _fetch_epic_mrs(self, ekey, force=False):
+        if force:
+            self._epic_synced.discard(ekey)
+        if ekey in self._epic_synced:
+            return
+        self._epic_synced.add(ekey)
+        self._bg("epicmrs:" + ekey, lambda: self._compute_epic_mrs(ekey))
+
+    def _compute_epic_mrs(self, ekey):
+        # `cc epic mrs` queries GitLab for each repo's epic->master MR and saves it to state
+        try:
+            subprocess.run([sys.executable, ENGINE, "epic", "mrs", ekey], capture_output=True, timeout=90)
+        except Exception:
+            pass
+        if self._closing:
+            return
+        def upd():
+            self.build_tree()
+            cur = self.current()
+            if cur and cur.get("type") == "epic" and cur.get("id") == ekey:
+                self.show_detail(cur)
+        try:
+            self.call_from_thread(upd)
+        except Exception:
+            pass
+
+    def _after_epic_sync(self, ekey):
+        self._epic_synced.add(ekey)
+        self.build_tree()
+        cur = self.current()
+        if cur:
+            self.show_detail(cur)
 
     def show_detail(self, data):
         d = self.query_one("#detail", Static)
@@ -1144,25 +1189,37 @@ class CCApp(App):
         elif data["type"] == "epic":
             e = s["epics"][data["id"]]
             mode = e.get("mode") or ("targets" if e.get("targets") else "epic_branch")
-            L = ["[b]epic %s[/b]  %s   [%s]" % (data["id"], e.get("summary", ""), mode), ""]
-            if mode == "epic_branch":
-                L += ["ветка эпика: [b]%s[/b]  →  MR в master/main" % data["id"]]
-            else:
-                L += ["routing:"]
-                for r, b in e.get("targets", {}).items():
-                    L.append("  %s -> %s" % (r, b))
             mrs = e.get("mrs", {}) or {}
             mst = e.get("mr_state", {}) or {}
-            if mrs:
-                L += ["", "MR ветки эпика (→ master):"]
-                for r, url in mrs.items():
-                    i = len(self._detail_urls)
-                    self._detail_urls.append(url)
-                    st = mst.get(r, "")
-                    L.append("  [@click=app.open_url_idx(%d)][u]%s[/u][/]  %s" % (i, r, "(%s)" % st if st else ""))
+            L = ["[b]epic %s[/b]  %s   [%s]" % (data["id"], e.get("summary", ""), mode), ""]
+            if mode == "epic_branch":
+                L += ["ветка эпика: [b]%s[/b]  ->  master/main" % data["id"]]
+                rows = [(r, data["id"]) for r in sorted(mrs)]
             else:
-                L += ["", "[dim]MR ветки эпика ещё нет[/dim]"]
-            L += ["", "[dim]n=задача  M=создать MR эпик→master  m=dry  g=обновить ссылки[/dim]"]
+                L += ["routing (интеграционные ветки):"]
+                for r, b in e.get("targets", {}).items():
+                    L.append("  %s -> %s" % (r, b))
+                rows = list((e.get("targets") or {}).items())
+            # epic -> master/main MRs (clickable, lazily filled on focus / by g; merged shown too)
+            L += ["", "[b]MR в master/main:[/b]"]
+            COLOR = {"opened": "green", "merged": "magenta", "closed": "red", "locked": "yellow"}
+            shown = 0
+            for r, br in rows:
+                url = mrs.get(r)
+                if url:
+                    idx = len(self._detail_urls)
+                    self._detail_urls.append(url)
+                    st = mst.get(r, "") or "open"
+                    c = COLOR.get(mst.get(r, ""), "white")
+                    tail = ("  [dim]<- %s[/dim]" % br) if mode == "targets" else ""
+                    L.append("  [@click=app.open_url_idx(%d)][u]%-20s[/u][/]  [%s]%s[/%s]%s" % (idx, r, c, st, c, tail))
+                    shown += 1
+                elif mode == "targets":
+                    L.append("  %-20s  [dim]- MR не найден (<- %s)[/dim]" % (r, br))
+            if not shown:
+                hint = "[dim]…(g — найти MR в master)[/dim]" if data["id"] not in self._epic_synced else "[dim]- MR в master пока нет[/dim]"
+                L += ["  " + hint]
+            L += ["", "[dim]n=задача  M=MR эпик->master  m=dry  g=обновить MR-ссылки[/dim]"]
             d.update("\n".join(L))
         elif data["type"] == "project":
             p = s["projects"][data["id"]]
@@ -1510,9 +1567,10 @@ class CCApp(App):
     def action_mrs(self):
         data = self.current()
         if data and data["type"] == "epic":
-            self.push_screen(OutputScreen("Epic MR links: %s" % data["id"],
-                             [sys.executable, "-u", ENGINE, "epic", "mrs", data["id"]]),
-                             lambda _: self.build_tree())
+            ekey = data["id"]
+            self.push_screen(OutputScreen("Epic MR links: %s" % ekey,
+                             [sys.executable, "-u", ENGINE, "epic", "mrs", ekey]),
+                             lambda _: self._after_epic_sync(ekey))
         elif data and data["type"] == "task":
             self.push_screen(OutputScreen("MR links: %s" % data["id"],
                              [sys.executable, "-u", ENGINE, "task", "mrs", data["id"]]),
@@ -1576,7 +1634,9 @@ class CCApp(App):
             return
         if dry:
             argv.append("--dry-run"); title += " (dry)"
-        self.push_screen(OutputScreen(title, argv), lambda _: self.build_tree())
+        ekey = data["id"] if data["type"] == "epic" else None
+        self.push_screen(OutputScreen(title, argv),
+                         lambda _: (self._after_epic_sync(ekey) if ekey else self.build_tree()))
 
 
 if __name__ == "__main__":

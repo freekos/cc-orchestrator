@@ -52,6 +52,7 @@ cc task done t_add-x                              # safety-checked worktree clea
 cc task abort t_add-x                             # remote teardown: close MRs + delete remote branches + local cleanup
 
 cc epic mr  FEAT-1                                # MR the epic branch -> master/main (after its tasks merged in)
+cc epic mrs FEAT-1                                # show this epic's MR(s) to master/main (any state, incl. merged)
 
 cc deploys myproject                              # what's live per repo: dev/stage/prod ref@sha (EAS for Expo repos)
 cc epic archive FEAT-1                            # archive: hide under "Архив" + push epic & its tasks to Done in Jira
@@ -61,7 +62,7 @@ cc epic unarchive FEAT-1                          # bring it back to the live li
 ### TUI keys
 `a` +Project · `e` +Epic · `n` +Task · `o` chat (interactive, new terminal/cmux tab) ·
 `v` view chat (read-only) · `c` Cursor · `d` diff · `m`/`M` MR dry/create ·
-`g` MR links · `D` refresh deploy status · `x` cleanup task / archive epic ·
+`g` MR links (task & epic→master) · `D` refresh deploy status · `x` cleanup task / archive epic ·
 `R` reviewers · `r` refresh (on a task: re-fetch its changes; on an epic: re-sync Jira) · `q` quit.
 
 ### Deploy status
@@ -96,6 +97,13 @@ haven't opened yet (cleared when you open the chat with `o`/`v`). Not-yet-starte
 children sit in a collapsed **📋 Jira-задачи** folder at the bottom.
 
 ### Epics & archive
+Selecting an epic shows its **MR(s) to master/main** in the detail pane (clickable, with
+state — opened/merged), looked up lazily from GitLab the first time you focus it and on `g`.
+In **targets** mode this is each integration branch's MR to master (or a `<KEY>/…` release
+branch); in **epic-branch** mode it's the epic branch's MR. `M` on an epic creates that MR in
+epic-branch mode, or just finds the existing release MRs in targets mode (those branches are
+team-owned and released by their own flow).
+
 Live epics sit at the top of each project; **archived** ones collapse under a
 **"🗄 Архив (N)"** node at the bottom (collapsed by default, dimmed). Archive — TUI
 `x` on an epic, or `cc epic archive <KEY>` — hides the epic locally **and** pushes it

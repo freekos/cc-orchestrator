@@ -819,10 +819,77 @@ def cmd_task_mr(args):
         t["status"] = "mr"
         save_state(s)
 
+def _epic_branch_map(e, proj):
+    """repo -> the integration/epic branch whose merge to master represents this epic. In targets
+    mode that's each repo's integration branch; in epic-branch mode the single epic branch (only
+    for repos that actually have it)."""
+    mode = e.get("mode") or ("targets" if e.get("targets") else "epic_branch")
+    if mode == "targets":
+        return {r: br for r, br in (e.get("targets") or {}).items() if r in proj["repos"]}
+    key = e.get("branch")
+    if not key:
+        return {}
+    return {r: key for r, ri in proj["repos"].items()
+            if have_ref(ri["path"], key) or have_ref(ri["path"], "origin/" + key)}
+
+def _epic_master_mr(ri, br, epic_key):
+    """The MR (any state, incl. merged) that brings this epic into the repo's default branch.
+    Matches an MR targeting main/master whose source branch is the integration branch OR starts
+    with the epic key (covers a dedicated release branch like '<KEY>/website-prod-release').
+    Returns (url, state, default_branch)."""
+    rp, remote = ri["path"], ri["remote"]
+    db = default_branch(rp)
+    enc = remote.replace("/", "%2F")
+    out = run(["glab", "api",
+               "projects/%s/merge_requests?target_branch=%s&state=all&per_page=50" % (enc, db)],
+              cwd=rp, check=False)
+    try:
+        arr = json.loads(out.stdout or "[]")
+    except Exception:
+        arr = []
+    p1, p2 = epic_key + "/", epic_key + "-"
+    def hit(mr):
+        sb = mr.get("source_branch", "") or ""
+        return sb == br or sb == epic_key or sb.startswith(p1) or sb.startswith(p2)
+    matches = [mr for mr in arr if hit(mr)]
+    if not matches:
+        return (None, None, db)
+    opened = [m for m in matches if m.get("state") == "opened"]
+    pick = (opened or matches)[0]   # prefer an open MR, else the most-recent match
+    return (pick.get("web_url"), pick.get("state"), db)
+
+def _epic_sync_mrs(s, e, proj, epic_key):
+    """Find each repo's epic->master MR via the GitLab API and record it on the epic so the TUI
+    can show it. Queries GitLab directly (no local ref needed — integration branches may not be
+    checked out). Returns how many MRs were found."""
+    states = {}
+    any_url = 0
+    for r, br in _epic_branch_map(e, proj).items():
+        ri = proj["repos"][r]
+        url, state, db = _epic_master_mr(ri, br, epic_key)
+        if url:
+            e.setdefault("mrs", {})[r] = url
+            states[r] = state or "?"
+            any_url += 1
+            print("[%s] -> %s  %s  (%s)" % (r, db, url, state))
+        else:
+            print("[%s] MR в %s не найден (ветка %s)" % (r, db, br))
+    e["mr_state"] = states
+    save_state(s)
+    return any_url
+
 def cmd_epic_mr(args):
     s = load_state()
     e = s["epics"].get(args.key) or die("unknown epic '%s'" % args.key)
     proj = s["projects"][e["project"]]
+    mode = e.get("mode") or ("targets" if e.get("targets") else "epic_branch")
+    if mode == "targets":
+        # integration branches are shared/team-owned; don't auto-create their release MRs —
+        # just detect & record the existing target-branch -> master MRs for display.
+        print("targets mode: интеграционные ветки релизятся своим потоком; ищу существующие MR → master …")
+        if not _epic_sync_mrs(s, e, proj, args.key):
+            print("(MR интеграционных веток → master пока нет)")
+        return
     key = e.get("branch", args.key)
     found = False
     for r, ri in proj["repos"].items():
@@ -875,24 +942,12 @@ def cmd_epic_mrs(args):
     s = load_state()
     e = s["epics"].get(args.key) or die("unknown epic '%s'" % args.key)
     proj = s["projects"][e["project"]]
-    key = e.get("branch", args.key)
-    states = {}
-    any_url = 0
-    for r, ri in proj["repos"].items():
-        if not (have_ref(ri["path"], key) or have_ref(ri["path"], "origin/" + key)):
-            continue
-        url, state = mr_info(ri["remote"], key, ri["path"])
-        if url:
-            e.setdefault("mrs", {})[r] = url
-            states[r] = state
-            any_url += 1
-            print("[%s] %s  (%s)" % (r, url, state))
+    if not _epic_sync_mrs(s, e, proj, args.key):
+        mode = e.get("mode") or ("targets" if e.get("targets") else "epic_branch")
+        if mode == "epic_branch":
+            print("(MR ветки эпика ещё нет — нажми M / cc epic mr %s)" % args.key)
         else:
-            print("[%s] эпик-ветка есть, MR пока нет (M чтобы создать)" % r)
-    e["mr_state"] = states
-    save_state(s)
-    if not any_url:
-        print("(MR ветки эпика ещё нет — нажми M / cc epic mr %s)" % args.key)
+            print("(MR интеграционных веток → master пока нет)")
 
 
 def sync_epic_children(s, key):
