@@ -448,7 +448,7 @@ class ChatScreen(ModalScreen):
         chat = ("claude --resume %s --permission-mode auto" % sid) if sid else "claude --permission-mode auto"
         self.app._open_chat_tab("cc:%s" % self.tid, pw, chat)
         self.dismiss(None)
-        self.app.notify("чат %s открыт (вкладка cc-chat)" % self.tid)
+        self.app.notify("чат %s открыт в новой вкладке" % self.tid)
 
 
 class AddProjectScreen(ModalScreen):
@@ -1310,14 +1310,10 @@ class CCApp(App):
         self.push_screen(ChatScreen(tid))
 
     def _open_chat_tab(self, name, cwd, cmd):
-        """Open the chat in ONE reusable cmux tab (close the previous so they do not pile up).
-        Native cmux tab = native trackpad scroll + Cmd-W to close."""
+        """Open the chat in a NEW cmux tab (native trackpad scroll + Cmd-W to close)."""
         cm = _cmux_path()
         if not cm:
             open_in_terminal(cwd, cmd); return "terminal"
-        prev = getattr(self, "_chat_surface", None)
-        if prev:
-            subprocess.run([cm, "close-surface", "--surface", prev], capture_output=True)
         r = subprocess.run([cm, "new-surface", "--type", "terminal", "--focus", "true"],
                            capture_output=True, text=True)
         m = re.search(r"surface:\d+|[0-9a-fA-F]{8}-[0-9a-fA-F-]{27,}", (r.stdout or "") + (r.stderr or ""))
@@ -1327,7 +1323,6 @@ class CCApp(App):
         subprocess.run([cm, "send", "--surface", ref, "--", "cd %s && %s\n" % (shlex.quote(cwd), cmd)],
                        capture_output=True)
         subprocess.run([cm, "rename-tab", "--surface", ref, name], capture_output=True)
-        self._chat_surface = ref
         return "cmux"
 
     def action_open(self):
@@ -1342,7 +1337,7 @@ class CCApp(App):
         sid = (t.get("claude_session") or {}).get(t["primary"]) or cc.resolve_session(cwd)
         chat = "claude --resume %s --permission-mode auto" % sid if sid else "claude --permission-mode auto"
         where = self._open_chat_tab("cc:%s" % tid, cwd, chat)
-        self.notify("чат %s (%s) — одна вкладка cc-chat, нативный скролл; Cmd-W закрыть" % (tid, where))
+        self.notify("чат %s открыт в новой вкладке (%s); Cmd-W закрыть" % (tid, where))
 
     def action_epic_chat(self):
         ekey = self._current_epic()
@@ -1360,7 +1355,7 @@ class CCApp(App):
                         for r in repos if proj.get("repos", {}).get(r, {}).get("path"))
         cmd = "claude --permission-mode auto %s" % adds
         where = self._open_chat_tab("cc:epic %s" % ekey, edir, cmd)
-        self.notify("чат эпика %s (%s) — релиз/координация, вкладка cc-chat" % (ekey, where))
+        self.notify("чат эпика %s открыт в новой вкладке (%s) — релиз/координация" % (ekey, where))
 
     def action_cursor(self):
         tid = self._cur_task()
