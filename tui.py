@@ -17,13 +17,16 @@ GLYPH = {"running": "~", "review": "*", "mr": "MR", "merged": "v", "idle": ".", 
 
 
 def fast_status(t):
-    """Cheap status for rendering (no tmux/git subprocesses). flags + cached t['status'];
-    the live tmux/git status is computed off-thread by _refresh_statuses."""
+    """Cheap status for rendering: bg agent pid alive -> running; else flags; else cached
+    (the git-based review/idle refinement is computed off-thread by _refresh_statuses)."""
+    pid = t.get("pid")
+    if pid and cc.pid_alive(pid):
+        return "running"
     if t.get("merged"):
         return "merged"
     if t.get("mrs"):
         return "mr"
-    return t.get("status") or "running"
+    return t.get("status") or "review"
 
 
 class NewEpicScreen(ModalScreen):
@@ -249,22 +252,23 @@ class NewTaskScreen(ModalScreen):
         self.dismiss({"epic": self.epic, "title": title, "prompt": prompt, "jira": self._jira_key})
 
 
-def in_tmux():
-    return bool(os.environ.get("TMUX"))
+CMUX_BIN = "/Applications/cmux.app/Contents/Resources/bin/cmux"
 
-def tmux_switch(name):
-    subprocess.run(["tmux", "switch-client", "-t", name], capture_output=True)
+def _cmux_path():
+    return shutil.which("cmux") or (CMUX_BIN if os.path.exists(CMUX_BIN) else None)
 
-def tmux_session_run(name, cwd, cmd):
-    """Spawn (or recreate) a detached tmux SESSION running cmd, then switch the client to it.
-    Tasks/epic-chats are separate sessions -> the cc dashboard's window line stays clean."""
-    if not cc.tmux_ok():
-        return False
-    subprocess.run(["tmux", "kill-session", "-t", name], capture_output=True)
-    subprocess.run(["tmux", "new-session", "-d", "-s", name, "-c", cwd, "bash", "-lc", cmd], capture_output=True)
-    cc.ensure_cc_session()      # dashboard session + F12 back-key + mouse
-    tmux_switch(name)
-    return True
+def open_in_terminal(cwd, cmd):
+    """Fallback: open cmd in a new Terminal.app/iTerm tab."""
+    full = "cd %s && %s" % (shlex.quote(cwd), cmd)
+    esc = full.replace("\\", "\\\\").replace('"', '\\"')
+    if os.environ.get("TERM_PROGRAM") == "iTerm.app":
+        subprocess.Popen(["osascript", "-e", 'tell application "iTerm"',
+                          "-e", 'tell current window to create tab with default profile',
+                          "-e", 'tell current session of current window to write text "%s"' % esc,
+                          "-e", 'end tell'])
+    else:
+        subprocess.Popen(["osascript", "-e", 'tell application "Terminal" to do script "%s"' % esc,
+                          "-e", 'tell application "Terminal" to activate'])
 
 
 
@@ -440,15 +444,11 @@ class ChatScreen(ModalScreen):
         pw = t.get("dir") or t["worktrees"][t["primary"]]
         if not os.path.isdir(pw):
             self.app.notify("worktree missing", severity="error"); return
-        win = t.get("tmux")
-        if win and cc.tmux_alive(win):
-            tmux_switch(win)
-        else:
-            sid = t.get("claude_session", {}).get(t["primary"]) or cc.resolve_session(pw)
-            chat = ("claude --resume %s --permission-mode auto" % sid) if sid else "claude --permission-mode auto"
-            tmux_session_run(win or "cc_" + re.sub(r"[^A-Za-z0-9_-]", "-", self.tid), pw, chat)
+        sid = t.get("claude_session", {}).get(t["primary"]) or cc.resolve_session(pw)
+        chat = ("claude --resume %s --permission-mode auto" % sid) if sid else "claude --permission-mode auto"
+        self.app._open_chat_tab("cc:%s" % self.tid, pw, chat)
         self.dismiss(None)
-        self.app.notify("→ %s (F12 → назад в cc дашборд)" % self.tid)
+        self.app.notify("чат %s открыт (вкладка cc-chat)" % self.tid)
 
 
 class AddProjectScreen(ModalScreen):
@@ -1309,6 +1309,27 @@ class CCApp(App):
         self._mark_seen(tid)
         self.push_screen(ChatScreen(tid))
 
+    def _open_chat_tab(self, name, cwd, cmd):
+        """Open the chat in ONE reusable cmux tab (close the previous so they do not pile up).
+        Native cmux tab = native trackpad scroll + Cmd-W to close."""
+        cm = _cmux_path()
+        if not cm:
+            open_in_terminal(cwd, cmd); return "terminal"
+        prev = getattr(self, "_chat_surface", None)
+        if prev:
+            subprocess.run([cm, "close-surface", "--surface", prev], capture_output=True)
+        r = subprocess.run([cm, "new-surface", "--type", "terminal", "--focus", "true"],
+                           capture_output=True, text=True)
+        m = re.search(r"surface:\d+|[0-9a-fA-F]{8}-[0-9a-fA-F-]{27,}", (r.stdout or "") + (r.stderr or ""))
+        ref = m.group(0) if m else None
+        if not ref:
+            open_in_terminal(cwd, cmd); return "terminal"
+        subprocess.run([cm, "send", "--surface", ref, "--", "cd %s && %s\n" % (shlex.quote(cwd), cmd)],
+                       capture_output=True)
+        subprocess.run([cm, "rename-tab", "--surface", ref, name], capture_output=True)
+        self._chat_surface = ref
+        return "cmux"
+
     def action_open(self):
         tid = self._cur_task()
         if not tid:
@@ -1318,17 +1339,10 @@ class CCApp(App):
         if not os.path.isdir(cwd):
             self.notify("worktree missing — recreate the task", severity="error"); return
         self._mark_seen(tid)
-        if not in_tmux():
-            self.notify("запусти cc через `cc tui` (он откроет tmux) — тогда o переключает экран", severity="error"); return
-        win = t.get("tmux")
-        if win and cc.tmux_alive(win):
-            tmux_switch(win)
-            self.notify("→ %s (F12 → назад в cc дашборд)" % tid)
-        else:
-            sid = (t.get("claude_session") or {}).get(t["primary"]) or cc.resolve_session(cwd)
-            chat = "claude --resume %s --permission-mode auto" % sid if sid else "claude --permission-mode auto"
-            tmux_session_run(win or "cc_" + re.sub(r"[^A-Za-z0-9_-]", "-", tid), cwd, chat)
-            self.notify("→ возобновил %s (F12 → назад)" % tid)
+        sid = (t.get("claude_session") or {}).get(t["primary"]) or cc.resolve_session(cwd)
+        chat = "claude --resume %s --permission-mode auto" % sid if sid else "claude --permission-mode auto"
+        where = self._open_chat_tab("cc:%s" % tid, cwd, chat)
+        self.notify("чат %s (%s) — одна вкладка cc-chat, нативный скролл; Cmd-W закрыть" % (tid, where))
 
     def action_epic_chat(self):
         ekey = self._current_epic()
@@ -1344,11 +1358,9 @@ class CCApp(App):
         repos = e.get("repos") or list(proj.get("repos", {}).keys())
         adds = " ".join("--add-dir %s" % shlex.quote(proj["repos"][r]["path"])
                         for r in repos if proj.get("repos", {}).get(r, {}).get("path"))
-        if not in_tmux():
-            self.notify("запусти cc через `cc tui` (tmux) для чата эпика", severity="error"); return
         cmd = "claude --permission-mode auto %s" % adds
-        tmux_session_run("epic-" + re.sub(r"[^A-Za-z0-9_-]", "-", ekey), edir, cmd)
-        self.notify("→ чат эпика %s (релиз/координация; F12 → назад)" % ekey)
+        where = self._open_chat_tab("cc:epic %s" % ekey, edir, cmd)
+        self.notify("чат эпика %s (%s) — релиз/координация, вкладка cc-chat" % (ekey, where))
 
     def action_cursor(self):
         tid = self._cur_task()
