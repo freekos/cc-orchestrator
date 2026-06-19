@@ -11,7 +11,7 @@ from textual.screen import ModalScreen
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.widgets import Header, Footer, Tree, Static, Input, Button, Label, TextArea, Select
 from textual.binding import Binding
-from textual.worker import get_current_worker
+import threading
 
 ENGINE = str(Path(__file__).parent / "cc.py")
 GLYPH = {"running": "~", "review": "*", "mr": "MR", "merged": "v", "idle": ".", "done": "v"}
@@ -868,11 +868,46 @@ class CCApp(App):
     def on_mount(self):
         self.title = "cc — multi-repo orchestrator"
         self._detail_urls = []
+        self._closing = False
+        self._busy = set()           # daemon-thread dedup (replaces run_worker exclusive=)
+        self._force_status = False   # set by manual refresh to re-probe git for every task
         self.build_tree()
-        self.set_interval(5.0, self.refresh_glyphs)      # cheap (fast_status, no git)
+        self.set_interval(8.0, self.refresh_glyphs)      # cheap (pid-based fast_status, no git)
         self.set_interval(90.0, self.kick_sync)
-        self.set_interval(12.0, self.kick_statuses)      # full status (git) off the main thread
+        self.set_interval(30.0, self.kick_statuses)      # full status (git) on a daemon thread
         self.kick_statuses()
+
+    def on_unmount(self):
+        self._closing = True
+
+    def action_quit(self):
+        # mark closing so in-flight daemon workers bail at their next checkpoint, then exit now
+        self._closing = True
+        self.exit()
+
+    def _bg(self, name, fn):
+        """Run fn on a *daemon* thread. Daemon threads are abandoned at interpreter exit, so a
+        slow git/glab call can never keep cc tui from quitting (the old run_worker threads ran on
+        asyncio's executor, which joins for THREAD_JOIN_TIMEOUT=300s on close). Deduped by name."""
+        if self._closing or name in self._busy:
+            return
+        self._busy.add(name)
+        def runner():
+            try:
+                fn()
+            except Exception:
+                pass
+            finally:
+                self._busy.discard(name)
+        threading.Thread(target=runner, name="cc-" + name, daemon=True).start()
+
+    def _safe_build_tree(self):
+        if self._closing:
+            return
+        try:
+            self.call_from_thread(self.build_tree)
+        except Exception:
+            pass
 
     def action_open_url_idx(self, idx):
         try:
@@ -883,44 +918,59 @@ class CCApp(App):
             self.notify("ссылка недоступна", severity="error")
 
     def kick_sync(self):
-        self.run_worker(self._sync_mrs, thread=True, exclusive=True, group="mrsync")
+        self._bg("mrsync", self._sync_mrs)
 
     def kick_statuses(self):
-        self.run_worker(self._refresh_statuses, thread=True, exclusive=True, group="statuses")
+        self._bg("statuses", self._refresh_statuses)
 
     def _refresh_statuses(self):
-        # git-heavy task_status off the main thread; bail immediately if the app is quitting
-        worker = get_current_worker()
+        # Status worker. The only EXPENSIVE branch is the git probe (status --short + rev-list per
+        # worktree) for a task with no live agent and no MR. We run it ONLY for tasks that just
+        # transitioned (running -> finished, or unknown): a task already settled as review/idle/mr/
+        # merged only changes on a user action (MR/cleanup/manual refresh), never with time — so we
+        # reuse its cached verdict instead of re-shelling git every tick. That removes the constant
+        # git-process storm that was lagging the machine.
+        force = self._force_status
+        self._force_status = False
         snap = cc.load_state()
         new = {}
         for tid, t in snap["tasks"].items():
-            if worker.is_cancelled:
+            if self._closing:
                 return
-            new[tid] = cc.task_status(t)
-        if all(snap["tasks"][tid].get("status") == st for tid, st in new.items()):
+            pid = t.get("pid")
+            if pid and cc.pid_alive(pid):
+                new[tid] = "running"; continue
+            if t.get("merged"):
+                new[tid] = "merged"; continue
+            if t.get("mrs"):
+                new[tid] = "mr"; continue
+            cached = t.get("status")
+            if not force and cached in ("review", "idle", "mr", "merged"):
+                new[tid] = cached; continue       # settled — skip the git probe
+            new[tid] = cc.task_status(t)           # finished this cycle: decide review/idle once
+        if self._closing:
             return
-        if worker.is_cancelled:
+        if all(snap["tasks"][tid].get("status") == st for tid, st in new.items()):
             return
         def apply(s):
             for tid, st in new.items():
                 if tid in s["tasks"]:
                     s["tasks"][tid]["status"] = st
         cc.mutate(apply)
-        self.call_from_thread(self.build_tree)
+        self._safe_build_tree()
 
     def _sync_mrs(self):
-        worker = get_current_worker()
         st = cc.load_state()
         tids = [tid for tid, t in st["tasks"].items() if t.get("mrs") and not t.get("merged")]
         for tid in tids:
-            if worker.is_cancelled:
+            if self._closing:
                 return
             try:
                 subprocess.run([sys.executable, ENGINE, "task", "mrs", tid], capture_output=True, timeout=15)
             except Exception:
                 pass
-        if tids and not worker.is_cancelled:
-            self.call_from_thread(self.build_tree)
+        if tids:
+            self._safe_build_tree()
 
     def state(self):
         return cc.load_state()
@@ -1098,6 +1148,12 @@ class CCApp(App):
 
     def refresh_glyphs(self):
         s = self.state()
+        # cheap edge-detect: an agent that just finished still has pid set + cached "running",
+        # but the process is dead. Fire one status refresh so it moves to "🟡 Ждут тебя" within
+        # ~8s instead of waiting for the 30s tick — without polling git every second in steady state.
+        if any(t.get("pid") and not cc.pid_alive(t["pid"]) and t.get("status") == "running"
+               for t in s["tasks"].values()):
+            self.kick_statuses()
 
         def walk(node):
             for ch in node.children:
@@ -1117,6 +1173,8 @@ class CCApp(App):
                 self.notify("синхронизирую задачи эпика из Jira …")
                 self.run_worker(lambda: self._sync_epic(ekey), thread=True, exclusive=True, group="esync")
                 return
+        self._force_status = True
+        self.kick_statuses()
         self.build_tree()
         self.notify("refreshed")
 

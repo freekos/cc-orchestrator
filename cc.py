@@ -87,18 +87,25 @@ class _FakeProc:
     def __init__(self, msg=""):
         self.stderr = msg
 
-def run(cmd, cwd=None, check=True):
+def run(cmd, cwd=None, check=True, timeout=120):
     if cwd is not None and not os.path.isdir(str(cwd)):
         if check:
             raise RuntimeError("cwd missing: %s" % cwd)
         return _FakeProc("cwd missing: %s" % cwd)
-    r = subprocess.run(cmd, cwd=cwd, text=True, capture_output=True)
+    try:
+        r = subprocess.run(cmd, cwd=cwd, text=True, capture_output=True, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        # never block forever: a hung git/glab must surface as a normal failure, else a
+        # TUI status worker stuck here keeps the app from exiting (asyncio joins it for 300s)
+        if check:
+            raise RuntimeError("cmd timed out after %ss: %s" % (timeout, " ".join(cmd)))
+        return _FakeProc("timed out after %ss: %s" % (timeout, " ".join(cmd)))
     if check and r.returncode != 0:
         raise RuntimeError("cmd failed: %s\n%s" % (" ".join(cmd), r.stderr.strip()))
     return r
 
-def git(args, cwd, check=True):
-    return run(["git"] + args, cwd=cwd, check=check)
+def git(args, cwd, check=True, timeout=120):
+    return run(["git"] + args, cwd=cwd, check=check, timeout=timeout)
 
 def tmux_name(tid):
     return "cc_" + tid
