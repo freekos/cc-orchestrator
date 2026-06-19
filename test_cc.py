@@ -35,6 +35,17 @@ def test_unique_tid_no_collision():
     assert len(s["tasks"]) == 3, s["tasks"]
 
 
+def test_epic_knowledge_stash():
+    s = {"projects": {"P": {"path": "/tmp/cc-x-test", "repos": {}}},
+         "epics": {"E1": {"project": "P", "summary": "sum", "memory": "a\nb",
+                          "mode": "epic_branch", "targets": {}}},
+         "tasks": {}}
+    cc._epic_teardown(s, s["projects"]["P"], "E1")
+    assert "E1" not in s["epics"], "epic should be removed"
+    k = s["epic_knowledge"]["E1"]
+    assert k["memory"] == "a\nb" and k["summary"] == "sum", k
+
+
 if __name__ == "__main__":
     n = 0
     for k, v in list(globals().items()):

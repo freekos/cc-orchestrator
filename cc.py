@@ -462,12 +462,26 @@ def cmd_epic_add(args):
             if r not in proj["repos"]:
                 die("repo '%s' not in project '%s'" % (r, args.project))
     mode = "targets" if targets else "epic_branch"
-    s["epics"][args.key] = {"project": args.project, "summary": args.summary or "",
+    # restore knowledge if this epic was finished earlier (cc epic done stashed it)
+    restored = (s.get("epic_knowledge") or {}).get(args.key)
+    summary = args.summary or ""
+    memory = summary.strip()
+    if restored:
+        memory = restored.get("memory") or memory
+        if not summary:
+            summary = restored.get("summary", "")
+        if not targets and restored.get("targets"):
+            targets = dict(restored["targets"]); mode = "targets"
+    s["epics"][args.key] = {"project": args.project, "summary": summary,
                             "targets": targets, "mode": mode, "branch": args.key, "repos": erepos,
-                            "memory": (args.summary or "").strip()}
+                            "memory": memory}
     n = sync_epic_children(s, args.key)
     save_state(s)
     print("epic '%s' added under '%s'  [mode=%s]" % (args.key, args.project, mode))
+    if restored:
+        nlines = len([l for l in (memory or "").splitlines() if l.strip()])
+        print("  ↻ восстановлены знания закрытого эпика (закрыт %s): %d стр. заметок"
+              % (restored.get("done_at", "?"), nlines))
     if n > 0:
         print("  pulled %d Jira child issue(s) — visible as stubs under the epic (activate with n)" % n)
     if targets:
@@ -1256,7 +1270,16 @@ def _jira_done_keys(jira, keys):
 
 def _epic_teardown(s, proj, key):
     """Remove an epic + its tasks from cc LOCALLY (worktrees, branches, dirs, state). Remote
-    MRs/branches untouched. Returns the list of removed task ids."""
+    MRs/branches untouched. Returns the list of removed task ids.
+    Before removal we STASH the epic's knowledge (summary/notes/mode/targets) into
+    state['epic_knowledge'] so that re-adding the same epic later (`cc epic add <KEY>`) brings
+    its accumulated context back — the board clears, the knowledge doesn't."""
+    e = s["epics"].get(key)
+    if e:
+        s.setdefault("epic_knowledge", {})[key] = {
+            "project": e.get("project"), "summary": e.get("summary", ""),
+            "memory": e.get("memory", ""), "mode": e.get("mode"),
+            "targets": e.get("targets", {}) or {}, "done_at": time.strftime("%Y-%m-%d")}
     tasks = [t for t, v in s["tasks"].items() if v.get("epic") == key]
     for tid in tasks:
         t = s["tasks"][tid]
@@ -1300,6 +1323,10 @@ def cmd_epic_done(args):
                  if t.get("epic") == args.key and t.get("jira")]
         keys = list(dict.fromkeys([args.key] + children + local))
         _jira_done_keys(jira, keys)
+        mem = (e.get("memory") or "").strip()
+        if mem and args.key.split("-")[0] == jira.get("project_key"):
+            ok = jira_comment(jira, args.key, "cc — накопленные знания по эпику (мудрость фичи):\n\n" + mem)
+            print("  jira: заметки эпика %s" % ("сохранены комментарием" if ok else "не удалось отправить"))
     removed = _epic_teardown(s, proj, args.key)
     save_state(s)
     print("epic %s готово и убрано с доски%s (remote MR/ветки не тронуты)." % (
@@ -1571,6 +1598,13 @@ def jira_transition_done(cfg, key):
 def jira_adf(text):
     return {"type": "doc", "version": 1,
             "content": [{"type": "paragraph", "content": [{"type": "text", "text": (text or " ")[:4000]}]}]}
+
+def jira_comment(cfg, key, text):
+    try:
+        jira_req(cfg, "POST", "/issue/%s/comment" % key, {"body": jira_adf(text)})
+        return True
+    except Exception:
+        return False
 
 def jira_discover(cfg):
     """Fill account_id + epic/task issuetype ids (best effort). Mutates cfg."""
