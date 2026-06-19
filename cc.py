@@ -127,6 +127,19 @@ def default_branch(repo_path):
 def have_ref(repo_path, ref):
     return run(["git", "rev-parse", "--verify", ref], cwd=repo_path, check=False).returncode == 0
 
+def _ahead_count(rp, branch, base):
+    """How many commits `branch` has that `base` (master/main) doesn't — i.e. real changes to bring
+    in. 0 means the epic branch is identical to master (no tasks merged into it yet) -> no MR."""
+    bref = branch if have_ref(rp, branch) else ("origin/" + branch if have_ref(rp, "origin/" + branch) else None)
+    if not bref:
+        return 0
+    baseref = ("origin/" + base) if have_ref(rp, "origin/" + base) else base
+    out = run(["git", "rev-list", "--count", baseref + ".." + bref], cwd=rp, check=False).stdout.strip()
+    try:
+        return int(out)
+    except ValueError:
+        return 0
+
 def ensure_epic_branch(repo_path, key, base):
     if have_ref(repo_path, key):
         return                                  # already local -> no network
@@ -933,13 +946,18 @@ def cmd_epic_mr(args):
             print("(MR интеграционных веток → master пока нет)")
         return
     key = e.get("branch", args.key)
-    found = False
+    have_any = made = 0
     for r, ri in proj["repos"].items():
         rp = ri["path"]
         if not (have_ref(rp, key) or have_ref(rp, "origin/" + key)):
             continue
-        found = True
+        have_any += 1
         db = default_branch(rp)
+        ahead = _ahead_count(rp, key, db)
+        if ahead == 0:
+            # epic branch == master here: no task merged into it -> nothing to MR. Skip this repo.
+            print("[%s] ветка эпика '%s' без изменений vs %s — пропуск (влей задачи в неё сначала)" % (r, key, db))
+            continue
         lead = ri.get("reviewer", "")
         assignee = proj.get("default_assignee") or glab_user()
         glab_cmd = ["glab", "mr", "create", "-R", ri["remote"],
@@ -952,19 +970,23 @@ def cmd_epic_mr(args):
         if lead:
             glab_cmd += ["--reviewer", lead]
         if args.dry_run:
-            print("[%s] DRY-RUN epic MR: %s -> %s (reviewer %s)" % (r, key, db, lead or "-"))
+            print("[%s] DRY-RUN epic MR: %s -> %s  (%d commit(s) ahead, reviewer %s)" % (r, key, db, ahead, lead or "-"))
             print("    would: git push -u origin %s" % key)
             print("    would: " + " ".join(glab_cmd))
+            made += 1
             continue
         push_epic_branch(rp, key)
         out = run(glab_cmd, cwd=rp, check=False)
         url = mr_url(out, ri["remote"], key, rp)
         e.setdefault("mrs", {})[r] = url
-        print("[%s] epic MR -> %s" % (r, url))
-    if found:
+        print("[%s] epic MR -> %s  (%d commit(s))" % (r, url, ahead))
+        made += 1
+    if made and not args.dry_run:
         save_state(s)
-    else:
-        print("(no epic branch '%s' in any repo yet - create a task first)" % key)
+    if not have_any:
+        print("(нет ветки эпика '%s' ни в одном репо — сначала создай задачу)" % key)
+    elif made == 0:
+        print("(во всех репо ветка эпика без изменений vs master — нечего вливать; сначала влей задачи в ветку эпика)")
 
 
 def cmd_epic_note(args):

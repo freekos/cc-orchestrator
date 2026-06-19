@@ -51,7 +51,7 @@ cc task mr  t_add-x                               # push + one MR per repo to th
 cc task done t_add-x                              # safety-checked worktree cleanup (refuses if dirty)
 cc task abort t_add-x                             # remote teardown: close MRs + delete remote branches + local cleanup
 
-cc epic mr  FEAT-1                                # MR the epic branch -> master/main (after its tasks merged in)
+cc epic mr  FEAT-1                                # MR epic branch -> master/main — only in repos where it's ahead (tasks merged in)
 cc epic mrs FEAT-1                                # show this epic's MR(s) to master/main (any state, incl. merged)
 
 cc deploys myproject                              # what's live per repo: dev/stage/prod ref@sha (EAS for Expo repos)
