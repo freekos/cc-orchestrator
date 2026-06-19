@@ -841,7 +841,7 @@ class CCApp(App):
         Binding("j", "project_jira", "Jira/settings"),
         Binding("e", "new_epic", "+Epic"),
         Binding("n", "new_task", "+Task"),
-        Binding("o", "open", "Chat"),
+        Binding("o", "open", "Chat/Setup"),
         Binding("O", "epic_chat", "Epic chat"),
         Binding("v", "view_chat", "View"),
         Binding("c", "cursor", "Cursor"),
@@ -1485,8 +1485,12 @@ class CCApp(App):
         return "cmux"
 
     def action_open(self):
+        data = self.current()
+        if data and data.get("type") == "project":
+            self.action_project_setup(); return
         tid = self._cur_task()
         if not tid:
+            self.notify("встань на задачу (o=чат), эпик (O), или проект (o=настройка под ИИ)")
             return
         t = self.state()["tasks"][tid]
         cwd = t.get("dir") or t["worktrees"][t["primary"]]
@@ -1497,6 +1501,19 @@ class CCApp(App):
         chat = "claude --resume %s --permission-mode auto" % sid if sid else "claude --permission-mode auto"
         where = self._open_chat_tab("cc:%s" % tid, cwd, chat)
         self.notify("чат %s открыт в новой вкладке (%s); Cmd-W закрыть" % (tid, where))
+
+    def action_project_setup(self):
+        proj = self._current_project()
+        if not proj:
+            self.notify("выбери проект", severity="error"); return
+        subprocess.run([sys.executable, ENGINE, "project", "setup", proj], capture_output=True)
+        base = self.state()["projects"].get(proj, {}).get("path", "")
+        sdir = os.path.join(base, ".cc-setup")
+        if not os.path.isdir(sdir):
+            self.notify("не удалось подготовить setup-чат", severity="error"); return
+        cmd = "claude --permission-mode auto --add-dir %s" % shlex.quote(base)
+        where = self._open_chat_tab("cc:setup %s" % proj, sdir, cmd)
+        self.notify("setup-чат проекта '%s' открыт (%s) — опиши идею, какие репо, референсы" % (proj, where))
 
     def action_epic_chat(self):
         ekey = self._current_epic()

@@ -38,7 +38,11 @@ Requires: `git`, the `claude` CLI (Claude Code), and `glab`/`gh` for MRs.
 ```bash
 cc tui                                            # the terminal UI (recommended)
 
-cc project add ~/code/myproject                   # detect single/multi repo
+cc project add ~/code/myproject                   # detect single/multi repo (empty folder -> empty project)
+cc project new myapp                              # create a BRAND-NEW empty project (folder + entry)
+cc repo add myapp backend --new --run "uv run dev"   # add a repo: --new (git init) | --clone <url> | --path <dir>
+cc repo set myapp backend --remote group/backend  # set the GitLab/GitHub remote later
+cc project setup myapp                            # open the AI "setup architect" chat (interview -> repos + AI config)
 cc epic add myproject FEAT-1 --summary "Feature"  # epic (its own branch -> master)
 cc epic add myproject FEAT-1 --target web=develop --target api=release   # or route per repo
 cc task add FEAT-1 "add X" --prompt "..."         # background agent edits the repos
@@ -61,7 +65,7 @@ cc epic done FEAT-1                               # finish epic: Jira(epic+tasks
 
 ### TUI keys
 `a` +Project · `e` +Epic · `n` +Task · `o` chat (interactive, new terminal/cmux tab) ·
-`v` view chat (read-only) · `c` Cursor · `d` diff · `m`/`M` MR dry/create ·
+`o` chat / project setup · `v` view chat (read-only) · `c` Cursor · `d` diff · `m`/`M` MR dry/create ·
 `g` MR links (task & epic→master) · `D` refresh deploy status · `x` finish (task/epic → done & remove) ·
 `R` reviewers · `r` refresh · `U` recover lost tasks · `q` quit.
 
@@ -78,6 +82,17 @@ to start all the dev servers at once: **Cmd+Shift+P → "Tasks: Run Task" → "c
 command). Prefer one terminal? `cc task open` also prints a ready-to-paste
 `npx concurrently …` one-liner. Set/fix a repo's command with
 `cc repo set <proj> <repo> --run "npm run dev"`.
+
+### New project (greenfield, AI-ready)
+Start a project from nothing: `cc project new <name>` (or `cc project add` on an empty folder)
+makes an empty project, then **`o` on the project node** opens an **AI "setup architect" chat**
+(`cc project setup`). It interviews you — what the project is, the stack, **which repos you want
+(frontend/backend kept separate)**, and any code references — then creates each repo
+(`cc repo add … --new`), scaffolds it, and writes the project's **AI config**: a project + per-repo
+`CLAUDE.md`, plus `.claude/` skills, MCP servers and rules. Remotes are optional and set later
+(`cc repo set <p> <repo> --remote <slug>`); until then commits are local and MRs are skipped.
+After setup it's a normal cc project — epics, tasks, worktrees, MRs — and the `CLAUDE.md`
+grounds every task agent.
 
 ### Reviewers / assignee
 Assignee defaults to your `glab` user. Set a reviewer per repo from the GitLab

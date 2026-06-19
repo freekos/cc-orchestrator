@@ -290,6 +290,72 @@ def resolve_session(primary_wt):
 
 # ----------------------------- project cmds -----------------------------
 
+SETUP_RUNBOOK = """# Project {project} — setup architect (bootstrap a new, AI-ready project)
+
+You are helping the user start a BRAND-NEW project from scratch. The project folder is:
+  {base}
+Existing repos in this project: {repos}
+
+cc owns the project structure: create repos through the `cc` CLI (NOT raw `git init`). If `cc`
+is not on PATH in this shell, use:  python3 {ccpy} <args>
+This is a CONVERSATION — interview first, propose, confirm, THEN build. Do NOT assume the
+project's purpose or stack.
+
+## Step 1 — interview (ask, then wait)
+- What is this project and who is it for? Core features?
+- Tech stack / language / frameworks — user's choice, or recommend?
+- Which repos and their roles? (e.g. `frontend`, `backend`, `mobile` — kept as SEPARATE repos
+  under the project folder.)
+- Any code references / conventions / examples to follow? (paste links or snippets — these
+  become the project's rules.)
+Summarize what you understood and get a yes before scaffolding.
+
+## Step 2 — create the repos (via cc, one per role)
+For each repo:
+  cc repo add {project} <repo-name> --new --run "<dev command>"
+This git-inits `<repo-name>` under the project folder with an initial commit. Leave the remote
+empty for now; the user sets it later:  cc repo set {project} <repo-name> --remote <group/proj>
+(existing local repo: `--path <dir>`; to clone: `--clone <url>`.)
+
+## Step 3 — scaffold each repo
+Set up the agreed starter code per stack (init framework, basic structure, lint/test config,
+.gitignore, a minimal runnable skeleton). Follow the user's references.
+
+## Step 4 — make it AI-ready (the point of this setup)
+Write durable context so every future cc task agent is grounded:
+- {base}/CLAUDE.md — PROJECT brief: what/why, stack, the repos & their roles, architecture,
+  conventions, do's & don'ts, the user's references.
+- <repo>/CLAUDE.md in each repo — repo-specific context & conventions.
+- {base}/.claude/ as useful: settings.json (sane permissions), skills/ (project-specific
+  skills), and MCP config (.mcp.json) for servers this project needs (DB, design, etc.).
+Keep these concrete and specific to THIS project — this is the durable AI configuration the
+user asked for (skills, MCP, rules), not boilerplate.
+
+## Step 5 — record commands & commit
+- Ensure each repo's dev/test command is set: cc repo set {project} <repo> --run "..." --setup "..."
+- Commit the initial scaffold in each repo. (This bootstrap is the ONE time you commit directly;
+  afterwards normal cc tasks own git via worktrees.)
+
+## Constraints
+- Propose a stack, confirm, THEN build — never pick silently.
+- Repos have no remote yet; that's expected (MRs come once remotes are set).
+- After setup the user works normally: `cc epic add {project} <KEY> ...` then tasks; your
+  CLAUDE.md grounds every agent.
+"""
+
+def cmd_project_setup(args):
+    s = load_state()
+    proj = s["projects"].get(args.project) or die("unknown project '%s'" % args.project)
+    base = Path(proj["path"]); base.mkdir(parents=True, exist_ok=True)
+    sdir = base / ".cc-setup"; sdir.mkdir(parents=True, exist_ok=True)
+    repos = list(proj.get("repos", {}).keys())
+    (sdir / "CLAUDE.md").write_text(SETUP_RUNBOOK.format(
+        project=args.project, base=str(base), ccpy=os.path.abspath(__file__),
+        repos=(", ".join(repos) if repos else "(пока нет — создашь в этом чате)")))
+    print("setup chat dir: %s" % sdir)
+    print("  open:  cd %s && claude --permission-mode auto --add-dir %s"
+          % (shlex.quote(str(sdir)), shlex.quote(str(base))))
+
 def cmd_project_new(args):
     """Create a brand-new EMPTY project (the folder too), ready to fill with repos via `cc repo add`."""
     base = (Path(args.path).expanduser().resolve() if args.path
@@ -1688,6 +1754,7 @@ def build_parser():
     pj = sub.add_parser("project").add_subparsers(dest="cmd", required=True)
     a = pj.add_parser("add"); a.add_argument("path"); a.add_argument("name", nargs="?"); a.set_defaults(fn=cmd_project_add)
     a = pj.add_parser("new"); a.add_argument("name"); a.add_argument("path", nargs="?"); a.set_defaults(fn=cmd_project_new)
+    a = pj.add_parser("setup"); a.add_argument("project"); a.set_defaults(fn=cmd_project_setup)
     pj.add_parser("ls").set_defaults(fn=cmd_project_ls)
     a = pj.add_parser("jira"); a.add_argument("project")
     a.add_argument("--site"); a.add_argument("--email"); a.add_argument("--token")
