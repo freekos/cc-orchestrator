@@ -18,6 +18,23 @@ def test_target_for():
     assert cc.target_for(epic, proj, "website") == "loyalty/integration"
     assert cc.target_for(epic, proj, "payment") == "master"
 
+
+def test_unique_tid_no_collision():
+    s = {"tasks": {}}
+    # first task with slug "go" under epic E1
+    t1 = cc._unique_tid(s, "E1", "go"); s["tasks"][t1] = {"epic": "E1"}
+    assert t1 == "t_go", t1
+    # same slug, DIFFERENT epic -> must NOT reuse t_go (that was the IK-8894-go loss)
+    t2 = cc._unique_tid(s, "E2", "go"); s["tasks"][t2] = {"epic": "E2"}
+    assert t2 != t1 and t2 not in (), t2
+    assert t2 == "t_e2_go", t2
+    # same slug, SAME epic -> numbered, still unique
+    t3 = cc._unique_tid(s, "E1", "go"); s["tasks"][t3] = {"epic": "E1"}
+    assert t3 not in (t1, t2), t3
+    # all keys distinct -> no overwrite possible
+    assert len(s["tasks"]) == 3, s["tasks"]
+
+
 if __name__ == "__main__":
     n = 0
     for k, v in list(globals().items()):

@@ -387,6 +387,18 @@ def _provision(epic_key, epic, proj, r, branch, slug, epic_mode, no_setup):
         return (r, None, None, str(ex).splitlines()[0][:80])
 
 
+def _unique_tid(s, epic, slug):
+    """A task state-key that can NEVER overwrite an existing one. `t_<slug>` normally; if that key
+    is taken by a task in a DIFFERENT epic, scope it by epic; then bump a numeric suffix until free.
+    (Same-slug-different-epic used to silently clobber a task — the IK-8894-go loss.)"""
+    tid = "t_" + slug
+    if tid in s["tasks"] and s["tasks"][tid].get("epic") != epic:
+        tid = "t_" + slugify(epic) + "_" + slug
+    base, i = tid, 2
+    while tid in s["tasks"]:
+        tid = base + "-" + str(i); i += 1
+    return tid
+
 def cmd_task_add(args):
     s = load_state()
     if args.epic not in s["epics"]:
@@ -399,14 +411,7 @@ def cmd_task_add(args):
             die("repo '%s' not in project '%s'" % (r, epic["project"]))
     slug = slugify(args.title)
     branch = "%s-%s" % (args.epic, slug)
-    # tid is the state key — must be unique. Same slug under a different epic used to
-    # COLLIDE (t_<slug>) and silently overwrite; disambiguate by epic, then by number.
-    tid = "t_" + slug
-    if tid in s["tasks"] and s["tasks"][tid].get("epic") != args.epic:
-        tid = "t_" + slugify(args.epic) + "_" + slug
-    base_tid, _i = tid, 2
-    while tid in s["tasks"]:
-        tid = base_tid + "-" + str(_i); _i += 1
+    tid = _unique_tid(s, args.epic, slug)
     epic_mode = epic.get("mode") or ("targets" if epic.get("targets") else "epic_branch")
     print("task '%s' under epic %s [%s] - provisioning %d repo(s) in parallel ..." % (
         args.title, args.epic, epic_mode, len(repos)))
@@ -1696,13 +1701,7 @@ def cmd_recover(args):
             if epic not in s["epics"]:
                 s["epics"][epic] = {"project": pname, "summary": "(восстановлен)",
                                     "mode": "epic_branch", "branch": epic, "targets": {}, "mrs": {}}
-            slug = o["slug"]
-            tid = "t_" + slug
-            if tid in s["tasks"] and s["tasks"][tid].get("epic") != epic:
-                tid = "t_" + slugify(epic) + "_" + slug
-            base_tid, i = tid, 2
-            while tid in s["tasks"]:
-                tid = base_tid + "-" + str(i); i += 1
+            tid = _unique_tid(s, epic, o["slug"])
             base = {r: default_branch(proj["repos"][r]["path"]) for r in o["repos"]}
             s["tasks"][tid] = {
                 "epic": epic, "title": slug, "branch": o["branch"],
