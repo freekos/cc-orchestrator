@@ -80,7 +80,7 @@ class NewEpicScreen(ModalScreen):
 
     def on_mount(self):
         if self.jira_on:
-            self.run_worker(lambda: self._load_epics(""), thread=True)
+            self.app._daemon(lambda: self._load_epics(""))
 
     def _load_epics(self, query):
         s = cc.load_state()
@@ -102,7 +102,7 @@ class NewEpicScreen(ModalScreen):
 
     def on_input_submitted(self, event):
         if self.jira_on and event.input.id == "esearch":
-            self.run_worker(lambda: self._load_epics(event.value.strip()), thread=True)
+            self.app._daemon(lambda: self._load_epics(event.value.strip()))
 
     def on_button_pressed(self, event: Button.Pressed):
         if event.button.id == "cancel":
@@ -177,10 +177,10 @@ class NewTaskScreen(ModalScreen):
 
     def on_mount(self):
         if self.jira_on:
-            self.run_worker(lambda: self._load_children(""), thread=True)
+            self.app._daemon(lambda: self._load_children(""))
         if self.preset_key:
             self._jira_key = self.preset_key
-            self.run_worker(self._seed_preset, thread=True)
+            self.app._daemon(self._seed_preset)
 
     def _seed_preset(self):
         key = self.preset_key
@@ -221,7 +221,7 @@ class NewTaskScreen(ModalScreen):
 
     def on_input_submitted(self, event):
         if self.jira_on and event.input.id == "tsearch":
-            self.run_worker(lambda: self._load_children(event.value.strip()), thread=True)
+            self.app._daemon(lambda: self._load_children(event.value.strip()))
 
     def _seed(self, key):
         cfg = cc.load_state()["projects"][self.project].get("jira", {})
@@ -245,7 +245,7 @@ class NewTaskScreen(ModalScreen):
             if val in (None, "_", Select.BLANK):
                 self.app.notify("выбери задачу из списка", severity="error"); return
             self._jira_key = str(val)
-            self.run_worker(lambda: self._seed(str(val)), thread=True); return
+            self.app._daemon(lambda: self._seed(str(val))); return
         title = self.query_one("#title", Input).value.strip()
         prompt = self.query_one("#prompt", TextArea).text.strip()
         if not title or not prompt:
@@ -602,7 +602,7 @@ class ReviewersScreen(ModalScreen):
             self.query_one("#rbox", VerticalScroll).border_title = "Reviewers — %s" % self.project
         except Exception:
             pass
-        self.run_worker(self._load, thread=True)
+        self.app._daemon(self._load)
 
     def _load(self):
         s = cc.load_state()
@@ -868,7 +868,6 @@ class CCApp(App):
     def on_mount(self):
         self.title = "cc — multi-repo orchestrator"
         self._detail_urls = []
-        self._closing = False
         self._busy = set()           # daemon-thread dedup (replaces run_worker exclusive=)
         self._force_status = False   # set by manual refresh to re-probe git for every task
         self._changes = {}           # tid -> {repo: git-status text}; lazily filled, never on every focus
@@ -880,14 +879,6 @@ class CCApp(App):
         self.set_interval(90.0, self.kick_sync)
         self.set_interval(30.0, self.kick_statuses)      # full status (git) on a daemon thread
         self.kick_statuses()
-
-    def on_unmount(self):
-        self._closing = True
-
-    def action_quit(self):
-        # mark closing so in-flight daemon workers bail at their next checkpoint, then exit now
-        self._closing = True
-        self.exit()
 
     def _bg(self, name, fn):
         """Run fn on a *daemon* thread. Daemon threads are abandoned at interpreter exit, so a
@@ -904,6 +895,19 @@ class CCApp(App):
             finally:
                 self._busy.discard(name)
         threading.Thread(target=runner, name="cc-" + name, daemon=True).start()
+
+    def _daemon(self, fn):
+        """Fire-and-forget on a daemon thread (no dedup). Used by modal loaders so their glab/Jira
+        network calls never run on asyncio's default executor either — if that executor is never
+        used, asyncio.run()'s shutdown_default_executor returns instantly and q can't hang."""
+        if self._closing:
+            return
+        def runner():
+            try:
+                fn()
+            except Exception:
+                pass
+        threading.Thread(target=runner, name="cc-load", daemon=True).start()
 
     def _safe_build_tree(self):
         if self._closing:
