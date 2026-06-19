@@ -42,9 +42,42 @@ def load_state():
         return json.loads(STATE_FILE.read_text())
     return {"projects": {}, "epics": {}, "tasks": {}}
 
+_BACKUP_DIR = STATE_DIR / "backups"
+
+def _backup_prev(prev):
+    """Snapshot the PREVIOUS on-disk state before we overwrite it, but only when this write changes
+    the SET of epics/tasks (an add or — the dangerous case — a removal). Status-only churn is
+    ignored so we don't spam. Keeps the newest 80 snapshots; recovery = copy one back."""
+    try:
+        _BACKUP_DIR.mkdir(parents=True, exist_ok=True)
+        dst = _BACKUP_DIR / ("state-%s-%d.json" % (time.strftime("%Y%m%d-%H%M%S"), os.getpid()))
+        if not dst.exists():
+            dst.write_text(json.dumps(prev, indent=2, ensure_ascii=False))
+            try:
+                os.chmod(dst, 0o600)
+            except OSError:
+                pass
+        for old in sorted(_BACKUP_DIR.glob("state-*.json"))[:-80]:
+            try:
+                old.unlink()
+            except OSError:
+                pass
+    except Exception:
+        pass
+
 def save_state(s):
-    """Atomic write (tmp + os.replace) so concurrent readers never see a torn file."""
+    """Atomic write (tmp + os.replace) so concurrent readers never see a torn file.
+    Also snapshots the previous state to ~/.cc/backups/ whenever the epic/task SET changes, so a
+    dropped epic or task is always recoverable (see `cc recover` / `cc orphans`)."""
     STATE_DIR.mkdir(parents=True, exist_ok=True)
+    try:
+        if STATE_FILE.exists():
+            prev = json.loads(STATE_FILE.read_text())
+            if (set(prev.get("tasks", {})) != set(s.get("tasks", {}))
+                    or set(prev.get("epics", {})) != set(s.get("epics", {}))):
+                _backup_prev(prev)
+    except Exception:
+        pass
     tmp = STATE_FILE.with_name(STATE_FILE.name + ".tmp.%d" % os.getpid())
     tmp.write_text(json.dumps(s, indent=2, ensure_ascii=False))
     try:
@@ -1560,6 +1593,8 @@ def build_parser():
 
     a = sub.add_parser("deploys"); a.add_argument("project"); a.add_argument("repo", nargs="?")
     a.set_defaults(fn=cmd_deploys)
+    sub.add_parser("orphans").set_defaults(fn=cmd_orphans)
+    sub.add_parser("recover").set_defaults(fn=cmd_recover)
 
     jr = sub.add_parser("jira").add_subparsers(dest="cmd", required=True)
     a = jr.add_parser("epics"); a.add_argument("project"); a.add_argument("--search")
@@ -1608,8 +1643,86 @@ def build_parser():
     return p
 
 # commands that only read state -> no lock; everything else mutates -> serialize
+def _scan_orphans(s):
+    """Task work present on disk (cctui/<epic>/<slug>/<repo> worktrees, branch <epic>-<slug>) but
+    with NO matching task in cc state — i.e. tasks that were silently dropped from the board.
+    Returns [{project, epic, slug, branch, repos:{repo:wt_path}}]."""
+    known = {t.get("branch") for t in s["tasks"].values()}
+    orphans = []
+    for pname, proj in s.get("projects", {}).items():
+        base = proj.get("path")
+        if not base:
+            continue
+        cctui = Path(base) / "cctui"
+        if not cctui.is_dir():
+            continue
+        for epic_dir in sorted(cctui.iterdir()):
+            if not epic_dir.is_dir():
+                continue
+            epic = epic_dir.name
+            for task_dir in sorted(epic_dir.iterdir()):
+                if not task_dir.is_dir():
+                    continue
+                slug = task_dir.name
+                branch = "%s-%s" % (epic, slug)
+                if branch in known:
+                    continue
+                repos = {}
+                for repo_dir in sorted(task_dir.iterdir()):
+                    if (repo_dir.is_dir() and (repo_dir / ".git").exists()
+                            and repo_dir.name in proj.get("repos", {})):
+                        repos[repo_dir.name] = str(repo_dir)
+                if repos:
+                    orphans.append({"project": pname, "epic": epic, "slug": slug,
+                                    "branch": branch, "repos": repos})
+    return orphans
+
+def cmd_orphans(args):
+    orphans = _scan_orphans(load_state())
+    if not orphans:
+        print("потеряшек нет — всё, что на диске, есть на доске ✓")
+        return
+    print("⚠️ %d задач(и) на диске, которых НЕТ на доске cc:" % len(orphans))
+    for o in orphans:
+        print("  epic %s / %s   (ветка %s; репо: %s)" % (o["epic"], o["slug"], o["branch"], ", ".join(o["repos"])))
+    print("\n`cc recover` вернёт их на доску (worktrees/ветки уже на диске — работа цела).")
+
+def cmd_recover(args):
+    def fn(s):
+        recovered = []
+        for o in _scan_orphans(s):
+            epic, pname = o["epic"], o["project"]
+            proj = s["projects"][pname]
+            if epic not in s["epics"]:
+                s["epics"][epic] = {"project": pname, "summary": "(восстановлен)",
+                                    "mode": "epic_branch", "branch": epic, "targets": {}, "mrs": {}}
+            slug = o["slug"]
+            tid = "t_" + slug
+            if tid in s["tasks"] and s["tasks"][tid].get("epic") != epic:
+                tid = "t_" + slugify(epic) + "_" + slug
+            base_tid, i = tid, 2
+            while tid in s["tasks"]:
+                tid = base_tid + "-" + str(i); i += 1
+            base = {r: default_branch(proj["repos"][r]["path"]) for r in o["repos"]}
+            s["tasks"][tid] = {
+                "epic": epic, "title": slug, "branch": o["branch"],
+                "repos": list(o["repos"].keys()), "worktrees": dict(o["repos"]),
+                "base": base, "mrs": {}, "log": str(STATE_DIR / (tid + ".log")),
+                "recovered": True,
+            }
+            recovered.append((tid, epic, o["branch"]))
+        return recovered
+    recovered = mutate(fn)
+    if not recovered:
+        print("нечего восстанавливать — потеряшек на диске нет ✓")
+        return
+    print("восстановлено %d задач(и) на доску:" % len(recovered))
+    for tid, epic, br in recovered:
+        print("  %s   (epic %s, ветка %s)" % (tid, epic, br))
+    print("\n`cc task mrs <tid>` подтянет MR; имя = slug (исходный заголовок не сохранялся в worktree).")
+
 _READONLY = {cmd_task_diff, cmd_task_ls, cmd_repo_ls, cmd_repo_members,
-             cmd_epic_ls, cmd_epic_memory, cmd_project_ls, cmd_jira_epics}
+             cmd_epic_ls, cmd_epic_memory, cmd_project_ls, cmd_jira_epics, cmd_orphans}
 
 _SELF_LOCKED = {cmd_epic_mrs, cmd_task_mrs}   # do network lock-free, then save under a brief lock themselves
 

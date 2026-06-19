@@ -63,7 +63,7 @@ cc epic done FEAT-1                               # finish epic: Jira(epic+tasks
 `a` +Project · `e` +Epic · `n` +Task · `o` chat (interactive, new terminal/cmux tab) ·
 `v` view chat (read-only) · `c` Cursor · `d` diff · `m`/`M` MR dry/create ·
 `g` MR links (task & epic→master) · `D` refresh deploy status · `x` finish (task/epic → done & remove) ·
-`R` reviewers · `r` refresh (on a task: re-fetch its changes; on an epic: re-sync Jira) · `q` quit.
+`R` reviewers · `r` refresh · `U` recover lost tasks · `q` quit.
 
 ### Deploy status
 The project panel shows, per repo, what's currently deployed — `stage:<ref> prod:<ref>`
@@ -147,7 +147,12 @@ to any repo/MR.
   interactive session (skills + pickers) to steer it.
 - State lives in `~/.cc/state.json`, written **atomically** (tmp + `os.replace`) under a
   cross-process **file lock** so concurrent `cc` commands + the TUI never lose updates
-  (reads stay lock-free). git/MRs are the source of truth (statuses are derived live:
+  (reads stay lock-free). Every write that changes the **set** of epics/tasks first
+  snapshots the previous state to `~/.cc/backups/` (last 80), so a dropped item is always
+  recoverable. The agent's work lives in git worktrees regardless: `cc orphans` lists task
+  worktrees on disk that aren't on the board, and `cc recover` (TUI: **U**) re-imports them —
+  the TUI also shows a **"⚠️ Потеряшки на диске"** node + a startup warning so a lost task
+  can never go unnoticed. git/MRs are the source of truth (statuses are derived live:
   running / review / mr / merged).
 - **Lightweight status polling.** The TUI never shells `git` on a loop in steady state: a
   cheap pid check (8s) tracks running agents and detects the moment one finishes; the

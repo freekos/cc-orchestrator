@@ -851,6 +851,7 @@ class CCApp(App):
         Binding("g", "mrs", "MR links"),
         Binding("x", "cleanup", "Cleanup/Epic"),
         Binding("r", "refresh", "Refresh"),
+        Binding("U", "recover", "Recover lost"),
         Binding("q", "quit", "Quit"),
     ]
 
@@ -871,6 +872,13 @@ class CCApp(App):
         self._epic_synced = set()    # epics whose master-MRs we've already looked up this session
         self._epic_timer = None      # debounce handle for the epic-focus -> MR lookup
         self.build_tree()
+        try:
+            n = len(cc._scan_orphans(cc.load_state()))
+            if n:
+                self.notify("⚠️ %d задач(и) на диске нет на доске — нажми U чтобы восстановить" % n,
+                            severity="warning", timeout=10)
+        except Exception:
+            pass
         self.set_interval(8.0, self.refresh_glyphs)      # cheap (pid-based fast_status, no git)
         self.set_interval(90.0, self.kick_sync)
         self.set_interval(15.0, self.kick_statuses)      # full status (git) on a daemon thread
@@ -1007,6 +1015,13 @@ class CCApp(App):
                 self._add_epic_node(pn, ekey, e, s, expand=True)
             if not epics:
                 pn.add_leaf("(no epics — press 'e' to add one)", data=None)
+        orphans = cc._scan_orphans(s)
+        if orphans:
+            on = tree.root.add("⚠️  Потеряшки на диске (%d) — U чтобы восстановить" % len(orphans),
+                               data={"type": "orphans"}, expand=True)
+            for o in orphans:
+                on.add_leaf("[yellow]%s / %s  (ветка %s, %d репо)[/yellow]"
+                            % (o["epic"], o["slug"], o["branch"], len(o["repos"])), data=None)
 
     def current(self):
         node = self.query_one("#tree", Tree).cursor_node
@@ -1224,6 +1239,12 @@ class CCApp(App):
                     ch.set_label("%s %s" % (GLYPH.get(fast_status(t), "?"), t["title"]))
                 walk(ch)
         walk(self.query_one("#tree", Tree).root)
+
+    def action_recover(self):
+        # restore tasks whose work is on disk but missing from the board
+        self.push_screen(OutputScreen("recover lost tasks",
+                         [sys.executable, "-u", ENGINE, "recover"]),
+                         lambda _: self.build_tree())
 
     def action_refresh(self):
         cur = self.current()

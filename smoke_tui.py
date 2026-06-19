@@ -35,6 +35,6 @@ async def main():
         s = cc.load_state()
         assert "SMOKE-1" in s["epics"], "epic NOT created via modal"
         print("TUI smoke OK: %d project(s); free-epic created via modal on '%s'" % (nproj, free))
-        s["epics"].pop("SMOKE-1", None); cc.save_state(s)
+        cc.mutate(lambda st: st["epics"].pop("SMOKE-1", None))  # locked write, no stale-overwrite race
 
 asyncio.run(main())
