@@ -567,17 +567,18 @@ def cmd_task_ls(args):
             print("   %s %-18s %-28s [%s]" % (glyph, tid, t["title"], st))
 
 def cmd_task_mrs(args):
+    # self-locked: query glab WITHOUT holding the state lock (network is slow), then save briefly.
     s = load_state()
     t = s["tasks"].get(args.task) or die("unknown task '%s'" % args.task)
     proj = s["projects"][s["epics"][t["epic"]]["project"]]
     branch = t["branch"]
     any_url = merged = open_ = 0
-    states = {}
+    found, states = {}, {}
     for r in t["repos"]:
         ri = proj["repos"][r]
-        url, state = mr_info(ri["remote"], branch, ri["path"])
+        url, state = mr_info(ri["remote"], branch, ri["path"])   # NETWORK, no lock held
         if url:
-            t.setdefault("mrs", {})[r] = url
+            found[r] = url
             states[r] = state
             any_url += 1
             print("[%s] %s  (%s)" % (r, url, state))
@@ -587,9 +588,14 @@ def cmd_task_mrs(args):
                 open_ += 1
         else:
             print("[%s] (no MR)" % r)
-    t["mr_state"] = states
-    t["merged"] = any_url > 0 and open_ == 0   # all found MRs merged
-    save_state(s)
+    all_merged = any_url > 0 and open_ == 0
+    def apply(st):
+        tt = st["tasks"].get(args.task)
+        if tt is not None:
+            tt.setdefault("mrs", {}).update(found)
+            tt["mr_state"] = states
+            tt["merged"] = all_merged
+    mutate(apply)
     if not any_url:
         print("(no MRs found — create with M)")
     elif merged and not open_:
@@ -858,25 +864,21 @@ def _epic_master_mr(ri, br, epic_key):
     pick = (opened or matches)[0]   # prefer an open MR, else the most-recent match
     return (pick.get("web_url"), pick.get("state"), db)
 
-def _epic_sync_mrs(s, e, proj, epic_key):
-    """Find each repo's epic->master MR via the GitLab API and record it on the epic so the TUI
-    can show it. Queries GitLab directly (no local ref needed — integration branches may not be
-    checked out). Returns how many MRs were found."""
-    states = {}
-    any_url = 0
+def _epic_sync_mrs(e, proj, epic_key):
+    """NETWORK ONLY — query GitLab for each repo's epic->master MR. Returns (found, states); the
+    caller persists. Deliberately does NOT hold the state lock: the glab calls take seconds and we
+    don't want to block other cc mutations (or the TUI) while we wait on the network."""
+    found, states = {}, {}
     for r, br in _epic_branch_map(e, proj).items():
         ri = proj["repos"][r]
         url, state, db = _epic_master_mr(ri, br, epic_key)
         if url:
-            e.setdefault("mrs", {})[r] = url
+            found[r] = url
             states[r] = state or "?"
-            any_url += 1
             print("[%s] -> %s  %s  (%s)" % (r, db, url, state))
         else:
             print("[%s] MR в %s не найден (ветка %s)" % (r, db, br))
-    e["mr_state"] = states
-    save_state(s)
-    return any_url
+    return found, states
 
 def cmd_epic_mr(args):
     s = load_state()
@@ -887,7 +889,11 @@ def cmd_epic_mr(args):
         # integration branches are shared/team-owned; don't auto-create their release MRs —
         # just detect & record the existing target-branch -> master MRs for display.
         print("targets mode: интеграционные ветки релизятся своим потоком; ищу существующие MR → master …")
-        if not _epic_sync_mrs(s, e, proj, args.key):
+        found, states = _epic_sync_mrs(e, proj, args.key)
+        e.setdefault("mrs", {}).update(found)
+        e["mr_state"] = states
+        save_state(s)   # lock already held by main() for cmd_epic_mr
+        if not found:
             print("(MR интеграционных веток → master пока нет)")
         return
     key = e.get("branch", args.key)
@@ -939,15 +945,22 @@ def cmd_epic_memory(args):
 
 
 def cmd_epic_mrs(args):
+    # self-locked: runs WITHOUT main()'s global lock so the slow glab calls don't block other cc
+    # mutations / the TUI; only the brief save below takes the lock.
     s = load_state()
     e = s["epics"].get(args.key) or die("unknown epic '%s'" % args.key)
     proj = s["projects"][e["project"]]
-    if not _epic_sync_mrs(s, e, proj, args.key):
+    found, states = _epic_sync_mrs(e, proj, args.key)   # NETWORK, no lock held
+    def apply(st):
+        ep = st["epics"].get(args.key)
+        if ep is not None:
+            ep.setdefault("mrs", {}).update(found)
+            ep["mr_state"] = states
+    mutate(apply)
+    if not found:
         mode = e.get("mode") or ("targets" if e.get("targets") else "epic_branch")
-        if mode == "epic_branch":
-            print("(MR ветки эпика ещё нет — нажми M / cc epic mr %s)" % args.key)
-        else:
-            print("(MR интеграционных веток → master пока нет)")
+        print("(MR ветки эпика ещё нет — нажми M / cc epic mr %s)" % args.key if mode == "epic_branch"
+              else "(MR интеграционных веток → master пока нет)")
 
 
 def sync_epic_children(s, key):
@@ -1513,10 +1526,12 @@ def build_parser():
 _READONLY = {cmd_task_diff, cmd_task_ls, cmd_repo_ls, cmd_repo_members,
              cmd_epic_ls, cmd_epic_memory, cmd_project_ls, cmd_jira_epics}
 
+_SELF_LOCKED = {cmd_epic_mrs, cmd_task_mrs}   # do network lock-free, then save under a brief lock themselves
+
 def main(argv=None):
     args = build_parser().parse_args(argv)
     fn = args.fn
-    if fn in _READONLY:
+    if fn in _READONLY or fn in _SELF_LOCKED:
         fn(args)
     else:
         with state_lock():

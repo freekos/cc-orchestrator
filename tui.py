@@ -527,7 +527,7 @@ class OutputScreen(ModalScreen):
             self.query_one("#obox", VerticalScroll).border_title = "%s  ·  esc = закрыть" % self._title
         except Exception:
             pass
-        self.run_worker(self._run, thread=True)
+        self.app._bg("output:%d" % id(self), self._run)
 
     def _run(self):
         env = dict(os.environ)
@@ -1278,7 +1278,7 @@ class CCApp(App):
             proj = s["epics"].get(ekey, {}).get("project")
             if s["projects"].get(proj, {}).get("jira", {}).get("token"):
                 self.notify("синхронизирую задачи эпика из Jira …")
-                self.run_worker(lambda: self._sync_epic(ekey), thread=True, exclusive=True, group="esync")
+                self._bg("esync:%s" % ekey, lambda: self._sync_epic(ekey))
                 return
         # `r` on a TASK node = re-probe just that task's working-tree changes (the only on-demand git)
         if cur and cur.get("type") == "task":
@@ -1360,7 +1360,7 @@ class CCApp(App):
         if not proj:
             self.notify("выбери проект", severity="error"); return
         self.notify("обновляю статусы деплоя (dev/stage/prod) …")
-        self.run_worker(lambda: self._do_deploys(proj), thread=True, exclusive=True, group="deploys")
+        self._bg("deploys:%s" % proj, lambda: self._do_deploys(proj))
 
     def _do_deploys(self, proj):
         subprocess.run([sys.executable, ENGINE, "deploys", proj], capture_output=True)
