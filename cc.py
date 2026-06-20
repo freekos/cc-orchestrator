@@ -1002,12 +1002,11 @@ def mr_info(remote, branch, cwd):
     return (um.group(1) if um else find_mr(remote, branch, cwd), sm.group(1) if sm else "?")
 
 def mr_url(out, remote, branch, cwd):
+    # URL of the JUST-created MR — ONLY from the create output. Do NOT fall back to `glab mr view`
+    # here: that returns a PRE-EXISTING (often merged) MR and masks a failed create. Empty == failed.
     text = (out.stdout or "") + "\n" + (out.stderr or "")
-    m = re.search(r"https?://\S+/-/merge_requests/\d+", text)   # real web url from create output
-    if m:
-        return m.group(0)
-    u, _ = mr_info(remote, branch, cwd)   # glab mr view — real URL for the branch's MR (any state)
-    return u or ""                         # never a placeholder string
+    m = re.search(r"https?://\S+/-/merge_requests/\d+", text)
+    return m.group(0) if m else ""
 
 
 def claude_text(cwd, prompt, timeout=120):
