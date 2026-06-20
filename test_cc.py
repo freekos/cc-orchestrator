@@ -57,6 +57,19 @@ def test_state_lock_reentrant():
         cc.mutate(lambda st: None)
 
 
+def test_clean_subject():
+    fb = "fallback-title"
+    # leaked reasoning / review -> fallback
+    assert cc._clean_subject("Прежде чем выдать MR — в дифе несоответствие, давай разберём", fb) == fb
+    assert cc._clean_subject("one sentence. two sentence. three here", fb) == fb
+    assert cc._clean_subject("x" * 120, fb) == fb
+    assert cc._clean_subject("", fb) == fb
+    # clean Conventional-Commits title kept; ticket prefix + preamble stripped (cc re-adds [IK-XXXX])
+    assert cc._clean_subject("feat(loyalty): exclude annual", fb) == "feat(loyalty): exclude annual"
+    assert cc._clean_subject("[IK-8631] fix(pos): disable bonus", fb) == "fix(pos): disable bonus"
+    assert cc._clean_subject("MR title: feat(clubs): filter tier", fb) == "feat(clubs): filter tier"
+
+
 if __name__ == "__main__":
     n = 0
     for k, v in list(globals().items()):

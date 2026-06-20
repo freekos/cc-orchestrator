@@ -1041,35 +1041,71 @@ def claude_text(cwd, prompt, timeout=120):
     except Exception:
         return None
 
+_REASON_MARKERS = ("прежде чем", "в диф", "несоответств", "looking at", "let me", "i'll ", "i will ",
+                   "here's", "here is", "note:", "wait,", "actually,", "review", "ревью", "анализ",
+                   "проблема", "issue:", "however", "однако", "на самом деле", "по сути")
+
+def _clean_subject(text, fallback, max_len=100):
+    """Extract a clean SINGLE-LINE title from a model's output. Rejects leaked reasoning/review,
+    multi-line/multi-sentence dumps, and over-long lines -> falls back to the task title. (cc adds
+    the [IK-XXXX] prefix itself, so a leading ticket tag in the model output is stripped.)"""
+    if not text:
+        return fallback
+    line = ""
+    for raw in text.strip().splitlines():
+        l = raw.strip().strip("`").strip()
+        l = re.sub(r"^(mr title|title|subject)\s*[:\-]\s*", "", l, flags=re.I).strip().strip('"').strip()
+        l = re.sub(r"^\[?IK-\d+\]?\s*[:\-]?\s*", "", l).strip()   # drop a leading ticket tag (cc re-adds it)
+        if l:
+            line = l; break
+    if not line:
+        return fallback
+    low = line.lower()
+    if len(line) > max_len or line.count(". ") >= 2 or any(m in low for m in _REASON_MARKERS):
+        return fallback
+    return line
+
 def gen_commit_msg(wt, fallback):
     diff = git(["diff", "--cached"], cwd=wt, check=False).stdout or ""
     if not diff.strip():
         return fallback
-    prompt = ("Write ONE git commit message for the staged diff below, following this repo's "
-              "conventions in CLAUDE.md (if absent, use Conventional Commits: type(scope): subject). "
-              "Output ONLY the message: a subject line, optionally a blank line then a short body. "
-              "No backticks, no quotes, no preamble.\n\n=== staged diff ===\n" + diff[:12000])
+    prompt = ("Write ONE git commit message for the STAGED DIFF below, following this repo's CLAUDE.md "
+              "conventions (else Conventional Commits: type(scope): subject). HARD RULES: the subject is a "
+              "SINGLE line (<=72 chars) describing ONLY what is in this diff — no review, no reasoning, no "
+              "analysis, no preamble, nothing not present in the diff. Optionally a blank line then a short "
+              "factual body. Output ONLY the message.\n\n=== staged diff ===\n" + diff[:12000])
     msg = claude_text(wt, prompt)
-    return msg.strip() if msg else fallback
+    if not msg:
+        return fallback
+    lines = msg.strip().splitlines()
+    subject = _clean_subject(lines[0] if lines else "", fallback)
+    body = "\n".join(lines[1:]).strip()
+    return (subject + ("\n\n" + body if body and len(body) < 1500 else "")).strip()
 
 def gen_mr_text(wt, cmp_ref, fallback_title, fallback_desc):
     diff = git(["diff", cmp_ref + "..HEAD"], cwd=wt, check=False).stdout or ""
     log = git(["log", "--oneline", cmp_ref + "..HEAD"], cwd=wt, check=False).stdout or ""
+    files = git(["diff", "--name-only", cmp_ref + "..HEAD"], cwd=wt, check=False).stdout or ""
     if not diff.strip():
         return (fallback_title, fallback_desc)
-    prompt = ("Summarize this branch into a Merge Request, following the repo's CLAUDE.md conventions. "
-              "Output the MR title on the first line, then a line containing only '---', then the MR "
-              "description in markdown (what changed and why; concise, factual). No preamble.\n\n"
-              "=== commits ===\n" + log[:2000] + "\n\n=== diff ===\n" + diff[:14000])
+    prompt = ("Summarize THIS branch's diff into a Merge Request, following the repo's CLAUDE.md.\n"
+              "OUTPUT FORMAT (exactly): line 1 = the MR TITLE, then a line with only '---', then the "
+              "description in markdown.\n"
+              "TITLE RULES (strict): a SINGLE line, Conventional Commits `type(scope): subject` (<=72 "
+              "chars). It MUST describe ONLY changes present in the diff/files below — do NOT mention "
+              "anything not in this diff. NO review, NO reasoning, NO multi-line. Do NOT add a [IK-XXXX] "
+              "prefix (it is added automatically). Put ALL analysis/notes in the DESCRIPTION, never the "
+              "title.\n\n=== changed files ===\n" + files[:1500] + "\n=== commits ===\n" + log[:1500]
+              + "\n=== diff ===\n" + diff[:14000])
     out = claude_text(wt, prompt)
     if not out:
         return (fallback_title, fallback_desc)
     if "---" in out:
         a, b = out.split("---", 1)
-        title = (a.strip().splitlines()[0][:140] if a.strip() else fallback_title)
-        return (title, b.strip() or fallback_desc)
+        return (_clean_subject(a, fallback_title), b.strip() or fallback_desc)
     lines = out.strip().splitlines()
-    return (lines[0][:140], "\n".join(lines[1:]).strip() or fallback_desc)
+    return (_clean_subject(lines[0] if lines else "", fallback_title),
+            "\n".join(lines[1:]).strip() or fallback_desc)
 
 
 def ensure_remote_target(wt, target, db):
