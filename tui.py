@@ -871,6 +871,8 @@ class CCApp(App):
         self._changes_timer = None   # debounce handle for the focus -> lazy-fetch
         self._epic_synced = set()    # epics whose master-MRs we've already looked up this session
         self._epic_timer = None      # debounce handle for the epic-focus -> MR lookup
+        self._collapsed = set()      # node keys ("project:NAME"/"epic:KEY") the user collapsed — kept across rebuilds
+        self._building = False       # True while build_tree runs, so programmatic expand/collapse isn't recorded
         self.build_tree()
         try:
             n = len(cc._scan_orphans(cc.load_state()))
@@ -1004,27 +1006,87 @@ class CCApp(App):
             en.add_leaf("[dim](нет задач — n чтобы добавить)[/dim]", data=None)
         return en
 
+    @staticmethod
+    def _node_key(data):
+        """Stable identity for a tree node across rebuilds (for collapse-state + cursor restore)."""
+        if not data:
+            return None
+        t = data.get("type")
+        if t in ("project", "epic", "task"):
+            return "%s:%s" % (t, data["id"])
+        if t == "orphans":
+            return "orphans:"
+        return None
+
+    def _find_node(self, node, key):
+        for ch in node.children:
+            if self._node_key(ch.data) == key:
+                return ch
+            found = self._find_node(ch, key)
+            if found is not None:
+                return found
+        return None
+
     def build_tree(self):
         tree = self.query_one("#tree", Tree)
-        tree.clear()
-        s = self.state()
-        tree.root.expand()
-        for pname, p in s["projects"].items():
-            pn = tree.root.add("%s  [%d repo]" % (pname, len(p["repos"])),
-                               data={"type": "project", "id": pname}, expand=True)
-            epics = [(k, e) for k, e in s["epics"].items()
-                     if e["project"] == pname and not e.get("archived")]
-            for ekey, e in epics:
-                self._add_epic_node(pn, ekey, e, s, expand=True)
-            if not epics:
-                pn.add_leaf("(no epics — press 'e' to add one)", data=None)
-        orphans = cc._scan_orphans(s)
-        if orphans:
-            on = tree.root.add("⚠️  Потеряшки на диске (%d) — U чтобы восстановить" % len(orphans),
-                               data={"type": "orphans"}, expand=True)
-            for o in orphans:
-                on.add_leaf("[yellow]%s / %s  (ветка %s, %d репо)[/yellow]"
-                            % (o["epic"], o["slug"], o["branch"], len(o["repos"])), data=None)
+        prev_key = self._node_key(self.current())   # remember focused node so the cursor survives the rebuild
+        self._building = True                        # programmatic expand/collapse below must NOT touch _collapsed
+        try:
+            tree.clear()
+            s = self.state()
+            tree.root.expand()
+            for pname, p in s["projects"].items():
+                pkey = "project:" + pname
+                pn = tree.root.add("%s  [%d repo]" % (pname, len(p["repos"])),
+                                   data={"type": "project", "id": pname},
+                                   expand=(pkey not in self._collapsed))
+                epics = [(k, e) for k, e in s["epics"].items()
+                         if e["project"] == pname and not e.get("archived")]
+                for ekey, e in epics:
+                    self._add_epic_node(pn, ekey, e, s, expand=(("epic:" + ekey) not in self._collapsed))
+                if not epics:
+                    pn.add_leaf("(no epics — press 'e' to add one)", data=None)
+            orphans = cc._scan_orphans(s)
+            if orphans:
+                on = tree.root.add("⚠️  Потеряшки на диске (%d) — U чтобы восстановить" % len(orphans),
+                                   data={"type": "orphans"}, expand=True)
+                for o in orphans:
+                    on.add_leaf("[yellow]%s / %s  (ветка %s, %d репо)[/yellow]"
+                                % (o["epic"], o["slug"], o["branch"], len(o["repos"])), data=None)
+        finally:
+            self._building = False
+        # Restore the cursor AFTER the tree re-renders: a freshly-added node has no line index yet
+        # (TreeNode.line == -1 until layout), so move_cursor() must wait for the refresh pass.
+        self._restore_key = prev_key
+        if prev_key:
+            self.call_after_refresh(self._restore_cursor)
+
+    def _restore_cursor(self):
+        key = getattr(self, "_restore_key", None)
+        if not key:
+            return
+        self._restore_key = None
+        tree = self.query_one("#tree", Tree)
+        node = self._find_node(tree.root, key)
+        if node is not None:
+            try:
+                tree.move_cursor(node)
+            except Exception:
+                pass
+
+    def on_tree_node_collapsed(self, event):
+        if self._building:
+            return
+        k = self._node_key(event.node.data if event.node else None)
+        if k and k.split(":", 1)[0] in ("project", "epic"):
+            self._collapsed.add(k)
+
+    def on_tree_node_expanded(self, event):
+        if self._building:
+            return
+        k = self._node_key(event.node.data if event.node else None)
+        if k:
+            self._collapsed.discard(k)
 
     def current(self):
         node = self.query_one("#tree", Tree).cursor_node
