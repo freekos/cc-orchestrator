@@ -873,6 +873,17 @@ class CCApp(App):
         self._epic_timer = None      # debounce handle for the epic-focus -> MR lookup
         self._collapsed = set()      # node keys ("project:NAME"/"epic:KEY") the user collapsed — kept across rebuilds
         self._building = False       # True while build_tree runs, so programmatic expand/collapse isn't recorded
+        # Launch with a tidy, fully-collapsed board: seed every existing project & epic as collapsed
+        # so the tree opens closed. The user drills into what they want (expansions are remembered for
+        # the session); items created later this session aren't seeded, so they appear expanded/visible.
+        try:
+            s0 = cc.load_state()
+            for _pn in s0.get("projects", {}):
+                self._collapsed.add("project:" + _pn)
+            for _ek in s0.get("epics", {}):
+                self._collapsed.add("epic:" + _ek)
+        except Exception:
+            pass
         self.build_tree()
         try:
             n = len(cc._scan_orphans(cc.load_state()))
