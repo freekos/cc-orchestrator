@@ -906,6 +906,50 @@ def cmd_task_mrs(args):
         print("\n%d merged, %d still open" % (merged, open_))
 
 
+def _task_merge_pass(t, proj, dry, squash):
+    """Merge the OPEN MR of each repo of task `t` (skip repos with no open MR). Prints per repo,
+    returns {merged, failed, skipped}. Repos without changes simply have no open MR -> skipped."""
+    branch = t["branch"]
+    merged = failed = skipped = 0
+    for r in t["repos"]:
+        ri = proj["repos"].get(r)
+        if not ri or not ri.get("remote"):
+            print("  [%s] remote не задан — skip" % r); skipped += 1; continue
+        mr = open_mr(ri["remote"], branch, ri["path"])
+        if not mr:
+            print("  [%s] нет открытого MR (ветка %s) — skip" % (r, branch)); skipped += 1; continue
+        iid, tgt, url = mr.get("iid"), mr.get("target_branch"), mr.get("web_url")
+        if dry:
+            print("  [%s] DRY: merge !%s  (%s → %s)  %s" % (r, iid, branch, tgt, url)); continue
+        ok, msg = merge_mr(ri["remote"], iid, ri["path"], squash=squash)
+        if ok:
+            print("  [%s] merged !%s  (%s → %s)" % (r, iid, branch, tgt)); merged += 1
+        else:
+            print("  [%s] FAILED !%s: %s" % (r, iid, msg)); failed += 1
+    return {"merged": merged, "failed": failed, "skipped": skipped}
+
+def _refresh_task(tid):
+    """Re-query & persist this task's MR state after a merge (reuses cmd_task_mrs)."""
+    class _NS: pass
+    ns = _NS(); ns.task = tid
+    try:
+        cmd_task_mrs(ns)
+    except SystemExit:
+        pass
+
+def cmd_task_merge(args):
+    # self-locked: glab merges are slow network; don't hold the global lock.
+    s = load_state()
+    t = s["tasks"].get(args.task) or die("unknown task '%s'" % args.task)
+    proj = s["projects"][s["epics"][t["epic"]]["project"]]
+    print("merge task %s (branch %s)%s" % (args.task, t["branch"], "  [DRY-RUN]" if args.dry_run else ""))
+    res = _task_merge_pass(t, proj, args.dry_run, args.squash)
+    print("  -> %d merged, %d failed, %d skipped" % (res["merged"], res["failed"], res["skipped"]))
+    if not args.dry_run and res["merged"]:
+        print("  refreshing MR state …")
+        _refresh_task(args.task)
+
+
 def cmd_task_abort(args):
     """Tear down a task's REMOTE side: close MRs + delete remote branches, then local cleanup.
     Use for throwaway/test tasks so they don't pollute team repos."""
@@ -1024,6 +1068,29 @@ def mr_info(remote, branch, cwd):
     if mr:
         return (mr.get("web_url"), mr.get("state") or "?")
     return (None, None)
+
+def open_mr(remote, branch, cwd):
+    """The single OPEN MR whose source is `branch`, or None. Returns the raw dict (iid/web_url/
+    target_branch/...). Used by merge commands — we only ever auto-merge an OPEN MR."""
+    enc = remote.replace("/", "%2F")
+    out = run(["glab", "api",
+               "projects/%s/merge_requests?source_branch=%s&state=opened&per_page=1" % (enc, branch)],
+              cwd=cwd, check=False)
+    try:
+        arr = json.loads(out.stdout or "[]")
+    except Exception:
+        arr = []
+    return arr[0] if arr else None
+
+def merge_mr(remote, iid, cwd, squash=False):
+    """Merge MR <iid>. Returns (ok, msg). --auto-merge so a required-but-unfinished pipeline merges
+    on green instead of failing; we do NOT remove the source branch (a follow-up fix may reuse it)."""
+    cmd = ["glab", "mr", "merge", str(iid), "-R", remote, "--yes"]
+    if squash:
+        cmd.append("--squash")
+    r = run(cmd, cwd=cwd, check=False)
+    msg = ((r.stdout or "") + " " + (r.stderr or "")).strip().replace("\n", " ")
+    return (r.returncode == 0, msg[:300])
 
 def mr_url(out, remote, branch, cwd):
     # URL of the JUST-created MR — ONLY from the create output. Do NOT fall back to `glab mr view`
@@ -1364,6 +1431,76 @@ def cmd_epic_mrs(args):
               else "(MR интеграционных веток → master пока нет)")
 
 
+def cmd_epic_plan(args):
+    """Release plan: which repos of this epic to RELEASE vs SKIP. Source of truth for 'what to
+    touch' — release/MR ONLY repos marked РЕЛИЗИТЬ; never touch a repo marked SKIP.
+
+    The signal is the repo's epic->master MR state (same detection as `cc epic mrs`), NOT a local
+    git diff: origins are often forks whose master is thousands of commits behind canonical, so
+    `origin/master..branch` lies. MR state is reliable across that:
+      - OPEN epic->master MR  -> РЕЛИЗИТЬ (merge it / it's the release MR)
+      - MERGED                -> SKIP (already released)
+      - no MR, but branch ahead of master (git, weak) -> "изменения есть, MR в master нет" (релизить)
+      - no MR, nothing ahead / no branch -> SKIP"""
+    s = load_state()
+    e = s["epics"].get(args.key) or die("unknown epic '%s'" % args.key)
+    proj = s["projects"][e["project"]]
+    mode = e.get("mode") or ("targets" if e.get("targets") else "epic_branch")
+    bm = _epic_branch_map(e, proj)
+    repos = e.get("repos") or list(proj["repos"].keys())
+    changed, skip = [], []
+    print("epic %s — release plan (mode=%s, по состоянию MR в master):" % (args.key, mode))
+    for r in repos:
+        ri = proj["repos"].get(r)
+        if not ri or not ri.get("remote"):
+            print("  [%s] remote не задан                              → SKIP" % r); skip.append(r); continue
+        br = bm.get(r)
+        url, state, db = _epic_master_mr(ri, br or args.key, args.key)   # NETWORK, no lock held
+        if state == "opened":
+            print("  [%s] открытый MR → %s: %s              → РЕЛИЗИТЬ" % (r, db, url)); changed.append(r)
+        elif state == "merged":
+            print("  [%s] MR уже влит в %s                            → SKIP" % (r, db)); skip.append(r)
+        else:
+            ahead = _ahead_count(ri["path"], br, db) if br else 0
+            if ahead and br and (have_ref(ri["path"], "origin/" + br) or have_ref(ri["path"], br)):
+                print("  [%s] '%s' впереди %s, MR в master нет           → РЕЛИЗИТЬ (создать MR)" % (r, br, db))
+                changed.append(r)
+            else:
+                print("  [%s] изменений в %s нет                          → SKIP" % (r, db)); skip.append(r)
+    print("\nРелизить ТОЛЬКО: %s" % (", ".join(changed) or "(нет изменений ни в одном репо — релизить нечего)"))
+    if skip:
+        print("Не трогать:      %s" % ", ".join(skip))
+
+
+def cmd_epic_merge(args):
+    # self-locked: glab merges are slow network; don't hold the global lock.
+    s = load_state()
+    e = s["epics"].get(args.key) or die("unknown epic '%s'" % args.key)
+    proj = s["projects"][e["project"]]
+    tids = [tid for tid, t in s["tasks"].items() if t.get("epic") == args.key]
+    if not tids:
+        print("(в эпике %s нет задач)" % args.key); return
+    print("merge epic %s — открытые MR ВСЕХ задач (task → integration; это НЕ релиз в master)%s" % (
+        args.key, "  [DRY-RUN]" if args.dry_run else ""))
+    total = {"merged": 0, "failed": 0, "skipped": 0}
+    touched = []
+    for tid in tids:
+        t = s["tasks"][tid]
+        if t.get("merged"):
+            print("[%s] уже влита — skip" % tid); continue
+        print("[%s] %s" % (tid, t.get("title", "")))
+        res = _task_merge_pass(t, proj, args.dry_run, args.squash)
+        for k in total:
+            total[k] += res[k]
+        if not args.dry_run and res["merged"]:
+            touched.append(tid)
+    print("\nИТОГО: %d merged, %d failed, %d skipped" % (total["merged"], total["failed"], total["skipped"]))
+    if touched:
+        print("refreshing MR state …")
+        for tid in touched:
+            _refresh_task(tid)
+
+
 def sync_epic_children(s, key):
     """Cache the epic's Jira child issues into epic['jira_children']. Returns count or -1."""
     e = s["epics"].get(key)
@@ -1519,9 +1656,24 @@ You drive RELEASES and cross-repo coordination for THIS epic. The repos are adde
 ## Epic notes
 %s
 
+## STEP 0 — which repos actually changed (DO THIS FIRST, always)
+Run `cc epic plan %s`. It marks each repo РЕЛИЗИТЬ (its integration/epic branch is ahead of
+master) or SKIP (no changes). **Release / MR ONLY the РЕЛИЗИТЬ repos. NEVER create an MR, bump a
+version, tag, or deploy a repo marked SKIP** — even if it's listed under the epic. The repo list
+above is just membership; `cc epic plan` is the source of truth for what to touch. Run `git fetch`
+in a repo first if you suspect its local refs are stale.
+
+## Merging reviewed task work (when asked to "merge tasks", not "release")
+The user reviews on the board, then asks you to merge — do NOT open each MR by hand:
+- One task:   `cc task merge <tid>`        (merges that task's OPEN MRs, per repo)
+- All tasks:  `cc epic merge %s`           (merges every task's OPEN MRs)
+- Preview first with `--dry-run`; add `--squash` if the repo wants squashed history.
+These merge task branches INTO their integration/target branch (NOT into master) and skip any repo
+with no open MR. This is "land the reviewed work"; the prod release below is a separate, later step.
+
 ## Release runbook (when asked to release this epic)
-Per repo (NEVER disturb the user's working checkout — use a temp `git worktree` off the
-integration branch for the version bump):
+Per repo — **only repos `cc epic plan` marked РЕЛИЗИТЬ** (NEVER disturb the user's working checkout —
+use a temp `git worktree` off the integration branch for the version bump):
 1. Confirm the integration branch is green on stage (CI) before releasing.
 2. Bump version (package.json / equivalent) on a release branch off the integration branch.
 3. MR integration -> main (reviewer = area lead); merge once the pipeline is green.
@@ -1556,9 +1708,11 @@ def cmd_epic_open(args):
         ri = proj["repos"].get(r, {})
         lines.append("- %s: integration `%s`  (checkout: %s, reviewer: %s)" % (
             r, targets.get(r) or "(default branch)", ri.get("path", ""), ri.get("reviewer") or "-"))
+    lines.append("(membership only — run `cc epic plan %s` for which repos actually changed)" % args.key)
     (edir / "CLAUDE.md").write_text(
         RELEASE_RUNBOOK % (args.key, e.get("summary", ""), "\n".join(lines),
-                           (e.get("memory") or "").strip() or "(no epic notes)"))
+                           (e.get("memory") or "").strip() or "(no epic notes)",
+                           args.key, args.key))
     adds = " ".join("--add-dir %s" % shlex.quote(proj["repos"][r]["path"])
                     for r in repos if proj["repos"].get(r, {}).get("path"))
     print("epic chat dir: %s" % edir)
@@ -1962,6 +2116,8 @@ def build_parser():
     a = ep.add_parser("ls"); a.add_argument("project", nargs="?"); a.set_defaults(fn=cmd_epic_ls)
     a = ep.add_parser("mr"); a.add_argument("key"); a.add_argument("--dry-run", action="store_true"); a.set_defaults(fn=cmd_epic_mr)
     a = ep.add_parser("mrs"); a.add_argument("key"); a.set_defaults(fn=cmd_epic_mrs)
+    a = ep.add_parser("plan"); a.add_argument("key"); a.set_defaults(fn=cmd_epic_plan)
+    a = ep.add_parser("merge"); a.add_argument("key"); a.add_argument("--dry-run", action="store_true"); a.add_argument("--squash", action="store_true"); a.set_defaults(fn=cmd_epic_merge)
     a = ep.add_parser("set"); a.add_argument("key"); a.add_argument("--summary"); a.add_argument("--repos"); a.add_argument("--target", action="append"); a.set_defaults(fn=cmd_epic_set)
     a = ep.add_parser("note"); a.add_argument("key"); a.add_argument("text"); a.set_defaults(fn=cmd_epic_note)
     a = ep.add_parser("memory"); a.add_argument("key"); a.set_defaults(fn=cmd_epic_memory)
@@ -1987,6 +2143,7 @@ def build_parser():
     a = tk.add_parser("mr"); a.add_argument("task"); a.add_argument("--dry-run", action="store_true")
     a.add_argument("--no-ai", action="store_true", help="static commit/MR text (skip claude generation)"); a.set_defaults(fn=cmd_task_mr)
     a = tk.add_parser("mrs"); a.add_argument("task"); a.set_defaults(fn=cmd_task_mrs)
+    a = tk.add_parser("merge"); a.add_argument("task"); a.add_argument("--dry-run", action="store_true"); a.add_argument("--squash", action="store_true"); a.set_defaults(fn=cmd_task_merge)
     a = tk.add_parser("abort"); a.add_argument("task"); a.set_defaults(fn=cmd_task_abort)
     return p
 
@@ -2064,9 +2221,10 @@ def cmd_recover(args):
     print("\n`cc task mrs <tid>` подтянет MR; имя = slug (исходный заголовок не сохранялся в worktree).")
 
 _READONLY = {cmd_task_diff, cmd_task_ls, cmd_repo_ls, cmd_repo_members,
-             cmd_epic_ls, cmd_epic_memory, cmd_project_ls, cmd_jira_epics, cmd_orphans}
+             cmd_epic_ls, cmd_epic_memory, cmd_project_ls, cmd_jira_epics, cmd_orphans, cmd_epic_plan}
 
-_SELF_LOCKED = {cmd_epic_mrs, cmd_task_mrs, cmd_repo_add, cmd_project_new, cmd_recover}   # do git/network lock-free, then save under a brief mutate() themselves
+_SELF_LOCKED = {cmd_epic_mrs, cmd_task_mrs, cmd_repo_add, cmd_project_new, cmd_recover,
+                cmd_task_merge, cmd_epic_merge}   # do git/network lock-free, then save under a brief mutate() themselves
 
 def main(argv=None):
     args = build_parser().parse_args(argv)
