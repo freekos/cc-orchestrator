@@ -46,6 +46,17 @@ def test_epic_knowledge_stash():
     assert k["memory"] == "a\nb" and k["summary"] == "sum", k
 
 
+def test_state_lock_reentrant():
+    # nested acquisition in the same thread must NOT deadlock (main() wraps a command that then
+    # calls mutate() -> this used to hang cc repo add / project new / recover forever)
+    with cc.state_lock():
+        with cc.state_lock():
+            pass
+    # mutate() under an outer lock must also work (reentrant)
+    with cc.state_lock():
+        cc.mutate(lambda st: None)
+
+
 if __name__ == "__main__":
     n = 0
     for k, v in list(globals().items()):

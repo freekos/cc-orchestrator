@@ -5,7 +5,7 @@ Model:  Project > Repos   and   Project > Epic > Task > RepoWork
 Rule:   the agent only EDITS files; cc owns ALL git (branch/commit/push/MR).
 State:  ~/.cc/state.json holds intent + pointers; git/jsonl hold the truth.
 """
-import argparse, base64, fcntl, json, os, re, shlex, shutil, subprocess, sys, time, urllib.request
+import argparse, base64, fcntl, json, os, re, shlex, shutil, subprocess, sys, threading, time, urllib.request
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -87,17 +87,31 @@ def save_state(s):
     os.replace(tmp, STATE_FILE)       # atomic on POSIX
 
 _LOCK_PATH = STATE_DIR / ".state.lock"
+_lock_tl = threading.local()   # per-thread recursion depth: fcntl.flock is NOT reentrant across
+                               # fds, so a nested state_lock() in the same thread (e.g. main() wraps
+                               # a command that then calls mutate()) would deadlock on itself.
 
 @contextmanager
 def state_lock():
-    """Exclusive cross-process lock so load->modify->save can't lose updates.
-    Held only around mutations; reads stay lock-free (writes are atomic)."""
+    """Exclusive cross-process lock so load->modify->save can't lose updates. REENTRANT within a
+    thread (nested acquisition reuses the held lock instead of deadlocking). Held only around
+    mutations; reads stay lock-free (writes are atomic)."""
+    depth = getattr(_lock_tl, "depth", 0)
+    if depth > 0:                       # this thread already holds it -> reuse, don't re-flock
+        _lock_tl.depth = depth + 1
+        try:
+            yield
+        finally:
+            _lock_tl.depth -= 1
+        return
     STATE_DIR.mkdir(parents=True, exist_ok=True)
     f = open(_LOCK_PATH, "w")
     try:
         fcntl.flock(f.fileno(), fcntl.LOCK_EX)
+        _lock_tl.depth = 1
         yield
     finally:
+        _lock_tl.depth = 0
         try:
             fcntl.flock(f.fileno(), fcntl.LOCK_UN)
         except Exception:
@@ -116,6 +130,8 @@ def mutate_try(fn):
     """Non-blocking mutate for BACKGROUND pollers: if the lock is busy, skip (return False) instead
     of queuing — so the TUI's periodic writes never starve a foreground `cc` command (fcntl flock
     isn't fair). Best-effort: the next tick retries. Returns True if it wrote."""
+    if getattr(_lock_tl, "depth", 0) > 0:   # this thread already holds the lock -> just mutate
+        s = load_state(); fn(s); save_state(s); return True
     STATE_DIR.mkdir(parents=True, exist_ok=True)
     f = open(_LOCK_PATH, "w")
     try:
@@ -1926,7 +1942,7 @@ def cmd_recover(args):
 _READONLY = {cmd_task_diff, cmd_task_ls, cmd_repo_ls, cmd_repo_members,
              cmd_epic_ls, cmd_epic_memory, cmd_project_ls, cmd_jira_epics, cmd_orphans}
 
-_SELF_LOCKED = {cmd_epic_mrs, cmd_task_mrs}   # do network lock-free, then save under a brief lock themselves
+_SELF_LOCKED = {cmd_epic_mrs, cmd_task_mrs, cmd_repo_add, cmd_project_new, cmd_recover}   # do git/network lock-free, then save under a brief mutate() themselves
 
 def main(argv=None):
     args = build_parser().parse_args(argv)
