@@ -1069,6 +1069,19 @@ def gen_mr_text(wt, cmp_ref, fallback_title, fallback_desc):
     return (lines[0][:140], "\n".join(lines[1:]).strip() or fallback_desc)
 
 
+def ensure_remote_target(wt, target, db):
+    """Recreate the MR target (integration/release) branch on origin from the default branch if it
+    doesn't exist. Supports the team flow: a release merges target -> master/main and DELETES the
+    target branch; a follow-up task MR then RE-creates it. No-op if it already exists. Returns
+    True if it (re)created the branch."""
+    if run(["git", "ls-remote", "--heads", "origin", target], cwd=wt, check=False).stdout.strip():
+        return False
+    run(["git", "fetch", "origin", db], cwd=wt, check=False)
+    base_ref = "origin/" + db if have_ref(wt, "origin/" + db) else db
+    run(["git", "push", "origin", base_ref + ":refs/heads/" + target], cwd=wt, check=False)
+    run(["git", "fetch", "origin", target], cwd=wt, check=False)   # refresh local origin/<target>
+    return True
+
 def cmd_task_mr(args):
     s = load_state()
     t = s["tasks"].get(args.task) or die("unknown task '%s'" % args.task)
@@ -1085,10 +1098,13 @@ def cmd_task_mr(args):
             continue
         target = t["base"][r]
         branch = t["branch"]
-        cmp_ref = ("origin/" + target) if have_ref(wt, "origin/" + target) else target
+        db = default_branch(wt)
+        target_live = bool(have_ref(wt, "origin/" + target))     # does the target branch still exist?
+        cmp_base = target if target_live else db                 # if a release deleted it, compare vs master
+        cmp_ref = ("origin/" + cmp_base) if have_ref(wt, "origin/" + cmp_base) else cmp_base
         ahead = run(["git", "rev-list", "--count", cmp_ref + "..HEAD"], cwd=wt, check=False).stdout.strip()
         if not _changed(wt) and ahead in ("", "0"):
-            print("[%s] no changes - skipped (no branch pushed, no MR)" % r)
+            print("[%s] no changes vs %s - skipped" % (r, cmp_base))
             continue
         lead = ri.get("reviewer", "")
         title = "[%s] %s" % (t["epic"], t["title"])
@@ -1102,6 +1118,9 @@ def cmd_task_mr(args):
         if epic_mode == "epic_branch":
             print("[%s] pushing epic branch %s ..." % (r, target))
             push_epic_branch(proj["repos"][r]["path"], target)
+        elif not target_live:   # targets mode + a release deleted the integration branch -> recreate it
+            if ensure_remote_target(wt, target, db):
+                print("[%s] target-ветки '%s' не было (релиз её удалил?) — пересоздал из %s" % (r, target, db))
         if _changed(wt):
             git(["add", "-A"], cwd=wt)
             git(["reset", "-q", "--", "node_modules", ".env", ".env.local", ".env.development",
@@ -1473,6 +1492,11 @@ integration branch for the version bump):
   the train together; verify the backend prod actually has the endpoints the frontend calls.
 - Feature-flag-gated surfaces ship DARK; flip the flag only after the backend is live on prod.
 - glab: use canonical `invictusfitness/*` paths (moved forks return 405 on POST). eas for mobile.
+- Target/integration branches are per-release-window & EPHEMERAL: after MR'ing one into master/main,
+  DELETING it on the remote is the team's normal practice. A follow-up fix on a task RE-creates the
+  target — `cc task mr` recreates a missing target branch from the default branch and re-MRs the task
+  INTO it (don't MR straight to master). When releasing: merge each target -> master/main, then it's
+  fine to delete the target branch.
 - Full autonomy through prod is authorized for this chat — still narrate every step and the result.
 """
 
