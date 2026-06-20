@@ -1513,9 +1513,11 @@ class CCApp(App):
         sdir = os.path.join(base, ".cc-setup")
         if not os.path.isdir(sdir):
             self.notify("не удалось подготовить setup-чат", severity="error"); return
-        cmd = "claude --permission-mode auto --add-dir %s" % shlex.quote(base)
+        sid = cc.resolve_session(sdir)   # resume the SAME session if one already exists for this chat
+        resume = ("--resume %s " % sid) if sid else ""
+        cmd = "claude %s--permission-mode auto --add-dir %s" % (resume, shlex.quote(base))
         where = self._open_chat_tab("cc:setup %s" % proj, sdir, cmd)
-        self.notify("командный чат проекта '%s' открыт (%s) — сетап, MVP, эпики/задачи отсюда" % (proj, where))
+        self.notify("чат проекта '%s' %s (%s)" % (proj, "продолжен" if sid else "открыт", where))
 
     def action_epic_chat(self):
         ekey = self._current_epic()
@@ -1531,9 +1533,11 @@ class CCApp(App):
         repos = e.get("repos") or list(proj.get("repos", {}).keys())
         adds = " ".join("--add-dir %s" % shlex.quote(proj["repos"][r]["path"])
                         for r in repos if proj.get("repos", {}).get(r, {}).get("path"))
-        cmd = "claude --permission-mode auto %s" % adds
+        sid = cc.resolve_session(edir)   # resume the SAME epic chat session if it exists
+        resume = ("--resume %s " % sid) if sid else ""
+        cmd = "claude %s--permission-mode auto %s" % (resume, adds)
         where = self._open_chat_tab("cc:epic %s" % ekey, edir, cmd)
-        self.notify("чат эпика %s открыт в новой вкладке (%s) — релиз/координация" % (ekey, where))
+        self.notify("чат эпика %s %s (%s) — релиз/координация" % (ekey, "продолжен" if sid else "открыт", where))
 
     def action_cursor(self):
         tid = self._cur_task()

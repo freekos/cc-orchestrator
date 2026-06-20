@@ -304,8 +304,11 @@ def newest_session_after(ts):
     return newest.stem if newest else None
 
 def resolve_session(primary_wt):
-    """Find the newest claude session transcript for a worktree (lazy, on open)."""
-    enc = str(primary_wt).replace("/", "-")
+    """Find the newest claude session transcript for a directory (lazy, on open). Claude encodes the
+    cwd into the projects-dir name by replacing every non [A-Za-z0-9-] char with '-' (so `/`, `.`,
+    `_` all become '-', e.g. `.cc-setup` -> `-cc-setup`, `_release` -> `-release`). A naive
+    replace('/','-') missed dirs with dots/underscores (project & epic chats) -> always-new sessions."""
+    enc = re.sub(r"[^A-Za-z0-9-]", "-", str(primary_wt))
     d = CLAUDE_PROJECTS / enc
     if not d.exists():
         return None
