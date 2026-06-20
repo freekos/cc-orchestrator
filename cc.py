@@ -248,7 +248,11 @@ def repo_info(p):
 
 def detect_setup_run(repo_path):
     """Best-effort defaults so a fresh worktree is runnable.
-    node repos: symlink node_modules from the main checkout (instant, shares deps) + a run cmd."""
+    node repos: give the worktree its OWN node_modules via a copy-on-write CLONE of the main
+    checkout's (APFS clonefile on macOS, reflink on btrfs/xfs) — instant like a symlink but
+    ISOLATED. A symlink made every worktree + the main repo share one node_modules, which breaks
+    Vite/esbuild (shared `.vite` cache, binary resolution through the link) and makes `npm install`
+    in a worktree corrupt the shared one. Clone fixes all that; falls back to symlink if CoW fails."""
     pj = Path(repo_path) / "package.json"
     if pj.exists():
         run_cmd = ""
@@ -257,7 +261,11 @@ def detect_setup_run(repo_path):
             run_cmd = "npm run dev" if "dev" in scripts else ("npm start" if "start" in scripts else "")
         except Exception:
             pass
-        return 'ln -sfn "$CC_MAIN_REPO/node_modules" node_modules', run_cmd
+        setup = ('if [ -d "$CC_MAIN_REPO/node_modules" ]; then rm -rf node_modules; '
+                 'cp -Rc "$CC_MAIN_REPO/node_modules" node_modules 2>/dev/null '          # macOS APFS clonefile
+                 '|| cp -a --reflink=auto "$CC_MAIN_REPO/node_modules" node_modules 2>/dev/null '  # Linux CoW
+                 '|| ln -sfn "$CC_MAIN_REPO/node_modules" node_modules; fi')               # fallback: symlink
+        return setup, run_cmd
     if (Path(repo_path) / "go.mod").exists():
         return "", "go run ."
     if (Path(repo_path) / "requirements.txt").exists() or (Path(repo_path) / "pyproject.toml").exists():
