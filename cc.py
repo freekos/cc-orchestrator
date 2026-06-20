@@ -325,10 +325,15 @@ Existing repos: {repos}
     existing local repo: --path <dir>; clone: --clone <url>.)
 3. Scaffold each repo's starter code per the agreed stack (framework init, structure, lint/test,
    .gitignore, a minimal runnable skeleton) following the references.
-4. Make it AI-ready (durable context every future agent reads):
-   - {base}/CLAUDE.md — project brief: what/why, stack, repos & roles, architecture, conventions, references.
-   - <repo>/CLAUDE.md — repo-specific context.
-   - {base}/.claude/ — settings.json, project skills/, MCP config (.mcp.json) as useful.
+4. Make it AI-ready — VERSION context INSIDE the repos, NOT the container folder. The folder
+   holding the repos is NOT a git repo, so anything there (CLAUDE.md, .claude/skills) is local-only,
+   unversioned, invisible to teammates. So:
+   - `<repo>/CLAUDE.md` (committed) = SOURCE OF TRUTH per repo: stack, conventions, structure.
+   - Cross-repo project context (what it is, how repos relate, shared invariants) → a concise
+     "## Project context" block at the TOP of EACH repo's CLAUDE.md (self-contained when cloned alone).
+   - Project skills → `<repo>/.claude/skills/` (committed with the repo), not the container.
+   - `{base}/CLAUDE.md` in the container is OPTIONAL, LOCAL-ONLY (a memo for this chat) — never the
+     source of truth. MCP/settings: per repo or user-scope, not the container.
 5. Set commands & commit:  cc repo set {project} <repo> --run "..." --setup "..."  then commit the scaffold.
 
 ## Phase 2 — build & orchestrate (the ongoing work)
