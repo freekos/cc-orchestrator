@@ -991,7 +991,9 @@ class CCApp(App):
                         data={"type": "epic", "id": ekey}, expand=expand)
         # flat list of this epic's tasks, sorted needs-you -> finished; finished is dimmed.
         tasks = [(tid, t) for tid, t in s["tasks"].items() if t["epic"] == ekey]
-        tasks.sort(key=lambda it: self.TASK_ORDER.get(fast_status(it[1]), 0))
+        # primary: status hierarchy (ждут->в работе->на ревью->готово);
+        # secondary: most-recently-completed first within a group (recently-closed at the top)
+        tasks.sort(key=lambda it: (self.TASK_ORDER.get(fast_status(it[1]), 0), -(it[1].get("merged_at") or 0)))
         for tid, t in tasks:
             st = fast_status(t)
             badge = "💬 " if (st == "review" and self._unseen(t)) else ""

@@ -884,11 +884,16 @@ def cmd_task_mrs(args):
     def apply(st):
         tt = st["tasks"].get(args.task)
         if tt is not None:
+            was = bool(tt.get("merged"))
             tt.setdefault("mrs", {}).update(found)
             tt["mr_state"] = states
             tt["merged"] = all_merged
             if all_merged:
                 tt["merged_sha"] = merged_sha
+                if not was or not tt.get("merged_at"):
+                    tt["merged_at"] = time.time()   # for "recently closed first" ordering
+            else:
+                tt.pop("merged_at", None)
     mutate(apply)
     if not any_url:
         print("(no MRs found — create with M)")
@@ -992,7 +997,19 @@ def find_mr(remote, branch, cwd):
     return None
 
 def mr_info(remote, branch, cwd):
-    """(url, state) for the MR of this branch via `glab mr view`, or (None, None)."""
+    """(url, state) for this branch's MR — PREFER an OPEN one. A branch can carry an old MERGED MR
+    and a new OPEN one; `glab mr view` may return the merged one and falsely report 'merged', so we
+    ask the API for an open MR by source_branch first, then fall back to mr view (merged/closed)."""
+    enc = remote.replace("/", "%2F")
+    out = run(["glab", "api",
+               "projects/%s/merge_requests?source_branch=%s&state=opened&per_page=1" % (enc, branch)],
+              cwd=cwd, check=False)
+    try:
+        arr = json.loads(out.stdout or "[]")
+    except Exception:
+        arr = []
+    if arr:
+        return (arr[0].get("web_url"), arr[0].get("state") or "opened")
     r = run(["glab", "mr", "view", branch, "-R", remote], cwd=cwd, check=False)
     if r.returncode != 0:
         return (None, None)
