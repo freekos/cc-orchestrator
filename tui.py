@@ -1513,7 +1513,7 @@ class CCApp(App):
             self.notify("не удалось подготовить setup-чат", severity="error"); return
         cmd = "claude --permission-mode auto --add-dir %s" % shlex.quote(base)
         where = self._open_chat_tab("cc:setup %s" % proj, sdir, cmd)
-        self.notify("setup-чат проекта '%s' открыт (%s) — опиши идею, какие репо, референсы" % (proj, where))
+        self.notify("командный чат проекта '%s' открыт (%s) — сетап, MVP, эпики/задачи отсюда" % (proj, where))
 
     def action_epic_chat(self):
         ekey = self._current_epic()

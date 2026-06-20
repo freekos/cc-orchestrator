@@ -306,57 +306,64 @@ def resolve_session(primary_wt):
 
 # ----------------------------- project cmds -----------------------------
 
-SETUP_RUNBOOK = """# Project {project} — setup architect (bootstrap a new, AI-ready project)
+SETUP_RUNBOOK = """# Project {project} — setup & build conductor
 
-You are helping the user start a BRAND-NEW project from scratch. The project folder is:
-  {base}
-Existing repos in this project: {repos}
+This chat is the COMMAND CENTER for project {project} (folder: {base}). You both (1) bootstrap
+the project and (2) drive ongoing development from here: build the MVP directly, and when work
+splits into chunks or point features/bugs arrive, generate epics + tasks and run them. The user
+watches everything in `cc tui`; you orchestrate from here.
 
-cc owns the project structure: create repos through the `cc` CLI (NOT raw `git init`). If `cc`
-is not on PATH in this shell, use:  python3 {ccpy} <args>
-This is a CONVERSATION — interview first, propose, confirm, THEN build. Do NOT assume the
-project's purpose or stack.
+cc owns project structure & git. Drive cc via the `cc` CLI (if `cc` is not on PATH, use:
+  python3 {ccpy} <args>). Interview & confirm before big moves — don't assume purpose or stack.
+Existing repos: {repos}
 
-## Step 1 — interview (ask, then wait)
-- What is this project and who is it for? Core features?
-- Tech stack / language / frameworks — user's choice, or recommend?
-- Which repos and their roles? (e.g. `frontend`, `backend`, `mobile` — kept as SEPARATE repos
-  under the project folder.)
-- Any code references / conventions / examples to follow? (paste links or snippets — these
-  become the project's rules.)
-Summarize what you understood and get a yes before scaffolding.
+## Phase 1 — bootstrap (first time)
+1. Interview: what is this project & for whom? core features? tech stack (yours or recommend)?
+   which repos and their roles (kept as SEPARATE repos)? any code references/conventions? Summarize, get a yes.
+2. Create repos:  cc repo add {project} <repo-name> --new --run "<dev command>"
+   (remote stays empty; set later: cc repo set {project} <repo-name> --remote <group/proj>.
+    existing local repo: --path <dir>; clone: --clone <url>.)
+3. Scaffold each repo's starter code per the agreed stack (framework init, structure, lint/test,
+   .gitignore, a minimal runnable skeleton) following the references.
+4. Make it AI-ready (durable context every future agent reads):
+   - {base}/CLAUDE.md — project brief: what/why, stack, repos & roles, architecture, conventions, references.
+   - <repo>/CLAUDE.md — repo-specific context.
+   - {base}/.claude/ — settings.json, project skills/, MCP config (.mcp.json) as useful.
+5. Set commands & commit:  cc repo set {project} <repo> --run "..." --setup "..."  then commit the scaffold.
 
-## Step 2 — create the repos (via cc, one per role)
-For each repo:
-  cc repo add {project} <repo-name> --new --run "<dev command>"
-This git-inits `<repo-name>` under the project folder with an initial commit. Leave the remote
-empty for now; the user sets it later:  cc repo set {project} <repo-name> --remote <group/proj>
-(existing local repo: `--path <dir>`; to clone: `--clone <url>`.)
+## Phase 2 — build & orchestrate (ongoing — this is the new part)
+You have TWO ways to work; mix them:
 
-## Step 3 — scaffold each repo
-Set up the agreed starter code per stack (init framework, basic structure, lint/test config,
-.gitignore, a minimal runnable skeleton). Follow the user's references.
+A) DIRECT (best for early MVP): edit the repos under {base} yourself, run/test, commit. Fast, no
+   ceremony. Use this to get the MVP to first runnable shape.
 
-## Step 4 — make it AI-ready (the point of this setup)
-Write durable context so every future cc task agent is grounded:
-- {base}/CLAUDE.md — PROJECT brief: what/why, stack, the repos & their roles, architecture,
-  conventions, do's & don'ts, the user's references.
-- <repo>/CLAUDE.md in each repo — repo-specific context & conventions.
-- {base}/.claude/ as useful: settings.json (sane permissions), skills/ (project-specific
-  skills), and MCP config (.mcp.json) for servers this project needs (DB, design, etc.).
-Keep these concrete and specific to THIS project — this is the durable AI configuration the
-user asked for (skills, MCP, rules), not boilerplate.
+B) ORCHESTRATED (when a chunk is parallelizable, or a point feature/bug arrives): group it as an
+   EPIC, then create TASKS under it — each task spawns its OWN background agent in an isolated
+   git worktree, so several run in parallel while you keep building.
+   - Create an epic (no Jira needed for a personal project):
+       cc epic add {project} <KEY> --summary "<feature/area>"      (e.g. KEY = MVP-1, AUTH, BILLING)
+       cc epic note <KEY> "<invariant/decision/gotcha>"            (accumulates context for its agents)
+   - Spin off a task (this LAUNCHES a background agent that edits the repos in a worktree):
+       cc task add <KEY> "<short title>" --prompt "<what to do>" --no-jira [--repos r1,r2]
+   - See what you have / status:
+       cc epic ls {project}                 # epics in this project
+       cc task mrs <task-id>                # per-task state (the user also sees all of this live in cc tui)
+       cc task diff <task-id>               # combined diff of a task
+   - Review & integrate a task: inspect its diff; when good, merge its branch into the epic
+     branch / main. NOTE: MR creation (cc task mr / cc epic mr) only works once a repo has a
+     remote — until then "shipping" a task = merge its branch locally. After you set remotes
+     (cc repo set ... --remote), the normal MR flow lights up.
+   - Test: run each repo's test/dev command (you set them in --run/--setup) before calling a chunk done.
 
-## Step 5 — record commands & commit
-- Ensure each repo's dev/test command is set: cc repo set {project} <repo> --run "..." --setup "..."
-- Commit the initial scaffold in each repo. (This bootstrap is the ONE time you commit directly;
-  afterwards normal cc tasks own git via worktrees.)
+## How to think about it
+- Early: develop the MVP DIRECTLY here (mode A). Don't create epics/tasks for everything — that's ceremony.
+- As the project grows or work parallelizes: create epics to group, tasks to dispatch (mode B).
+- The user reviews & merges in `cc tui`; you propose, build, and report what epics/tasks exist and their state.
 
 ## Constraints
-- Propose a stack, confirm, THEN build — never pick silently.
-- Repos have no remote yet; that's expected (MRs come once remotes are set).
-- After setup the user works normally: `cc epic add {project} <KEY> ...` then tasks; your
-  CLAUDE.md grounds every agent.
+- Propose, confirm, THEN build — never pick a stack or restructure silently.
+- Repos have no remote until the user sets one; MRs are skipped until then (local merges meanwhile).
+- Keep it simple and fast — prefer the smallest thing that works over heavy process.
 """
 
 def cmd_project_setup(args):
