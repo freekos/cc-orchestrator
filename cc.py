@@ -331,39 +331,42 @@ Existing repos: {repos}
    - {base}/.claude/ — settings.json, project skills/, MCP config (.mcp.json) as useful.
 5. Set commands & commit:  cc repo set {project} <repo> --run "..." --setup "..."  then commit the scaffold.
 
-## Phase 2 — build & orchestrate (ongoing — this is the new part)
-You have TWO ways to work; mix them:
+## Phase 2 — build & orchestrate (the ongoing work)
+Structure REAL work (the MVP, a feature, a bug) as an EPIC on the board with TASKS — don't
+silently build into main. After you and the user agree WHAT to build, you **MUST ASK which of
+two execution modes** they want, and WAIT for their answer before doing anything:
 
-A) DIRECT (best for early MVP): edit the repos under {base} yourself, run/test, commit. Fast, no
-   ceremony. Use this to get the MVP to first runnable shape.
+  ▸ MODE 1 — parallel BACKGROUND sessions:
+    cc creates/uses the epic and dispatches each task to its OWN background agent (a real headless
+    `claude -p` in an isolated worktree). They actually run in parallel while you keep going; the
+    user reviews/merges each in cc tui.
+      cc epic add {project} <KEY> --summary "<area>"        (or reuse an existing epic)
+      cc task add <KEY> "<title>" --prompt "<what to do>" --no-jira [--repos r1,r2]
+    Each `task add` LAUNCHES the agent immediately (pid tracked, status "running") — not idle.
 
-B) ORCHESTRATED (when a chunk is parallelizable, or a point feature/bug arrives): group it as an
-   EPIC, then create TASKS under it — each task spawns its OWN background agent in an isolated
-   git worktree, so several run in parallel while you keep building.
-   - Create an epic (no Jira needed for a personal project):
-       cc epic add {project} <KEY> --summary "<feature/area>"      (e.g. KEY = MVP-1, AUTH, BILLING)
-       cc epic note <KEY> "<invariant/decision/gotcha>"            (accumulates context for its agents)
-   - Spin off a task (this LAUNCHES a background agent that edits the repos in a worktree):
-       cc task add <KEY> "<short title>" --prompt "<what to do>" --no-jira [--repos r1,r2]
-   - See what you have / status:
-       cc epic ls {project}                 # epics in this project
-       cc task mrs <task-id>                # per-task state (the user also sees all of this live in cc tui)
-       cc task diff <task-id>               # combined diff of a task
-   - Review & integrate a task: inspect its diff; when good, merge its branch into the epic
-     branch / main. NOTE: MR creation (cc task mr / cc epic mr) only works once a repo has a
-     remote — until then "shipping" a task = merge its branch locally. After you set remotes
-     (cc repo set ... --remote), the normal MR flow lights up.
-   - Test: run each repo's test/dev command (you set them in --run/--setup) before calling a chunk done.
+  ▸ MODE 2 — YOU build it on a review branch (no auto-merge to main):
+    You do the work in THIS session, isolated on the epic's branch, so the user can test / find
+    bugs / fix BEFORE deciding to merge. Tasks still show on the board for review.
+      cc epic add {project} <KEY> --summary "<area>"
+      cc task add <KEY> "<title>" --prompt "<plan>" --no-jira --manual   # board entry, NO bg agent
+    `--manual` makes the task + its worktree but spawns NO agent — YOU do the work in the task's
+    worktree (its dir is printed), run/test, commit. NEVER commit to main. When the epic is ready,
+    tell the user it's on its branch; THEY decide to merge epic -> main (in cc tui, or `cc epic mr`
+    once a remote is set).
 
-## How to think about it
-- Early: develop the MVP DIRECTLY here (mode A). Don't create epics/tasks for everything — that's ceremony.
-- As the project grows or work parallelizes: create epics to group, tasks to dispatch (mode B).
-- The user reviews & merges in `cc tui`; you propose, build, and report what epics/tasks exist and their state.
+ALWAYS present both and ask: "1 — фоновые сессии, или 2 — я строю на ветке для ревью?" Do not
+proceed until the user picks. (A truly trivial one-liner can be done directly — use judgement.)
+
+Status / visibility (both modes):
+  cc epic ls {project}        # epics here       cc task diff <task-id>   # a task's diff
+  cc task mrs <task-id>       # per-task state
+The user sees every epic/task live in cc tui and reviews/merges there.
 
 ## Constraints
-- Propose, confirm, THEN build — never pick a stack or restructure silently.
-- Repos have no remote until the user sets one; MRs are skipped until then (local merges meanwhile).
-- Keep it simple and fast — prefer the smallest thing that works over heavy process.
+- Propose, confirm, THEN build. Never pick a stack, restructure, or commit to main silently.
+- Real work = epic + tasks on the board; ALWAYS ask mode 1 vs 2 first.
+- No remote yet -> MRs are skipped; integration = a local merge on the USER's decision.
+- Keep it simple and fast — smallest thing that works over heavy process.
 """
 
 def cmd_project_setup(args):
@@ -469,6 +472,11 @@ def cmd_epic_add(args):
     s = load_state()
     if args.project not in s["projects"]:
         die("unknown project '%s'" % args.project)
+    # epic keys are GLOBAL — refuse to silently overwrite an epic that belongs to another project
+    # (re-adding under the SAME project is fine; that restores stashed knowledge).
+    if args.key in s["epics"] and s["epics"][args.key].get("project") not in (None, args.project):
+        die("epic '%s' уже существует под проектом '%s' — ключи эпиков глобальны; возьми другой ключ"
+            % (args.key, s["epics"][args.key]["project"]))
     proj = s["projects"][args.project]
     targets = {}
     for t in (args.target or []):
@@ -536,8 +544,10 @@ def worktree_path(project_path, epic, slug, repo_name):
 
 def _provision(epic_key, epic, proj, r, branch, slug, epic_mode, no_setup):
     ri = proj["repos"][r]; rp = ri["path"]
-    if ri.get("provider") in (None, "unknown") or not ri.get("remote"):
-        return (r, None, None, "no git remote")
+    # worktrees are LOCAL (epic branch + `git worktree add`); a remote is only needed at MR time
+    # (which skips no-remote repos gracefully). So greenfield repos with no remote still work.
+    if not rp or not os.path.isdir(rp) or not (Path(rp) / ".git").exists():
+        return (r, None, None, "not a git repo")
     wt = worktree_path(proj["path"], epic_key, slug, r)
     # self-heal leftovers from a clobbered/aborted add: stale worktree registrations
     # (dir gone) and orphaned worktree dirs would otherwise skip the repo ("worktree exists")
@@ -641,7 +651,12 @@ def cmd_task_add(args):
                      "Edit files ONLY inside these subfolders (your cwd is their parent):\n%s"
                      "\nDo NOT run git; cc handles branches/commits/MRs." % (branch, repo_map))
     STATE_DIR.mkdir(parents=True, exist_ok=True)
-    if args.sync:
+    if getattr(args, "manual", False):
+        # MODE 2: no background agent — the command-center chat (or the user) does the work itself
+        # in the worktree. Board-visible, isolated on its branch, never on main.
+        s = load_state(); s["tasks"][tid]["status"] = "review"; s["tasks"][tid]["manual"] = True; save_state(s)
+        print("  manual task (no bg agent) — do the work yourself in: %s" % task_dir)
+    elif args.sync:
         print("  running agent (sync, headless) ...")
         rr = subprocess.run(["claude", "--permission-mode", "bypassPermissions", "-p", full_prompt],
                             cwd=task_dir, text=True, capture_output=True)
@@ -1862,6 +1877,7 @@ def build_parser():
     a.add_argument("--sync", action="store_true"); a.add_argument("--no-setup", action="store_true")
     a.add_argument("--jira", help="link to an EXISTING Jira issue key instead of creating one")
     a.add_argument("--no-jira", action="store_true", help="do not create a Jira task")
+    a.add_argument("--manual", action="store_true", help="board entry + worktree but NO background agent (you do the work)")
     a.set_defaults(fn=cmd_task_add)
     a = tk.add_parser("ls"); a.add_argument("epic", nargs="?"); a.set_defaults(fn=cmd_task_ls)
     a = tk.add_parser("diff"); a.add_argument("task"); a.set_defaults(fn=cmd_task_diff)
