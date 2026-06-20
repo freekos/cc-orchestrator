@@ -1003,10 +1003,11 @@ def mr_info(remote, branch, cwd):
 
 def mr_url(out, remote, branch, cwd):
     text = (out.stdout or "") + "\n" + (out.stderr or "")
-    m = re.search(r"https?://\S+/-/merge_requests/\d+", text)   # real web url from create
+    m = re.search(r"https?://\S+/-/merge_requests/\d+", text)   # real web url from create output
     if m:
         return m.group(0)
-    return find_mr(remote, branch, cwd) or "(MR exists — see `cc task mrs`)"
+    u, _ = mr_info(remote, branch, cwd)   # glab mr view — real URL for the branch's MR (any state)
+    return u or ""                         # never a placeholder string
 
 
 def claude_text(cwd, prompt, timeout=120):
@@ -1125,8 +1126,12 @@ def cmd_task_mr(args):
         print("[%s] glab mr create -> %s (reviewer %s, assignee %s) ..." % (r, target, lead or "-", assignee or "-"))
         out = run(glab_cmd, cwd=wt, check=False)
         url = mr_url(out, ri["remote"], branch, wt)
-        t["mrs"][r] = url
-        print("[%s] MR -> %s" % (r, url))
+        if url:
+            t["mrs"][r] = url
+            print("[%s] MR -> %s" % (r, url))
+        else:
+            err = (out.stderr or out.stdout or "").strip().splitlines()
+            print("[%s] ⚠️ MR НЕ создан: %s" % (r, (err[-1][:180] if err else "glab mr create не вернул URL")))
     if any_real:
         t["status"] = "mr"
         save_state(s)
