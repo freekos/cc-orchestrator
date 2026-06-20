@@ -1000,26 +1000,30 @@ def find_mr(remote, branch, cwd):
     return None
 
 def mr_info(remote, branch, cwd):
-    """(url, state) for this branch's MR — PREFER an OPEN one. A branch can carry an old MERGED MR
-    and a new OPEN one; `glab mr view` may return the merged one and falsely report 'merged', so we
-    ask the API for an open MR by source_branch first, then fall back to mr view (merged/closed)."""
+    """(url, state) for this branch's MR — PREFER an OPEN one, else the most-recent merged/closed.
+    A branch can carry several MRs (e.g. one to an integration branch and one to master) and is often
+    DELETED right after merge. `glab mr view <branch>` is unreliable here: it errors on a deleted
+    branch AND is ambiguous when >1 MR shares the branch (it makes you pick an IID). So we go through
+    the API by source_branch only: first ask for an OPEN one, then fall back to the most-recently
+    updated MR of ANY state — which still resolves merged MRs after their branch is gone."""
     enc = remote.replace("/", "%2F")
-    out = run(["glab", "api",
-               "projects/%s/merge_requests?source_branch=%s&state=opened&per_page=1" % (enc, branch)],
-              cwd=cwd, check=False)
-    try:
-        arr = json.loads(out.stdout or "[]")
-    except Exception:
-        arr = []
-    if arr:
-        return (arr[0].get("web_url"), arr[0].get("state") or "opened")
-    r = run(["glab", "mr", "view", branch, "-R", remote], cwd=cwd, check=False)
-    if r.returncode != 0:
-        return (None, None)
-    text = r.stdout or ""
-    um = re.search(r"url:\s*(\S+)", text)
-    sm = re.search(r"state:\s*(\w+)", text)
-    return (um.group(1) if um else find_mr(remote, branch, cwd), sm.group(1) if sm else "?")
+
+    def _query(extra):
+        out = run(["glab", "api",
+                   "projects/%s/merge_requests?source_branch=%s&per_page=1&%s" % (enc, branch, extra)],
+                  cwd=cwd, check=False)
+        try:
+            arr = json.loads(out.stdout or "[]")
+        except Exception:
+            arr = []
+        return arr[0] if arr else None
+
+    mr = _query("state=opened")                          # prefer an OPEN MR
+    if not mr:
+        mr = _query("order_by=updated_at&sort=desc")     # else most-recent merged/closed
+    if mr:
+        return (mr.get("web_url"), mr.get("state") or "?")
+    return (None, None)
 
 def mr_url(out, remote, branch, cwd):
     # URL of the JUST-created MR — ONLY from the create output. Do NOT fall back to `glab mr view`
