@@ -114,6 +114,28 @@ def test_jira_chat_setup():
         shutil.rmtree(d, ignore_errors=True)
 
 
+def test_jira_pull(monkeypatched=True):
+    import os, shutil, tempfile, types
+    d = tempfile.mkdtemp(prefix="cc-pull-")
+    # stub state + network: project has a token; two images + one video; dup filename
+    saved = (cc.load_state, cc.jira_attachments, cc.jira_download)
+    cc.load_state = lambda: {"projects": {"azi": {"jira": {"site": "s", "email": "e", "token": "t", "project_key": "AZI"}}}}
+    cc.jira_attachments = lambda cfg, key: [
+        {"id": "1", "filename": "design.png", "mime": "image/png", "size": 10, "content": "u1"},
+        {"id": "2", "filename": "design.png", "mime": "image/png", "size": 20, "content": "u2"},  # dup name
+        {"id": "3", "filename": "repro.mp4", "mime": "video/mp4", "size": 30, "content": "u3"},
+    ]
+    cc.jira_download = lambda cfg, url, dest: (open(dest, "wb").write(b"x"), 1)[1]
+    try:
+        cc.cmd_jira_pull(types.SimpleNamespace(project="azi", key="AZI-9", out=d, images_only=True))
+        files = sorted(os.listdir(d))
+        # images-only -> the mp4 is skipped; the duplicate name is suffixed, not clobbered
+        assert files == ["design-2.png", "design.png"], files
+    finally:
+        cc.load_state, cc.jira_attachments, cc.jira_download = saved
+        shutil.rmtree(d, ignore_errors=True)
+
+
 if __name__ == "__main__":
     n = 0
     for k, v in list(globals().items()):

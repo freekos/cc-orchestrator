@@ -1836,6 +1836,29 @@ def jira_req(cfg, method, path, body=None):
         raw = r.read().decode()
     return json.loads(raw) if raw.strip() else {}
 
+def jira_attachments(cfg, key):
+    """[{id, filename, mime, size, content(url)}] for an issue's attachments."""
+    f = jira_req(cfg, "GET", "/issue/%s?fields=attachment" % key).get("fields", {})
+    out = []
+    for a in (f.get("attachment") or []):
+        out.append({"id": a.get("id"), "filename": a.get("filename", "") or ("attachment-%s" % a.get("id")),
+                    "mime": a.get("mimeType", "") or "", "size": int(a.get("size") or 0),
+                    "content": a.get("content", "")})
+    return out
+
+def jira_download(cfg, url, dest):
+    """Download an attachment to `dest` under the project token. Jira's content URL 303-redirects to a
+    pre-signed media URL; urllib follows it (and strips the auth header cross-origin, which the signed
+    URL doesn't need). Returns bytes written."""
+    req = urllib.request.Request(url, method="GET")
+    auth = base64.b64encode(("%s:%s" % (cfg["email"], cfg["token"])).encode()).decode()
+    req.add_header("Authorization", "Basic " + auth)
+    with urllib.request.urlopen(req, timeout=120) as r:
+        data = r.read()
+    with open(dest, "wb") as fh:
+        fh.write(data)
+    return len(data)
+
 def jira_my_epics(cfg, query=""):
     # all project epics, most-recently-updated first (assignee filter dropped: leads often
     # aren't the assignee of the epics they pick up). Search narrows by summary.
@@ -2120,6 +2143,43 @@ def cmd_jira_done(args):
     ok, info = jira_transition_done(cfg, args.key)
     print(("%s -> %s" % (args.key, info)) if ok else ("could not transition %s: %s" % (args.key, info)))
 
+_IMG_MIME = ("image/",)
+def cmd_jira_attachments(args):
+    cfg = _jira_cfg(load_state(), args.project)
+    atts = jira_attachments(cfg, args.key)
+    if not atts:
+        print("(у %s нет вложений)" % args.key); return
+    for a in atts:
+        print("%-40s %-18s %8d B  id=%s" % (a["filename"][:40], a["mime"], a["size"], a["id"]))
+    print("\nскачать: cc jira pull %s %s [--out <dir>] [--images-only]" % (args.project, args.key))
+
+def cmd_jira_pull(args):
+    cfg = _jira_cfg(load_state(), args.project)
+    atts = jira_attachments(cfg, args.key)
+    if getattr(args, "images_only", False):
+        atts = [a for a in atts if a["mime"].startswith(_IMG_MIME)]
+    if not atts:
+        print("(нечего качать)"); return
+    out = Path(args.out).expanduser() if getattr(args, "out", None) else (Path.cwd() / "jira-attachments" / args.key)
+    out.mkdir(parents=True, exist_ok=True)
+    ok = 0
+    for a in atts:
+        name = os.path.basename(a["filename"]) or ("attachment-%s" % a["id"])
+        dest = out / name
+        n = 2
+        while dest.exists():                       # don't clobber same-named attachments
+            dest = out / ("%s-%d%s" % (dest.stem, n, dest.suffix)); n += 1
+        try:
+            sz = jira_download(cfg, a["content"], str(dest))
+            kind = "image" if a["mime"].startswith(_IMG_MIME) else ("pdf" if "pdf" in a["mime"] else ("video" if a["mime"].startswith("video/") else "file"))
+            print("[%s] %s  (%d B)  %s" % (kind, dest, sz, "← Read это, агент" if kind in ("image", "pdf") else ""))
+            ok += 1
+        except Exception as ex:
+            print("[FAIL] %s: %s" % (name, str(ex)[:100]))
+    print("\nскачано %d/%d в %s" % (ok, len(atts), out))
+    if any(a["mime"].startswith("video/") for a in atts):
+        print("видео скачано, но кадры агент не «видит» — нужен ffmpeg для извлечения кадров")
+
 def jira_chat_setup(chat_dir, proj, project_name):
     """For a cc-spawned chat: if the project has a cc Jira token, (1) write a .claude/settings.json
     that BLOCKS the Atlassian connector in this chat (so the agent can't hit the wrong Jira instance),
@@ -2150,10 +2210,12 @@ def jira_chat_setup(chat_dir, proj, project_name):
             "action use the cc CLI — it always targets THIS project's Jira:\n"
             "- `cc jira search %s \"<text>\"`  (or `--jql \"<JQL>\"`)\n"
             "- `cc jira get %s <KEY>`  ·  `cc jira comment %s <KEY> \"<text>\"`  ·  `cc jira done %s <KEY>`\n"
+            "- `cc jira attachments %s <KEY>` then `cc jira pull %s <KEY>` — download attachments (designs,\n"
+            "  screenshots, repro files) locally, then Read the printed image/PDF paths for task context.\n"
             "Do NOT use the Atlassian MCP here — it may point to a DIFFERENT Atlassian instance "
             "(it's blocked in this chat via .claude/settings.json).\n") % (
             cfg.get("site", "?"), cfg.get("project_key", "?"),
-            project_name, project_name, project_name, project_name)
+            project_name, project_name, project_name, project_name, project_name, project_name)
 
 
 # ----------------------------- deploys -----------------------------
@@ -2254,6 +2316,8 @@ def build_parser():
     a = jr.add_parser("get"); a.add_argument("project"); a.add_argument("key"); a.set_defaults(fn=cmd_jira_get)
     a = jr.add_parser("comment"); a.add_argument("project"); a.add_argument("key"); a.add_argument("text"); a.set_defaults(fn=cmd_jira_comment)
     a = jr.add_parser("done"); a.add_argument("project"); a.add_argument("key"); a.set_defaults(fn=cmd_jira_done)
+    a = jr.add_parser("attachments"); a.add_argument("project"); a.add_argument("key"); a.set_defaults(fn=cmd_jira_attachments)
+    a = jr.add_parser("pull"); a.add_argument("project"); a.add_argument("key"); a.add_argument("--out"); a.add_argument("--images-only", action="store_true"); a.set_defaults(fn=cmd_jira_pull)
 
     rp_ = sub.add_parser("repo").add_subparsers(dest="cmd", required=True)
     a = rp_.add_parser("add"); a.add_argument("project"); a.add_argument("name")
@@ -2378,7 +2442,8 @@ def cmd_recover(args):
 
 _READONLY = {cmd_task_diff, cmd_task_ls, cmd_repo_ls, cmd_repo_members,
              cmd_epic_ls, cmd_epic_memory, cmd_project_ls, cmd_jira_epics, cmd_orphans, cmd_epic_plan,
-             cmd_jira_search, cmd_jira_get, cmd_jira_comment, cmd_jira_done}  # no cc-state writes; network off the lock
+             cmd_jira_search, cmd_jira_get, cmd_jira_comment, cmd_jira_done,
+             cmd_jira_attachments, cmd_jira_pull}  # no cc-state writes; network off the lock
 
 _SELF_LOCKED = {cmd_epic_mrs, cmd_task_mrs, cmd_repo_add, cmd_project_new, cmd_recover,
                 cmd_task_merge, cmd_epic_merge}   # do git/network lock-free, then save under a brief mutate() themselves
