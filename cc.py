@@ -5,7 +5,7 @@ Model:  Project > Repos   and   Project > Epic > Task > RepoWork
 Rule:   the agent only EDITS files; cc owns ALL git (branch/commit/push/MR).
 State:  ~/.cc/state.json holds intent + pointers; git/jsonl hold the truth.
 """
-import argparse, base64, fcntl, json, os, re, shlex, shutil, subprocess, sys, threading, time, urllib.request
+import argparse, base64, fcntl, json, os, re, shlex, shutil, subprocess, sys, tempfile, threading, time, urllib.request
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -698,16 +698,24 @@ def cmd_task_add(args):
     epic = s["epics"][ekey]
     loose = bool(epic.get("loose"))
     proj = s["projects"][epic["project"]]
+    # title is optional — if you don't give one, claude writes a short one from the prompt
+    title = (args.title or "").strip()
+    if not title:
+        if not (args.prompt or "").strip():
+            die("нужен title ИЛИ --prompt (из промпта cc сам придумает название)")
+        print("  название не задано — генерирую из промпта …")
+        title = gen_task_title(args.prompt, cwd=proj.get("path"))
+        print("  название: %s" % title)
     repos = args.repos.split(",") if args.repos else (epic.get("repos") or list(proj["repos"].keys()))
     for r in repos:
         if r not in proj["repos"]:
             die("repo '%s' not in project '%s'" % (r, epic["project"]))
-    slug = slugify(args.title)
+    slug = slugify(title)
     branch = _unique_branch(s, slug) if loose else ("%s-%s" % (ekey, slug))
     tid = _unique_tid(s, ekey, slug)
     epic_mode = epic.get("mode") or ("targets" if epic.get("targets") else "epic_branch")
     where = ("project %s (no epic) -> master/main" % epic["project"]) if loose else ("epic %s [%s]" % (ekey, epic_mode))
-    print("task '%s' under %s - provisioning %d repo(s) in parallel ..." % (args.title, where, len(repos)))
+    print("task '%s' under %s - provisioning %d repo(s) in parallel ..." % (title, where, len(repos)))
     from concurrent.futures import ThreadPoolExecutor
     with ThreadPoolExecutor(max_workers=min(8, max(1, len(repos)))) as exr:
         results = list(exr.map(
@@ -740,7 +748,7 @@ def cmd_task_add(args):
     except Exception:
         pass
     log = STATE_DIR / ("%s.log" % tid)
-    s["tasks"][tid] = {"epic": ekey, "title": args.title, "prompt": args.prompt,
+    s["tasks"][tid] = {"epic": ekey, "title": title, "prompt": args.prompt,
                        "repos": order, "branch": branch, "worktrees": worktrees, "base": base,
                        "primary": primary, "dir": task_dir, "claude_session": {}, "status": "running",
                        "mrs": {}, "log": str(log)}
@@ -784,7 +792,7 @@ def cmd_task_add(args):
                 print("  (jira reparent failed: %s)" % str(ex)[:80])
     elif jira and jira.get("token") and not loose and not getattr(args, "no_jira", False):
         try:
-            jk = jira_create_task(jira, ekey, args.title, args.prompt)
+            jk = jira_create_task(jira, ekey, title, args.prompt)
             if jk:
                 s = load_state(); s["tasks"][tid]["jira"] = jk; save_state(s)
                 print("  jira task created: %s (under %s)" % (jk, ekey))
@@ -1236,6 +1244,18 @@ def gen_commit_msg(wt, fallback):
     subject = _clean_subject(lines[0] if lines else "", fallback)
     body = "\n".join(lines[1:]).strip()
     return (subject + ("\n\n" + body if body and len(body) < 1500 else "")).strip()
+
+def gen_task_title(prompt_text, cwd=None, fallback="task"):
+    """A short imperative task title from the user's prompt/description (so you never have to write
+    one). Uses headless claude; falls back to a trimmed first line of the prompt if unavailable."""
+    p = (prompt_text or "").strip()
+    if not p:
+        return fallback
+    fb = _clean_subject(p, fallback, max_len=60)   # first decent line of the prompt as the fallback
+    ask = ("Write a SHORT task title for the work described below: 3-8 words, imperative mood, no "
+           "trailing period, no ticket prefix, no quotes. Output ONLY the title.\n\n" + p[:2000])
+    out = claude_text(cwd or tempfile.gettempdir(), ask, timeout=60)
+    return _clean_subject(out or "", fb, max_len=70)
 
 def gen_mr_text(wt, cmp_ref, fallback_title, fallback_desc):
     diff = git(["diff", cmp_ref + "..HEAD"], cwd=wt, check=False).stdout or ""
@@ -2422,7 +2442,7 @@ def build_parser():
     a = ep.add_parser("rm"); a.add_argument("key"); a.add_argument("--force", action="store_true"); a.set_defaults(fn=cmd_epic_rm)
 
     tk = sub.add_parser("task").add_subparsers(dest="cmd", required=True)
-    a = tk.add_parser("add"); a.add_argument("epic"); a.add_argument("title")
+    a = tk.add_parser("add"); a.add_argument("epic"); a.add_argument("title", nargs="?", default="")
     a.add_argument("--prompt", required=True); a.add_argument("--repos")
     a.add_argument("--sync", action="store_true"); a.add_argument("--no-setup", action="store_true")
     a.add_argument("--jira", help="link to an EXISTING Jira issue key instead of creating one")

@@ -2,6 +2,21 @@ import sys, types, pathlib
 sys.path.insert(0, str(pathlib.Path(__file__).parent))
 import cc
 
+def test_gen_task_title():
+    saved = cc.claude_text
+    try:
+        # claude returns a clean line (with trailing noise) -> first clean line kept
+        cc.claude_text = lambda cwd, prompt, timeout=120: "Fix the login redirect bug\nsome extra reasoning"
+        assert cc.gen_task_title("the login keeps redirecting to /checkout", cwd="/tmp") == "Fix the login redirect bug"
+        # claude unavailable -> fallback to a clean first line of the prompt
+        cc.claude_text = lambda *a, **k: None
+        assert cc.gen_task_title("add a lobby timer to the table", cwd="/tmp") == "add a lobby timer to the table"
+        # empty prompt -> the given fallback
+        assert cc.gen_task_title("", cwd="/tmp", fallback="task") == "task"
+    finally:
+        cc.claude_text = saved
+
+
 def test_slugify():
     assert cc.slugify("БЧК badge fix") == "badge-fix" or cc.slugify("Hello World!") == "hello-world"
     assert cc.slugify("Hello World!") == "hello-world"

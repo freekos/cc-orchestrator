@@ -15,6 +15,8 @@ import threading
 
 ENGINE = str(Path(__file__).parent / "cc.py")
 GLYPH = {"running": "🔵", "review": "🟡", "mr": "🟣", "merged": "✅", "idle": "⚪", "done": "✅"}
+LEGEND = ("🟡 ждёт тебя   🔵 агент работает   🟣 MR открыт   ✅ влито   ⚪ простаивает   "
+          "💬 новый ответ агента   ·   # эпик   ⚠️ потеряшки на диске (U — вернуть)")
 
 
 def fast_status(t):
@@ -181,8 +183,8 @@ class NewTaskScreen(ModalScreen):
                             yield Input(placeholder="поиск задач эпика (Enter)", id="tsearch")
                             yield Select([("(загрузка задач эпика…)", "_")], id="tpick", allow_blank=True)
                         yield Button("Подставить из Jira", id="seed")
-                yield Label("title:")
-                yield Input(placeholder="напр. fix loyalty badge", id="title")
+                yield Label("title (необязательно):")
+                yield Input(placeholder="пусто = cc придумает название из промпта", id="title")
                 yield Label("prompt (что сделать агенту):")
                 yield TextArea(id="prompt")
             with Horizontal(id="row"):
@@ -269,8 +271,8 @@ class NewTaskScreen(ModalScreen):
             self.app._daemon(lambda: self._seed(str(val))); return
         title = self.query_one("#title", Input).value.strip()
         prompt = self.query_one("#prompt", TextArea).text.strip()
-        if not title or not prompt:
-            self.app.notify("title and prompt are required", severity="error"); return
+        if not prompt:
+            self.app.notify("нужен prompt (title cc придумает сам, если пусто)", severity="error"); return
         self.dismiss({"epic": self.epic, "title": title, "prompt": prompt, "jira": self._jira_key})
 
 
@@ -903,6 +905,7 @@ class CCApp(App):
     CSS = """
     Tree { width: 44%; border-right: solid $accent; }
     #detail { padding: 1 2; }
+    #legend { height: auto; color: $text-muted; background: $panel; padding: 0 1; border-top: solid $accent; }
     """
     BINDINGS = [
         Binding("a", "add_project", "+Project"),
@@ -932,6 +935,7 @@ class CCApp(App):
             yield Tree("cc", id="tree")
             with VerticalScroll():
                 yield Static("", id="detail")
+        yield Static(LEGEND, id="legend")
         yield Footer()
 
     def on_mount(self):
