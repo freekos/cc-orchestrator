@@ -110,6 +110,25 @@ def test_jira_chat_setup():
         shutil.rmtree(d, ignore_errors=True)
 
 
+def test_clean_dead_settings():
+    import os, json, shutil, tempfile
+    d = tempfile.mkdtemp(prefix="cc-cds-")
+    try:
+        cdir = os.path.join(d, ".claude"); os.makedirs(cdir)
+        sf = os.path.join(cdir, "settings.json")
+        # only the dead key -> file deleted
+        open(sf, "w").write(json.dumps({"deniedMcpServers": ["claude.ai Atlassian"]}))
+        cc._clean_dead_settings(d)
+        assert not os.path.exists(sf), "file with only the dead key should be removed"
+        # dead key alongside a real one -> key stripped, rest kept
+        open(sf, "w").write(json.dumps({"deniedMcpServers": ["x"], "model": "opus"}))
+        cc._clean_dead_settings(d)
+        data = json.load(open(sf))
+        assert data == {"model": "opus"}, data
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
 def test_chat_jira_flags():
     import shlex
     proj = {"jira": {"site": "x.atlassian.net", "email": "e", "token": "tok", "project_key": "AZI"}}

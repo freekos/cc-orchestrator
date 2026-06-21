@@ -2200,12 +2200,36 @@ def chat_jira_flags(proj, project_name):
             project_name, cfg.get("site", "?"), cfg.get("project_key", "?"), project_name))
     return " --disallowedTools %s --append-system-prompt %s" % (shlex.quote(ATLASSIAN_TOOLS), shlex.quote(hint))
 
+def _clean_dead_settings(chat_dir):
+    """Remove the dead `deniedMcpServers` key an earlier version wrote into a chat's
+    .claude/settings.json (Claude Code rejects it: 'expected object, received string'). Delete the
+    file if it becomes empty; leave any other keys intact."""
+    sf = Path(chat_dir) / ".claude" / "settings.json"
+    if not sf.exists():
+        return
+    try:
+        data = json.loads(sf.read_text())
+    except Exception:
+        return
+    if not isinstance(data, dict) or "deniedMcpServers" not in data:
+        return
+    data.pop("deniedMcpServers", None)
+    try:
+        if data:
+            sf.write_text(json.dumps(data, indent=2))
+        else:
+            sf.unlink()
+    except Exception:
+        pass
+
 def jira_chat_setup(chat_dir, proj, project_name):
     """Markdown block for a chat's CLAUDE.md telling the agent to use `cc jira <project> …` and that the
     Atlassian MCP is blocked. The HARD block + a cwd-independent pointer come from chat_jira_flags() on the
     launch command; this block is the fuller, in-context version (loads when cwd is correct). "" if no token.
-    (`chat_dir` kept for signature compatibility; we no longer write a settings.json — deniedMcpServers
-    can't match a connector name with a space, so it was a no-op.)"""
+    Also self-heals: an earlier version wrote a `.claude/settings.json` with `deniedMcpServers:
+    ["claude.ai Atlassian"]`, which Claude Code rejects on every launch ("expected object, received
+    string") — strip that dead key here (and delete the file if it becomes empty)."""
+    _clean_dead_settings(chat_dir)
     cfg = (proj.get("jira") or {})
     if not (cfg.get("token") and cfg.get("project_key")):
         return ""
