@@ -2209,6 +2209,85 @@ def cmd_jira_done(args):
     ok, info = jira_transition_done(cfg, args.key)
     print(("%s -> %s" % (args.key, info)) if ok else ("could not transition %s: %s" % (args.key, info)))
 
+def jira_transitions(cfg, key):
+    """Available transitions from the issue's CURRENT status: [{id, name, to_name, to_cat}]."""
+    trs = jira_req(cfg, "GET", "/issue/%s/transitions" % key).get("transitions", [])
+    out = []
+    for t in trs:
+        to = t.get("to") or {}
+        out.append({"id": t.get("id"), "name": t.get("name", ""), "to_name": to.get("name", ""),
+                    "to_cat": ((to.get("statusCategory") or {}).get("key") or "").lower()})
+    return out
+
+# free-text -> Jira statusCategory, so `move <KEY> todo` works without knowing exact status names
+_CAT_KW = {"todo": "new", "to do": "new", "к выполнению": "new", "new": "new", "backlog": "new",
+           "doing": "indeterminate", "in progress": "indeterminate", "в работе": "indeterminate",
+           "wip": "indeterminate", "done": "done", "готово": "done", "complete": "done"}
+
+def jira_move(cfg, key, target):
+    """Transition issue to `target` (a status NAME, case-insensitive, or a category keyword like
+    todo/doing/done). Picks a matching transition AVAILABLE from the current status. (ok, info).
+    Backward moves work iff the workflow allows them — else we report what IS reachable."""
+    trs = jira_transitions(cfg, key)
+    if not trs:
+        return (False, "нет доступных переходов")
+    tl = (target or "").strip().lower()
+    cat = _CAT_KW.get(tl)
+    pick = next((t for t in trs if t["to_name"].strip().lower() == tl), None)          # exact status name
+    pick = pick or (next((t for t in trs if t["to_cat"] == cat), None) if cat else None)  # category keyword
+    pick = pick or next((t for t in trs if tl and tl in t["to_name"].lower()), None)    # substring
+    if not pick:
+        return (False, "нет перехода в '%s' из текущего статуса (доступно: %s)"
+                % (target, ", ".join(t["to_name"] for t in trs)))
+    try:
+        jira_req(cfg, "POST", "/issue/%s/transitions" % key, {"transition": {"id": pick["id"]}})
+        return (True, pick["to_name"])
+    except Exception as e:
+        return (False, str(e)[:100])
+
+def cmd_jira_transitions(args):
+    cfg = _jira_cfg(load_state(), args.project)
+    cur = ((jira_req(cfg, "GET", "/issue/%s?fields=status" % args.key).get("fields", {}) or {})
+           .get("status") or {}).get("name", "?")
+    print("%s сейчас: %s\nможно перейти в:" % (args.key, cur))
+    for t in jira_transitions(cfg, args.key):
+        print("  %-24s [%s]" % (t["to_name"], t["to_cat"]))
+
+def cmd_jira_move(args):
+    cfg = _jira_cfg(load_state(), args.project)
+    ok, info = jira_move(cfg, args.key, args.status)
+    print(("%s -> %s ✓" % (args.key, info)) if ok else ("%s: %s" % (args.key, info)))
+
+def cmd_jira_rollup(args):
+    """Actualize the board: a parent in a DONE status that still has unfinished children is moved
+    back to a not-done status (default 'К выполнению') so it reflects reality. Preview by default;
+    pass --apply to actually move. Scope: --key <parent> (any level), else all project epics."""
+    cfg = _jira_cfg(load_state(), args.project)
+    to = args.to or "К выполнению"
+    parents = [{"key": args.key}] if args.key else jira_my_epics(cfg)
+    flagged = []
+    for p in parents:
+        pk = p["key"]
+        f = jira_req(cfg, "GET", "/issue/%s?fields=status,summary" % pk).get("fields", {})
+        pst = (f.get("status") or {}).get("name", "")
+        pcat = ((f.get("status") or {}).get("statusCategory") or {}).get("key", "")
+        kids = jira_epic_children(cfg, pk)
+        undone = [k for k in kids if not k.get("done")]
+        if not kids or pcat != "done" or not undone:
+            continue
+        flagged.append(pk)
+        print("[%s] '%s' — %s, но %d/%d детей не завершены → %s"
+              % (pk, (f.get("summary", "") or "")[:48], pst, len(undone), len(kids), to))
+        for k in undone[:8]:
+            print("      • %s [%s] %s" % (k["key"], k["status"], (k["summary"] or "")[:50]))
+        if args.apply:
+            ok, info = jira_move(cfg, pk, to)
+            print("      %s" % ("→ %s ✓" % info if ok else "не удалось: %s" % info))
+    if not flagged:
+        print("актуально ✓ — нет родителей в «Готово» с незавершёнными детьми")
+    elif not args.apply:
+        print("\n[превью] сдвинул бы %d родителей. Добавь --apply чтобы применить." % len(flagged))
+
 _IMG_MIME = ("image/",)
 def cmd_jira_attachments(args):
     cfg = _jira_cfg(load_state(), args.project)
@@ -2302,12 +2381,18 @@ def jira_chat_setup(chat_dir, proj, project_name):
             "action use the cc CLI — it always targets THIS project's Jira:\n"
             "- `cc jira search %s \"<text>\"`  (or `--jql \"<JQL>\"`)\n"
             "- `cc jira get %s <KEY>`  ·  `cc jira comment %s <KEY> \"<text>\"`  ·  `cc jira done %s <KEY>`\n"
+            "- `cc jira move %s <KEY> \"<status>\"` — set ANY status (fwd OR back, e.g. \"К выполнению\"); "
+            "`cc jira transitions %s <KEY>` lists what's reachable. (To change a status, ALWAYS use this — "
+            "never raw REST.)\n"
+            "- `cc jira rollup %s [--key <KEY>] [--apply]` — actualize the board: a parent in Done with\n"
+            "  unfinished children is moved back to «К выполнению» (preview without --apply).\n"
             "- `cc jira attachments %s <KEY>` then `cc jira pull %s <KEY>` — download attachments (designs,\n"
             "  screenshots, repro files) locally, then Read the printed image/PDF paths for task context.\n"
             "Do NOT use the Atlassian MCP here — it points to a DIFFERENT Atlassian instance and is blocked\n"
             "at launch (--disallowedTools).\n") % (
             cfg.get("site", "?"), cfg.get("project_key", "?"),
-            project_name, project_name, project_name, project_name, project_name, project_name)
+            project_name, project_name, project_name, project_name, project_name,
+            project_name, project_name, project_name, project_name)
 
 
 # ----------------------------- deploys -----------------------------
@@ -2409,6 +2494,9 @@ def build_parser():
     a = jr.add_parser("get"); a.add_argument("project"); a.add_argument("key"); a.set_defaults(fn=cmd_jira_get)
     a = jr.add_parser("comment"); a.add_argument("project"); a.add_argument("key"); a.add_argument("text"); a.set_defaults(fn=cmd_jira_comment)
     a = jr.add_parser("done"); a.add_argument("project"); a.add_argument("key"); a.set_defaults(fn=cmd_jira_done)
+    a = jr.add_parser("transitions"); a.add_argument("project"); a.add_argument("key"); a.set_defaults(fn=cmd_jira_transitions)
+    a = jr.add_parser("move"); a.add_argument("project"); a.add_argument("key"); a.add_argument("status"); a.set_defaults(fn=cmd_jira_move)
+    a = jr.add_parser("rollup"); a.add_argument("project"); a.add_argument("--key"); a.add_argument("--to"); a.add_argument("--apply", action="store_true"); a.set_defaults(fn=cmd_jira_rollup)
     a = jr.add_parser("attachments"); a.add_argument("project"); a.add_argument("key"); a.set_defaults(fn=cmd_jira_attachments)
     a = jr.add_parser("pull"); a.add_argument("project"); a.add_argument("key"); a.add_argument("--out"); a.add_argument("--images-only", action="store_true"); a.set_defaults(fn=cmd_jira_pull)
 
@@ -2548,7 +2636,8 @@ def cmd_recover(args):
 _READONLY = {cmd_task_diff, cmd_task_ls, cmd_repo_ls, cmd_repo_members,
              cmd_epic_ls, cmd_epic_memory, cmd_project_ls, cmd_jira_epics, cmd_orphans, cmd_epic_plan,
              cmd_jira_search, cmd_jira_get, cmd_jira_comment, cmd_jira_done,
-             cmd_jira_attachments, cmd_jira_pull}  # no cc-state writes; network off the lock
+             cmd_jira_attachments, cmd_jira_pull,
+             cmd_jira_transitions, cmd_jira_move, cmd_jira_rollup}  # no cc-state writes; network off the lock
 
 _SELF_LOCKED = {cmd_epic_mrs, cmd_task_mrs, cmd_repo_add, cmd_project_new, cmd_recover,
                 cmd_task_merge, cmd_epic_merge}   # do git/network lock-free, then save under a brief mutate() themselves

@@ -2,6 +2,34 @@ import sys, types, pathlib
 sys.path.insert(0, str(pathlib.Path(__file__).parent))
 import cc
 
+def test_jira_move():
+    TRS = {"transitions": [
+        {"id": "11", "name": "К выполнению", "to": {"name": "К выполнению", "statusCategory": {"key": "new"}}},
+        {"id": "21", "name": "В работе", "to": {"name": "В работе", "statusCategory": {"key": "indeterminate"}}},
+        {"id": "31", "name": "Готово", "to": {"name": "Готово", "statusCategory": {"key": "done"}}},
+    ]}
+    posted = {}
+    def fake(cfg, method, path, body=None):
+        if method == "GET" and path.endswith("/transitions"):
+            return TRS
+        if method == "POST" and "/transitions" in path:
+            posted["id"] = body["transition"]["id"]; return {}
+        return {}
+    saved = cc.jira_req
+    cc.jira_req = fake
+    try:
+        ok, info = cc.jira_move({}, "K-1", "К выполнению")             # exact name (backward)
+        assert ok and info == "К выполнению" and posted["id"] == "11", (ok, info, posted)
+        posted.clear(); cc.jira_move({}, "K-1", "todo")               # category keyword -> 'new'
+        assert posted["id"] == "11", posted
+        posted.clear(); cc.jira_move({}, "K-1", "готово")             # forward to done
+        assert posted["id"] == "31", posted
+        posted.clear(); ok, info = cc.jira_move({}, "K-1", "Опубликовано")  # unreachable
+        assert not ok and not posted, (ok, posted)
+    finally:
+        cc.jira_req = saved
+
+
 def test_gen_task_title():
     saved = cc.claude_text
     try:
