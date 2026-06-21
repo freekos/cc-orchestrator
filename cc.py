@@ -391,9 +391,11 @@ def cmd_project_setup(args):
     base = Path(proj["path"]); base.mkdir(parents=True, exist_ok=True)
     sdir = base / ".cc-setup"; sdir.mkdir(parents=True, exist_ok=True)
     repos = list(proj.get("repos", {}).keys())
-    (sdir / "CLAUDE.md").write_text(SETUP_RUNBOOK.format(
+    runbook = SETUP_RUNBOOK.format(
         project=args.project, base=str(base), ccpy=os.path.abspath(__file__),
-        repos=(", ".join(repos) if repos else "(пока нет — создашь в этом чате)")))
+        repos=(", ".join(repos) if repos else "(пока нет — создашь в этом чате)"))
+    runbook += jira_chat_setup(sdir, proj, args.project)   # project-scoped Jira + block the MCP
+    (sdir / "CLAUDE.md").write_text(runbook)
     print("setup chat dir: %s" % sdir)
     print("  open:  cd %s && claude --permission-mode auto --add-dir %s"
           % (shlex.quote(str(sdir)), shlex.quote(str(base))))
@@ -688,6 +690,7 @@ def cmd_task_add(args):
                  "(cc opens a Merge Request only for repos you modify, so untouched repos cost nothing). "
                  "Do NOT run git — cc handles branches/commits/MRs.\n") % (
                  header, epic_mem or "(no epic notes yet)", branch, repo_map)
+    claude_md += jira_chat_setup(task_dir, proj, epic["project"])   # project-scoped Jira + block the MCP
     try:
         (Path(task_dir) / "CLAUDE.md").write_text(claude_md)
     except Exception:
@@ -1745,10 +1748,11 @@ def cmd_epic_open(args):
         lines.append("- %s: integration `%s`  (checkout: %s, reviewer: %s)" % (
             r, targets.get(r) or "(default branch)", ri.get("path", ""), ri.get("reviewer") or "-"))
     lines.append("(membership only — run `cc epic plan %s` for which repos actually changed)" % args.key)
-    (edir / "CLAUDE.md").write_text(
-        RELEASE_RUNBOOK % (args.key, e.get("summary", ""), "\n".join(lines),
-                           (e.get("memory") or "").strip() or "(no epic notes)",
-                           args.key, args.key))
+    runbook = RELEASE_RUNBOOK % (args.key, e.get("summary", ""), "\n".join(lines),
+                                 (e.get("memory") or "").strip() or "(no epic notes)",
+                                 args.key, args.key)
+    runbook += jira_chat_setup(edir, proj, e["project"])   # project-scoped Jira + block the MCP
+    (edir / "CLAUDE.md").write_text(runbook)
     adds = " ".join("--add-dir %s" % shlex.quote(proj["repos"][r]["path"])
                     for r in repos if proj["repos"].get(r, {}).get("path"))
     print("epic chat dir: %s" % edir)
@@ -2062,6 +2066,96 @@ def cmd_jira_epics(args):
         print("(no epics found for you in %s)" % cfg["project_key"])
 
 
+def _jira_cfg(s, project):
+    """The project's Jira config (token), or die. The agent-facing `cc jira` commands always go
+    through THIS — a project's own Jira — never an MCP that might point at a different instance."""
+    p = s["projects"].get(project) or die("unknown project '%s'" % project)
+    cfg = p.get("jira") or {}
+    if not (cfg.get("token") and cfg.get("site") and cfg.get("project_key")):
+        die("project '%s' has no Jira token (set it: cc project jira %s --site .. --email .. --token .. --project-key ..)"
+            % (project, project))
+    return cfg
+
+def cmd_jira_search(args):
+    cfg = _jira_cfg(load_state(), args.project)
+    if getattr(args, "jql", None):
+        body = {"jql": args.jql, "maxResults": 40, "fields": ["summary", "status", "parent"]}
+        try:
+            data = jira_req(cfg, "POST", "/search/jql", body)
+        except Exception:
+            data = jira_req(cfg, "POST", "/search", body)
+        rows = [{"key": i["key"], "summary": (i.get("fields", {}) or {}).get("summary", ""),
+                 "status": ((i.get("fields", {}) or {}).get("status") or {}).get("name", ""),
+                 "parent": ((i.get("fields", {}) or {}).get("parent") or {}).get("key")}
+                for i in data.get("issues", [])]
+    else:
+        rows = jira_project_tasks(cfg, args.query or "")
+    for t in rows:
+        par = ("  · " + t["parent"]) if t.get("parent") else ""
+        print("%s  [%s]%s  %s" % (t["key"], t.get("status", ""), par, t.get("summary", "")))
+    if not rows:
+        print("(ничего не найдено в %s)" % cfg["project_key"])
+
+def cmd_jira_get(args):
+    cfg = _jira_cfg(load_state(), args.project)
+    try:
+        f = jira_req(cfg, "GET", "/issue/%s?fields=summary,status,parent" % args.key).get("fields", {})
+    except Exception as ex:
+        die("jira get %s failed: %s" % (args.key, str(ex)[:120]))
+    st = (f.get("status") or {}).get("name", "")
+    par = (f.get("parent") or {}).get("key")
+    print("%s  [%s]%s" % (args.key, st, ("  parent=" + par) if par else ""))
+    print(f.get("summary", ""))
+    desc = jira_epic_description(cfg, args.key)
+    if desc:
+        print("\n" + desc)
+
+def cmd_jira_comment(args):
+    cfg = _jira_cfg(load_state(), args.project)
+    print(("commented on %s" % args.key) if jira_comment(cfg, args.key, args.text)
+          else ("comment on %s failed" % args.key))
+
+def cmd_jira_done(args):
+    cfg = _jira_cfg(load_state(), args.project)
+    ok, info = jira_transition_done(cfg, args.key)
+    print(("%s -> %s" % (args.key, info)) if ok else ("could not transition %s: %s" % (args.key, info)))
+
+def jira_chat_setup(chat_dir, proj, project_name):
+    """For a cc-spawned chat: if the project has a cc Jira token, (1) write a .claude/settings.json
+    that BLOCKS the Atlassian connector in this chat (so the agent can't hit the wrong Jira instance),
+    and (2) return a Markdown block telling the agent to use `cc jira <project> …`. No token -> "" and
+    the chat is left untouched (the MCP, whatever it points at, stays available)."""
+    cfg = (proj.get("jira") or {})
+    if not (cfg.get("token") and cfg.get("project_key")):
+        return ""
+    try:
+        cdir = Path(chat_dir) / ".claude"
+        cdir.mkdir(parents=True, exist_ok=True)
+        sf = cdir / "settings.json"
+        settings = {}
+        if sf.exists():
+            try:
+                settings = json.loads(sf.read_text())
+            except Exception:
+                settings = {}
+        denied = settings.get("deniedMcpServers") or []
+        if "claude.ai Atlassian" not in denied:
+            denied.append("claude.ai Atlassian")
+        settings["deniedMcpServers"] = denied
+        sf.write_text(json.dumps(settings, indent=2))
+    except Exception:
+        pass
+    return ("\n## Jira — use cc, NOT the Atlassian MCP\n"
+            "This project's Jira is **%s** (project key **%s**), wired into cc via token. For EVERY Jira\n"
+            "action use the cc CLI — it always targets THIS project's Jira:\n"
+            "- `cc jira search %s \"<text>\"`  (or `--jql \"<JQL>\"`)\n"
+            "- `cc jira get %s <KEY>`  ·  `cc jira comment %s <KEY> \"<text>\"`  ·  `cc jira done %s <KEY>`\n"
+            "Do NOT use the Atlassian MCP here — it may point to a DIFFERENT Atlassian instance "
+            "(it's blocked in this chat via .claude/settings.json).\n") % (
+            cfg.get("site", "?"), cfg.get("project_key", "?"),
+            project_name, project_name, project_name, project_name)
+
+
 # ----------------------------- deploys -----------------------------
 
 def repo_deploy_state(ri):
@@ -2156,6 +2250,10 @@ def build_parser():
     a.set_defaults(fn=cmd_jira_epics)
     a = jr.add_parser("create-epic"); a.add_argument("project"); a.add_argument("summary")
     a.set_defaults(fn=cmd_jira_create_epic)
+    a = jr.add_parser("search"); a.add_argument("project"); a.add_argument("query", nargs="?"); a.add_argument("--jql"); a.set_defaults(fn=cmd_jira_search)
+    a = jr.add_parser("get"); a.add_argument("project"); a.add_argument("key"); a.set_defaults(fn=cmd_jira_get)
+    a = jr.add_parser("comment"); a.add_argument("project"); a.add_argument("key"); a.add_argument("text"); a.set_defaults(fn=cmd_jira_comment)
+    a = jr.add_parser("done"); a.add_argument("project"); a.add_argument("key"); a.set_defaults(fn=cmd_jira_done)
 
     rp_ = sub.add_parser("repo").add_subparsers(dest="cmd", required=True)
     a = rp_.add_parser("add"); a.add_argument("project"); a.add_argument("name")
@@ -2279,7 +2377,8 @@ def cmd_recover(args):
     print("\n`cc task mrs <tid>` подтянет MR; имя = slug (исходный заголовок не сохранялся в worktree).")
 
 _READONLY = {cmd_task_diff, cmd_task_ls, cmd_repo_ls, cmd_repo_members,
-             cmd_epic_ls, cmd_epic_memory, cmd_project_ls, cmd_jira_epics, cmd_orphans, cmd_epic_plan}
+             cmd_epic_ls, cmd_epic_memory, cmd_project_ls, cmd_jira_epics, cmd_orphans, cmd_epic_plan,
+             cmd_jira_search, cmd_jira_get, cmd_jira_comment, cmd_jira_done}  # no cc-state writes; network off the lock
 
 _SELF_LOCKED = {cmd_epic_mrs, cmd_task_mrs, cmd_repo_add, cmd_project_new, cmd_recover,
                 cmd_task_merge, cmd_epic_merge}   # do git/network lock-free, then save under a brief mutate() themselves

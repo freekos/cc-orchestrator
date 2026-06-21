@@ -96,6 +96,24 @@ def test_unique_branch():
     assert cc._unique_branch(s, "fix-login") == "fix-login-3"  # base + -2 taken -> -3
 
 
+def test_jira_chat_setup():
+    import os, json, shutil, tempfile
+    d = tempfile.mkdtemp(prefix="cc-jcs-")
+    try:
+        # with a token: blocks the Atlassian connector in this chat + returns a Jira block using `cc jira`
+        proj = {"jira": {"site": "x.atlassian.net", "email": "e", "token": "tok", "project_key": "AZI"}}
+        block = cc.jira_chat_setup(d, proj, "azi")
+        assert "cc jira search azi" in block and "Atlassian MCP" in block, block
+        sf = os.path.join(d, ".claude", "settings.json")
+        assert os.path.exists(sf)
+        data = json.load(open(sf))
+        assert "claude.ai Atlassian" in data.get("deniedMcpServers", []), data
+        # no token: no block written, returns empty (chat left untouched)
+        assert cc.jira_chat_setup(d, {"jira": {}}, "azi") == ""
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
 if __name__ == "__main__":
     n = 0
     for k, v in list(globals().items()):
