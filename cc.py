@@ -2445,7 +2445,15 @@ def _scan_orphans(s):
     """Task work present on disk (cctui/<epic>/<slug>/<repo> worktrees, branch <epic>-<slug>) but
     with NO matching task in cc state — i.e. tasks that were silently dropped from the board.
     Returns [{project, epic, slug, branch, repos:{repo:wt_path}}]."""
-    known = {t.get("branch") for t in s["tasks"].values()}
+    # match by worktree PATH, not by reconstructing "<epic>-<slug>": loose tasks have a plain-slug
+    # branch (not <epic>-<slug>), so a branch guess would falsely flag on-board loose tasks as orphans.
+    known_wts = set()
+    for t in s["tasks"].values():
+        for wt in (t.get("worktrees") or {}).values():
+            try:
+                known_wts.add(os.path.realpath(wt))
+            except Exception:
+                pass
     orphans = []
     for pname, proj in s.get("projects", {}).items():
         base = proj.get("path")
@@ -2462,17 +2470,19 @@ def _scan_orphans(s):
                 if not task_dir.is_dir():
                     continue
                 slug = task_dir.name
-                branch = "%s-%s" % (epic, slug)
-                if branch in known:
-                    continue
                 repos = {}
                 for repo_dir in sorted(task_dir.iterdir()):
                     if (repo_dir.is_dir() and (repo_dir / ".git").exists()
                             and repo_dir.name in proj.get("repos", {})):
                         repos[repo_dir.name] = str(repo_dir)
-                if repos:
-                    orphans.append({"project": pname, "epic": epic, "slug": slug,
-                                    "branch": branch, "repos": repos})
+                if not repos:
+                    continue
+                # claimed by a known task if ANY of its worktrees is a known worktree path
+                if any(os.path.realpath(p) in known_wts for p in repos.values()):
+                    continue
+                branch = slug if epic.endswith("__loose") else "%s-%s" % (epic, slug)
+                orphans.append({"project": pname, "epic": epic, "slug": slug,
+                                "branch": branch, "repos": repos})
     return orphans
 
 def cmd_orphans(args):
@@ -2491,13 +2501,15 @@ def cmd_recover(args):
         for o in _scan_orphans(s):
             epic, pname = o["epic"], o["project"]
             proj = s["projects"][pname]
-            if epic not in s["epics"]:
+            if epic.endswith("__loose"):
+                ensure_loose_epic(s, pname)   # epic-less task -> the project's loose container
+            elif epic not in s["epics"]:
                 s["epics"][epic] = {"project": pname, "summary": "(восстановлен)",
                                     "mode": "epic_branch", "branch": epic, "targets": {}, "mrs": {}}
             tid = _unique_tid(s, epic, o["slug"])
-            base = {r: default_branch(proj["repos"][r]["path"]) for r in o["repos"]}
+            base = {r: target_for(s["epics"][epic], proj, r) for r in o["repos"]}   # honors epic/loose targets
             s["tasks"][tid] = {
-                "epic": epic, "title": slug, "branch": o["branch"],
+                "epic": epic, "title": o["slug"], "branch": o["branch"],
                 "repos": list(o["repos"].keys()), "worktrees": dict(o["repos"]),
                 "base": base, "mrs": {}, "log": str(STATE_DIR / (tid + ".log")),
                 "recovered": True,

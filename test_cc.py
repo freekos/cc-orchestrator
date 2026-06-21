@@ -134,6 +134,26 @@ def test_jira_chat_setup():
         shutil.rmtree(d, ignore_errors=True)
 
 
+def test_scan_orphans_loose():
+    import os, shutil, tempfile
+    d = tempfile.mkdtemp(prefix="cc-orph-")
+    try:
+        def wt(slug):  # create cctui/visco__loose/<slug>/web/.git, return the web worktree path
+            p = os.path.join(d, "cctui", "visco__loose", slug, "web")
+            os.makedirs(os.path.join(p, ".git")); return p
+        onboard = wt("fix-login")     # a loose task that IS on the board
+        ghost = wt("ghost-fix")       # a loose worktree NOT claimed by any task
+        s = {"projects": {"visco": {"path": d, "repos": {"web": {"default_branch": "dev"}}}},
+             "epics": {"visco__loose": {"project": "visco", "loose": True, "mode": "targets", "targets": {}}},
+             "tasks": {"t_fix": {"epic": "visco__loose", "branch": "fix-login", "worktrees": {"web": onboard}}}}
+        orph = cc._scan_orphans(s)
+        # the on-board loose task is matched by worktree path (NOT flagged); only the ghost is an orphan
+        assert len(orph) == 1, [o["slug"] for o in orph]
+        assert orph[0]["slug"] == "ghost-fix" and orph[0]["branch"] == "ghost-fix", orph[0]  # loose => plain-slug branch
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
 def test_clean_dead_settings():
     import os, json, shutil, tempfile
     d = tempfile.mkdtemp(prefix="cc-cds-")
