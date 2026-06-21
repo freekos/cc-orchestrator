@@ -1892,6 +1892,28 @@ def jira_orphan_tasks(cfg, query="", limit=30):
                     "orphan": True})
     return out
 
+def jira_project_tasks(cfg, query="", limit=40):
+    """ANY non-Epic issue in the project (regardless of its parent epic), recent first — for pulling
+    an EXISTING ticket onto the board as a task. [{key,summary,status,done,parent}]."""
+    jql = "project = %s AND issuetype != Epic" % cfg["project_key"]
+    if query:
+        jql += ' AND summary ~ "%s"' % query.replace('"', "")
+    jql += " ORDER BY updated DESC"
+    body = {"jql": jql, "maxResults": limit, "fields": ["summary", "status", "parent"]}
+    try:
+        data = jira_req(cfg, "POST", "/search/jql", body)
+    except Exception:
+        data = jira_req(cfg, "POST", "/search", body)
+    out = []
+    for i in data.get("issues", []):
+        f = i.get("fields", {})
+        st = f.get("status") or {}
+        out.append({"key": i["key"], "summary": f.get("summary", ""),
+                    "status": st.get("name", ""),
+                    "done": ((st.get("statusCategory") or {}).get("key") or "").lower() == "done",
+                    "parent": (f.get("parent") or {}).get("key")})
+    return out
+
 def jira_issue_parent(cfg, key):
     try:
         f = jira_req(cfg, "GET", "/issue/%s?fields=parent" % key).get("fields", {})

@@ -172,9 +172,14 @@ class NewTaskScreen(ModalScreen):
             with VerticalScroll(id="body"):
                 if self.jira_on:
                     with Vertical(id="jira"):
-                        yield Label("[dim]из Jira (опц.): задача эпика ИЛИ без эпика (перенесём под эпик) → привяжем + засидим[/dim]")
-                        yield Input(placeholder="поиск задач эпика (Enter)", id="tsearch")
-                        yield Select([("(загрузка задач эпика…)", "_")], id="tpick", allow_blank=True)
+                        if self.loose:
+                            yield Label("[dim]из Jira (опц.): любая задача проекта → привяжем к доске как есть (в Jira не переносим)[/dim]")
+                            yield Input(placeholder="поиск по задачам проекта (Enter)", id="tsearch")
+                            yield Select([("(загрузка задач проекта…)", "_")], id="tpick", allow_blank=True)
+                        else:
+                            yield Label("[dim]из Jira (опц.): задача эпика ИЛИ без эпика (перенесём под эпик) → привяжем + засидим[/dim]")
+                            yield Input(placeholder="поиск задач эпика (Enter)", id="tsearch")
+                            yield Select([("(загрузка задач эпика…)", "_")], id="tpick", allow_blank=True)
                         yield Button("Подставить из Jira", id="seed")
                 yield Label("title:")
                 yield Input(placeholder="напр. fix loyalty badge", id="title")
@@ -209,10 +214,14 @@ class NewTaskScreen(ModalScreen):
     def _load_children(self, query):
         try:
             cfg = cc.load_state()["projects"][self.project].get("jira", {})
-            children = cc.jira_epic_children(cfg, self.epic, query)
-            seen = {c["key"] for c in children}
-            orphans = [o for o in cc.jira_orphan_tasks(cfg, query) if o["key"] not in seen]
-            self._children = children + orphans   # epic tasks first, then parentless ones
+            if self.loose:
+                # epic-less task: pick ANY existing project ticket (linked as-is, not reparented)
+                self._children = cc.jira_project_tasks(cfg, query)
+            else:
+                children = cc.jira_epic_children(cfg, self.epic, query)
+                seen = {c["key"] for c in children}
+                orphans = [o for o in cc.jira_orphan_tasks(cfg, query) if o["key"] not in seen]
+                self._children = children + orphans   # epic tasks first, then parentless ones
         except Exception:
             self._children = []
         self.app.call_from_thread(self._fill)
@@ -222,7 +231,10 @@ class NewTaskScreen(ModalScreen):
             sel = self.query_one("#tpick", Select)
             opts = []
             for c in self._children:
-                tag = "  · БЕЗ ЭПИКА (перенесём)" if c.get("orphan") else ""
+                if self.loose:
+                    tag = ("  · эпик %s" % c["parent"]) if c.get("parent") else "  · без эпика"
+                else:
+                    tag = "  · БЕЗ ЭПИКА (перенесём)" if c.get("orphan") else ""
                 opts.append(("%s — %s [%s]%s" % (c["key"], c["summary"][:38], c["status"], tag), c["key"]))
             sel.set_options(opts or [("(задач не найдено)", "_")])
         except Exception:
@@ -1511,10 +1523,12 @@ class CCApp(App):
                              preset_key=data["key"], preset_summary=data.get("summary", "")),
                              self._task_created)
             return
-        # on a PROJECT node -> a task with NO epic (attaches to the project, MR -> master/main)
+        # on a PROJECT node -> a task with NO epic (attaches to the project, MR -> master/main).
+        # Jira picker (if the project has a token) lets you pull any EXISTING project ticket onto the board.
         if data and data["type"] == "project":
             pname = data["id"]
-            self.push_screen(NewTaskScreen(pname, jira_on=False, project=pname, loose=True), self._task_created)
+            jira_on = bool(s["projects"].get(pname, {}).get("jira", {}).get("token"))
+            self.push_screen(NewTaskScreen(pname, jira_on=jira_on, project=pname, loose=True), self._task_created)
             return
         epic = self._current_epic()
         if not epic:
@@ -1522,7 +1536,9 @@ class CCApp(App):
             return
         ep = s["epics"].get(epic, {})
         if ep.get("loose"):   # on a loose task -> another loose task in the same project
-            self.push_screen(NewTaskScreen(ep["project"], jira_on=False, project=ep["project"], loose=True),
+            pname = ep["project"]
+            jira_on = bool(s["projects"].get(pname, {}).get("jira", {}).get("token"))
+            self.push_screen(NewTaskScreen(pname, jira_on=jira_on, project=pname, loose=True),
                              self._task_created)
             return
         proj = ep.get("project")
