@@ -397,8 +397,8 @@ def cmd_project_setup(args):
     runbook += jira_chat_setup(sdir, proj, args.project)   # project-scoped Jira + block the MCP
     (sdir / "CLAUDE.md").write_text(runbook)
     print("setup chat dir: %s" % sdir)
-    print("  open:  cd %s && claude --permission-mode auto --add-dir %s"
-          % (shlex.quote(str(sdir)), shlex.quote(str(base))))
+    print("  open:  cd %s && claude --permission-mode auto --add-dir %s%s"
+          % (shlex.quote(str(sdir)), shlex.quote(str(base)), chat_jira_flags(proj, args.project)))
 
 def cmd_project_new(args):
     """Create a brand-new EMPTY project (the folder too), ready to fill with repos via `cc repo add`."""
@@ -860,7 +860,8 @@ def cmd_task_open(args):
             t.setdefault("claude_session", {})[t["primary"]] = sid
             save_state(s)
     if sid:
-        print("  follow-up:  (cd '%s' && claude --resume %s --permission-mode auto)" % (t["worktrees"][t["primary"]], sid))
+        print("  follow-up:  (cd '%s' && claude --resume %s --permission-mode auto%s)" % (
+            t["worktrees"][t["primary"]], sid, chat_jira_flags(proj, proj_name)))
     if t.get("log"):
         print("  watch log:  tail -f '%s'" % t["log"])
     if runnable:
@@ -1757,7 +1758,8 @@ def cmd_epic_open(args):
                     for r in repos if proj["repos"].get(r, {}).get("path"))
     print("epic chat dir: %s" % edir)
     print("  release runbook CLAUDE.md written (%d repo(s))" % len(repos))
-    print("  open:  cd %s && claude --permission-mode auto %s" % (shlex.quote(str(edir)), adds))
+    print("  open:  cd %s && claude --permission-mode auto %s%s" % (
+        shlex.quote(str(edir)), adds, chat_jira_flags(proj, e["project"])))
 
 
 def cmd_epic_set(args):
@@ -2180,31 +2182,33 @@ def cmd_jira_pull(args):
     if any(a["mime"].startswith("video/") for a in atts):
         print("видео скачано, но кадры агент не «видит» — нужен ffmpeg для извлечения кадров")
 
-def jira_chat_setup(chat_dir, proj, project_name):
-    """For a cc-spawned chat: if the project has a cc Jira token, (1) write a .claude/settings.json
-    that BLOCKS the Atlassian connector in this chat (so the agent can't hit the wrong Jira instance),
-    and (2) return a Markdown block telling the agent to use `cc jira <project> …`. No token -> "" and
-    the chat is left untouched (the MCP, whatever it points at, stays available)."""
+ATLASSIAN_TOOLS = "mcp__claude_ai_Atlassian__*"
+
+def chat_jira_flags(proj, project_name):
+    """Launch-time flags for a cc chat so it uses the PROJECT's Jira (token), not the Atlassian MCP —
+    works regardless of cwd (unlike a .claude/settings.json, which only applies from cwd downward and
+    whose `deniedMcpServers` can't even name a connector with a space/dot). Empirically `--disallowedTools
+    'mcp__claude_ai_Atlassian__*'` blocks ONLY the Atlassian connector's tool calls (other connectors —
+    Figma/DWH/… — stay). We also append a short system-prompt pointer in case the chat lands in the wrong
+    cwd and never loads the CLAUDE.md block. Returns "" when the project has no token."""
     cfg = (proj.get("jira") or {})
     if not (cfg.get("token") and cfg.get("project_key")):
         return ""
-    try:
-        cdir = Path(chat_dir) / ".claude"
-        cdir.mkdir(parents=True, exist_ok=True)
-        sf = cdir / "settings.json"
-        settings = {}
-        if sf.exists():
-            try:
-                settings = json.loads(sf.read_text())
-            except Exception:
-                settings = {}
-        denied = settings.get("deniedMcpServers") or []
-        if "claude.ai Atlassian" not in denied:
-            denied.append("claude.ai Atlassian")
-        settings["deniedMcpServers"] = denied
-        sf.write_text(json.dumps(settings, indent=2))
-    except Exception:
-        pass
+    hint = ("Jira for project '%s' is %s (key %s). ALWAYS use the cc CLI for Jira — `cc jira "
+            "search|get|comment|done|attachments|pull %s …` — it targets THIS project's Jira. The "
+            "Atlassian MCP is intentionally blocked in this session; do not attempt to use it." % (
+            project_name, cfg.get("site", "?"), cfg.get("project_key", "?"), project_name))
+    return " --disallowedTools %s --append-system-prompt %s" % (shlex.quote(ATLASSIAN_TOOLS), shlex.quote(hint))
+
+def jira_chat_setup(chat_dir, proj, project_name):
+    """Markdown block for a chat's CLAUDE.md telling the agent to use `cc jira <project> …` and that the
+    Atlassian MCP is blocked. The HARD block + a cwd-independent pointer come from chat_jira_flags() on the
+    launch command; this block is the fuller, in-context version (loads when cwd is correct). "" if no token.
+    (`chat_dir` kept for signature compatibility; we no longer write a settings.json — deniedMcpServers
+    can't match a connector name with a space, so it was a no-op.)"""
+    cfg = (proj.get("jira") or {})
+    if not (cfg.get("token") and cfg.get("project_key")):
+        return ""
     return ("\n## Jira — use cc, NOT the Atlassian MCP\n"
             "This project's Jira is **%s** (project key **%s**), wired into cc via token. For EVERY Jira\n"
             "action use the cc CLI — it always targets THIS project's Jira:\n"
@@ -2212,8 +2216,8 @@ def jira_chat_setup(chat_dir, proj, project_name):
             "- `cc jira get %s <KEY>`  ·  `cc jira comment %s <KEY> \"<text>\"`  ·  `cc jira done %s <KEY>`\n"
             "- `cc jira attachments %s <KEY>` then `cc jira pull %s <KEY>` — download attachments (designs,\n"
             "  screenshots, repro files) locally, then Read the printed image/PDF paths for task context.\n"
-            "Do NOT use the Atlassian MCP here — it may point to a DIFFERENT Atlassian instance "
-            "(it's blocked in this chat via .claude/settings.json).\n") % (
+            "Do NOT use the Atlassian MCP here — it points to a DIFFERENT Atlassian instance and is blocked\n"
+            "at launch (--disallowedTools).\n") % (
             cfg.get("site", "?"), cfg.get("project_key", "?"),
             project_name, project_name, project_name, project_name, project_name, project_name)
 

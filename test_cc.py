@@ -97,21 +97,31 @@ def test_unique_branch():
 
 
 def test_jira_chat_setup():
-    import os, json, shutil, tempfile
+    import shutil, tempfile
     d = tempfile.mkdtemp(prefix="cc-jcs-")
     try:
-        # with a token: blocks the Atlassian connector in this chat + returns a Jira block using `cc jira`
+        # with a token: returns the CLAUDE.md Jira block pointing at `cc jira <project>`
         proj = {"jira": {"site": "x.atlassian.net", "email": "e", "token": "tok", "project_key": "AZI"}}
         block = cc.jira_chat_setup(d, proj, "azi")
         assert "cc jira search azi" in block and "Atlassian MCP" in block, block
-        sf = os.path.join(d, ".claude", "settings.json")
-        assert os.path.exists(sf)
-        data = json.load(open(sf))
-        assert "claude.ai Atlassian" in data.get("deniedMcpServers", []), data
-        # no token: no block written, returns empty (chat left untouched)
+        # no token: empty (chat left untouched)
         assert cc.jira_chat_setup(d, {"jira": {}}, "azi") == ""
     finally:
         shutil.rmtree(d, ignore_errors=True)
+
+
+def test_chat_jira_flags():
+    import shlex
+    proj = {"jira": {"site": "x.atlassian.net", "email": "e", "token": "tok", "project_key": "AZI"}}
+    flags = cc.chat_jira_flags(proj, "azi")
+    # the HARD, cwd-independent block: disallow the Atlassian connector tools at launch
+    assert "--disallowedTools" in flags and "mcp__claude_ai_Atlassian__*" in flags, flags
+    assert "--append-system-prompt" in flags and "cc jira" in flags, flags
+    # shell-quoted so it survives being spliced into a `claude …` command line
+    assert shlex.split(flags) == ["--disallowedTools", "mcp__claude_ai_Atlassian__*",
+                                  "--append-system-prompt"] + [shlex.split(flags)[3]], shlex.split(flags)
+    # no token -> no flags (the MCP, whatever it points at, stays)
+    assert cc.chat_jira_flags({"jira": {}}, "azi") == ""
 
 
 def test_jira_pull(monkeypatched=True):

@@ -1570,10 +1570,19 @@ class CCApp(App):
                              capture_output=True, text=True).stdout
         return pane in out.split()
 
+    def _jira_flags(self, project_name):
+        """Launch flags that make a chat use the project's Jira (cc), not the Atlassian MCP — cwd-independent."""
+        if not project_name:
+            return ""
+        proj = self.state()["projects"].get(project_name, {})
+        return cc.chat_jira_flags(proj, project_name)
+
     def _chat_cmd(self, t):
         cwd = t.get("dir") or t["worktrees"][t["primary"]]
         sid = t.get("claude_session", {}).get(t["primary"]) or cc.resolve_session(cwd)
-        return cwd, ("claude --resume %s --permission-mode auto" % sid if sid else "claude --permission-mode auto")
+        base = ("claude --resume %s --permission-mode auto" % sid) if sid else "claude --permission-mode auto"
+        pname = self.state()["epics"].get(t.get("epic"), {}).get("project")
+        return cwd, base + self._jira_flags(pname)
 
     def _mark_seen(self, tid):
         now = time.time()
@@ -1600,7 +1609,9 @@ class CCApp(App):
         ref = m.group(0) if m else None
         if not ref:
             open_in_terminal(cwd, cmd); return "terminal"
-        subprocess.run([cm, "send", "--surface", ref, "--", "cd %s && %s\n" % (shlex.quote(cwd), cmd)],
+        # leading newline first: dismisses any pending interactive shell prompt (e.g. oh-my-zsh
+        # "[Y/n] update?") that would otherwise eat the start of the `cd` and land claude in the wrong cwd.
+        subprocess.run([cm, "send", "--surface", ref, "--", "\ncd %s && %s\n" % (shlex.quote(cwd), cmd)],
                        capture_output=True)
         subprocess.run([cm, "rename-tab", "--surface", ref, name], capture_output=True)
         return "cmux"
@@ -1620,6 +1631,8 @@ class CCApp(App):
         self._mark_seen(tid)
         sid = (t.get("claude_session") or {}).get(t["primary"]) or cc.resolve_session(cwd)
         chat = "claude --resume %s --permission-mode auto" % sid if sid else "claude --permission-mode auto"
+        pname = self.state()["epics"].get(t.get("epic"), {}).get("project")
+        chat += self._jira_flags(pname)
         where = self._open_chat_tab("cc:%s" % tid, cwd, chat)
         self.notify("чат %s открыт в новой вкладке (%s); Cmd-W закрыть" % (tid, where))
 
@@ -1634,7 +1647,7 @@ class CCApp(App):
             self.notify("не удалось подготовить setup-чат", severity="error"); return
         sid = cc.resolve_session(sdir)   # resume the SAME session if one already exists for this chat
         resume = ("--resume %s " % sid) if sid else ""
-        cmd = "claude %s--permission-mode auto --add-dir %s" % (resume, shlex.quote(base))
+        cmd = "claude %s--permission-mode auto --add-dir %s%s" % (resume, shlex.quote(base), self._jira_flags(proj))
         where = self._open_chat_tab("cc:setup %s" % proj, sdir, cmd)
         self.notify("чат проекта '%s' %s (%s)" % (proj, "продолжен" if sid else "открыт", where))
 
@@ -1654,7 +1667,7 @@ class CCApp(App):
                         for r in repos if proj.get("repos", {}).get(r, {}).get("path"))
         sid = cc.resolve_session(edir)   # resume the SAME epic chat session if it exists
         resume = ("--resume %s " % sid) if sid else ""
-        cmd = "claude %s--permission-mode auto %s" % (resume, adds)
+        cmd = "claude %s--permission-mode auto %s%s" % (resume, adds, self._jira_flags(e.get("project")))
         where = self._open_chat_tab("cc:epic %s" % ekey, edir, cmd)
         self.notify("чат эпика %s %s (%s) — релиз/координация" % (ekey, "продолжен" if sid else "открыт", where))
 
