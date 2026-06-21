@@ -70,6 +70,32 @@ def test_clean_subject():
     assert cc._clean_subject("MR title: feat(clubs): filter tier", fb) == "feat(clubs): filter tier"
 
 
+def test_ensure_loose_epic():
+    s = {"projects": {"azi": {"repos": {}}}, "epics": {}, "tasks": {}}
+    k = cc.ensure_loose_epic(s, "azi")
+    assert k == "azi__loose", k
+    e = s["epics"][k]
+    assert e["loose"] is True and e["project"] == "azi" and e["targets"] == {} and e["mode"] == "targets"
+    # idempotent — second call returns the same key, doesn't duplicate
+    k2 = cc.ensure_loose_epic(s, "azi")
+    assert k2 == k and len(s["epics"]) == 1
+
+
+def test_loose_task_targets_default_branch():
+    # the whole point: a loose task's MR target resolves to the repo default branch (master/main),
+    # NOT an epic/integration branch.
+    proj = {"repos": {"web": {"default_branch": "main"}, "api": {"default_branch": "master"}}}
+    loose = {"project": "azi", "mode": "targets", "targets": {}, "loose": True}
+    assert cc.target_for(loose, proj, "web") == "main"
+    assert cc.target_for(loose, proj, "api") == "master"
+
+
+def test_unique_branch():
+    s = {"tasks": {"t1": {"branch": "fix-login"}, "t2": {"branch": "fix-login-2"}}}
+    assert cc._unique_branch(s, "add-timer") == "add-timer"    # free
+    assert cc._unique_branch(s, "fix-login") == "fix-login-3"  # base + -2 taken -> -3
+
+
 if __name__ == "__main__":
     n = 0
     for k, v in list(globals().items()):

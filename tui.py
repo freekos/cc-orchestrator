@@ -150,11 +150,12 @@ class NewTaskScreen(ModalScreen):
     #row Button { margin: 0 0 0 2; min-width: 14; }
     """
 
-    def __init__(self, epic, jira_on=False, project=None, preset_key=None, preset_summary=""):
+    def __init__(self, epic, jira_on=False, project=None, preset_key=None, preset_summary="", loose=False):
         super().__init__()
         self.epic = epic
         self.jira_on = jira_on
         self.project = project
+        self.loose = loose
         self.preset_key = preset_key
         self.preset_summary = preset_summary
         self._children = []
@@ -162,8 +163,12 @@ class NewTaskScreen(ModalScreen):
 
     def compose(self) -> ComposeResult:
         with Vertical(id="dlg"):
-            yield Label("[b]Новая задача[/b] под эпиком '%s'" % self.epic)
-            yield Label("[dim]идёт по всем репо проекта; MR — только где агент менял[/dim]")
+            if self.loose:
+                yield Label("[b]Новая задача[/b] в проекте '%s' (без эпика)" % self.project)
+                yield Label("[dim]MR летит прямо в master/main; идёт по всем репо проекта, MR — только где агент менял[/dim]")
+            else:
+                yield Label("[b]Новая задача[/b] под эпиком '%s'" % self.epic)
+                yield Label("[dim]идёт по всем репо проекта; MR — только где агент менял[/dim]")
             with VerticalScroll(id="body"):
                 if self.jira_on:
                     with Vertical(id="jira"):
@@ -999,23 +1004,36 @@ class CCApp(App):
         except Exception:
             return False
 
+    def _sorted_tasks(self, tasks):
+        # primary: status hierarchy (ждут->в работе->на ревью->готово);
+        # secondary: most-recently-completed first within a group (recently-closed at the top)
+        return sorted(tasks, key=lambda it: (self.TASK_ORDER.get(fast_status(it[1]), 0),
+                                             -(it[1].get("merged_at") or 0)))
+
+    def _add_task_leaf(self, parent, tid, t):
+        st = fast_status(t)
+        badge = "💬 " if (st == "review" and self._unseen(t)) else ""
+        row = "%s%s %s" % (badge, GLYPH.get(st, "?"), t["title"])
+        parent.add_leaf("[dim]%s[/dim]" % row if st == "merged" else row,
+                        data={"type": "task", "id": tid})
+
     def _add_epic_node(self, parent, ekey, e, s, expand=True):
         en = parent.add("# %s  %s" % (ekey, e.get("summary", "")),
                         data={"type": "epic", "id": ekey}, expand=expand)
-        # flat list of this epic's tasks, sorted needs-you -> finished; finished is dimmed.
-        tasks = [(tid, t) for tid, t in s["tasks"].items() if t["epic"] == ekey]
-        # primary: status hierarchy (ждут->в работе->на ревью->готово);
-        # secondary: most-recently-completed first within a group (recently-closed at the top)
-        tasks.sort(key=lambda it: (self.TASK_ORDER.get(fast_status(it[1]), 0), -(it[1].get("merged_at") or 0)))
+        tasks = self._sorted_tasks((tid, t) for tid, t in s["tasks"].items() if t["epic"] == ekey)
         for tid, t in tasks:
-            st = fast_status(t)
-            badge = "💬 " if (st == "review" and self._unseen(t)) else ""
-            row = "%s%s %s" % (badge, GLYPH.get(st, "?"), t["title"])
-            en.add_leaf("[dim]%s[/dim]" % row if st == "merged" else row,
-                        data={"type": "task", "id": tid})
+            self._add_task_leaf(en, tid, t)
         if not tasks:
             en.add_leaf("[dim](нет задач — n чтобы добавить)[/dim]", data=None)
         return en
+
+    def _add_loose_tasks(self, pn, pname, s):
+        """Epic-less tasks of a project, rendered directly under the project node (below epics)."""
+        lk = cc.loose_epic_key(pname)
+        loose = self._sorted_tasks((tid, t) for tid, t in s["tasks"].items() if t.get("epic") == lk)
+        for tid, t in loose:
+            self._add_task_leaf(pn, tid, t)
+        return bool(loose)
 
     @staticmethod
     def _node_key(data):
@@ -1052,11 +1070,13 @@ class CCApp(App):
                                    data={"type": "project", "id": pname},
                                    expand=(pkey not in self._collapsed))
                 epics = [(k, e) for k, e in s["epics"].items()
-                         if e["project"] == pname and not e.get("archived")]
+                         if e["project"] == pname and not e.get("archived") and not e.get("loose")]
                 for ekey, e in epics:
                     self._add_epic_node(pn, ekey, e, s, expand=(("epic:" + ekey) not in self._collapsed))
-                if not epics:
-                    pn.add_leaf("(no epics — press 'e' to add one)", data=None)
+                # epic-less tasks of this project, directly under it (below the epics)
+                had_loose = self._add_loose_tasks(pn, pname, s)
+                if not epics and not had_loose:
+                    pn.add_leaf("(no epics — 'e' to add one, or 'n' for a task without an epic)", data=None)
             orphans = cc._scan_orphans(s)
             if orphans:
                 on = tree.root.add("⚠️  Потеряшки на диске (%d) — U чтобы восстановить" % len(orphans),
@@ -1491,11 +1511,21 @@ class CCApp(App):
                              preset_key=data["key"], preset_summary=data.get("summary", "")),
                              self._task_created)
             return
+        # on a PROJECT node -> a task with NO epic (attaches to the project, MR -> master/main)
+        if data and data["type"] == "project":
+            pname = data["id"]
+            self.push_screen(NewTaskScreen(pname, jira_on=False, project=pname, loose=True), self._task_created)
+            return
         epic = self._current_epic()
         if not epic:
-            self.notify("select an epic (or its task) first", severity="error")
+            self.notify("select a project, epic, or task first", severity="error")
             return
-        proj = s["epics"].get(epic, {}).get("project")
+        ep = s["epics"].get(epic, {})
+        if ep.get("loose"):   # on a loose task -> another loose task in the same project
+            self.push_screen(NewTaskScreen(ep["project"], jira_on=False, project=ep["project"], loose=True),
+                             self._task_created)
+            return
+        proj = ep.get("project")
         jira_on = bool(s["projects"].get(proj, {}).get("jira", {}).get("token"))
         self.push_screen(NewTaskScreen(epic, jira_on=jira_on, project=proj), self._task_created)
 

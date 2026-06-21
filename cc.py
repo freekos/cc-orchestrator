@@ -543,6 +543,8 @@ def cmd_epic_ls(args):
     for key, e in s["epics"].items():
         if args.project and e["project"] != args.project:
             continue
+        if e.get("loose"):
+            continue   # hidden per-project container for epic-less tasks
         mode = e.get("mode") or ("targets" if e.get("targets") else "epic_branch")
         print("%s  [%s, %s]  %s" % (key, e["project"], mode, e.get("summary", "")))
         if mode == "epic_branch":
@@ -613,26 +615,57 @@ def _unique_tid(s, epic, slug):
         tid = base + "-" + str(i); i += 1
     return tid
 
+def loose_epic_key(project):
+    return project + "__loose"
+
+def ensure_loose_epic(s, project):
+    """A hidden per-project container for epic-LESS tasks. It's an ordinary epic with empty targets
+    (so target_for -> the repo default branch, i.e. MRs go straight to master/main) flagged loose=True.
+    Hidden from the tree (its tasks render directly under the project) and from `cc epic ls`. Lets a
+    project run on plain tasks with no Jira epic — the work attaches to the project and to main."""
+    key = loose_epic_key(project)
+    if key not in s["epics"]:
+        s["epics"][key] = {"project": project, "summary": "", "mode": "targets",
+                           "targets": {}, "loose": True}
+    return key
+
+def _unique_branch(s, slug):
+    """Plain `<slug>` branch for a loose task; suffix -2/-3… if another task already uses it."""
+    used = {t.get("branch") for t in s["tasks"].values()}
+    if slug not in used:
+        return slug
+    i = 2
+    while ("%s-%d" % (slug, i)) in used:
+        i += 1
+    return "%s-%d" % (slug, i)
+
 def cmd_task_add(args):
     s = load_state()
-    if args.epic not in s["epics"]:
-        die("unknown epic '%s'" % args.epic)
-    epic = s["epics"][args.epic]
+    # `args.epic` may be a real epic key OR a PROJECT name — the latter creates an epic-LESS task that
+    # attaches directly to the project and targets master/main (via a hidden loose container).
+    ekey = args.epic
+    if ekey not in s["epics"]:
+        if ekey in s["projects"]:
+            ekey = ensure_loose_epic(s, ekey)
+        else:
+            die("unknown epic or project '%s'" % args.epic)
+    epic = s["epics"][ekey]
+    loose = bool(epic.get("loose"))
     proj = s["projects"][epic["project"]]
     repos = args.repos.split(",") if args.repos else (epic.get("repos") or list(proj["repos"].keys()))
     for r in repos:
         if r not in proj["repos"]:
             die("repo '%s' not in project '%s'" % (r, epic["project"]))
     slug = slugify(args.title)
-    branch = "%s-%s" % (args.epic, slug)
-    tid = _unique_tid(s, args.epic, slug)
+    branch = _unique_branch(s, slug) if loose else ("%s-%s" % (ekey, slug))
+    tid = _unique_tid(s, ekey, slug)
     epic_mode = epic.get("mode") or ("targets" if epic.get("targets") else "epic_branch")
-    print("task '%s' under epic %s [%s] - provisioning %d repo(s) in parallel ..." % (
-        args.title, args.epic, epic_mode, len(repos)))
+    where = ("project %s (no epic) -> master/main" % epic["project"]) if loose else ("epic %s [%s]" % (ekey, epic_mode))
+    print("task '%s' under %s - provisioning %d repo(s) in parallel ..." % (args.title, where, len(repos)))
     from concurrent.futures import ThreadPoolExecutor
     with ThreadPoolExecutor(max_workers=min(8, max(1, len(repos)))) as exr:
         results = list(exr.map(
-            lambda r: _provision(args.epic, epic, proj, r, branch, slug, epic_mode, args.no_setup), repos))
+            lambda r: _provision(ekey, epic, proj, r, branch, slug, epic_mode, args.no_setup), repos))
     worktrees, base, skipped, order = {}, {}, [], []
     for (r, wt, tgt, err) in results:
         if err:
@@ -640,24 +673,27 @@ def cmd_task_add(args):
         worktrees[r] = wt; base[r] = tgt; order.append(r)
         print("  [%s] ready -> MR target %s" % (r, tgt))
     if not worktrees:
-        die("no usable repos (all skipped). Scope the epic: cc epic set %s --repos <a,b>" % args.epic)
+        hint = ("cc repo set %s <repo> --remote …" % epic["project"]) if loose else ("cc epic set %s --repos <a,b>" % ekey)
+        die("no usable repos (all skipped). %s" % hint)
     if skipped:
         print("  (skipped %d: %s)" % (len(skipped), ", ".join(skipped)))
     primary = order[0]
     task_dir = str(Path(worktrees[primary]).parent)   # cctui/<epic>/<slug>/ — repos are its subfolders
     repo_map = "\n".join("- %s -> %s" % (r, worktrees[r]) for r in order)
     epic_mem = (epic.get("memory") or "").strip()
-    claude_md = ("# Epic %s: %s\n\n%s\n\n## Repos available for THIS task (branch %s):\n%s\n\n"
+    header = ("# Task in project %s (no epic) -> MR to master/main" % epic["project"]) if loose \
+             else ("# Epic %s: %s" % (ekey, epic.get("summary", "")))
+    claude_md = ("%s\n\n%s\n\n## Repos available for THIS task (branch %s):\n%s\n\n"
                  "Touch ONLY the repos actually relevant to this task; leave the rest UNCHANGED "
                  "(cc opens a Merge Request only for repos you modify, so untouched repos cost nothing). "
                  "Do NOT run git — cc handles branches/commits/MRs.\n") % (
-                 args.epic, epic.get("summary", ""), epic_mem or "(no epic notes yet)", branch, repo_map)
+                 header, epic_mem or "(no epic notes yet)", branch, repo_map)
     try:
         (Path(task_dir) / "CLAUDE.md").write_text(claude_md)
     except Exception:
         pass
     log = STATE_DIR / ("%s.log" % tid)
-    s["tasks"][tid] = {"epic": args.epic, "title": args.title, "prompt": args.prompt,
+    s["tasks"][tid] = {"epic": ekey, "title": args.title, "prompt": args.prompt,
                        "repos": order, "branch": branch, "worktrees": worktrees, "base": base,
                        "primary": primary, "dir": task_dir, "claude_session": {}, "status": "running",
                        "mrs": {}, "log": str(log)}
@@ -690,21 +726,21 @@ def cmd_task_add(args):
         s = load_state(); s["tasks"][tid]["jira"] = args.jira; save_state(s)
         print("  linked to existing jira issue: %s" % args.jira)
         jira = proj.get("jira")
-        if jira and jira.get("token") and args.epic.split("-")[0] == jira.get("project_key"):
+        if jira and jira.get("token") and not loose and ekey.split("-")[0] == jira.get("project_key"):
             try:
                 cur = jira_issue_parent(jira, args.jira)
-                if cur != args.epic:
-                    jira_set_parent(jira, args.jira, args.epic)
+                if cur != ekey:
+                    jira_set_parent(jira, args.jira, ekey)
                     print("  jira: %s -> moved under epic %s (was %s)" % (
-                        args.jira, args.epic, cur or "no parent"))
+                        args.jira, ekey, cur or "no parent"))
             except Exception as ex:
                 print("  (jira reparent failed: %s)" % str(ex)[:80])
-    elif jira and jira.get("token") and not getattr(args, "no_jira", False):
+    elif jira and jira.get("token") and not loose and not getattr(args, "no_jira", False):
         try:
-            jk = jira_create_task(jira, args.epic, args.title, args.prompt)
+            jk = jira_create_task(jira, ekey, args.title, args.prompt)
             if jk:
                 s = load_state(); s["tasks"][tid]["jira"] = jk; save_state(s)
-                print("  jira task created: %s (under %s)" % (jk, args.epic))
+                print("  jira task created: %s (under %s)" % (jk, ekey))
         except Exception as ex:
             print("  (jira task not created: %s)" % str(ex)[:100])
     print("done: cc task open %s   |   cc task diff %s" % (tid, tid))
