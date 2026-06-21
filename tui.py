@@ -845,6 +845,60 @@ class EpicTargetsScreen(ModalScreen):
         self.dismiss(None)
 
 
+class ProjectTargetScreen(ModalScreen):
+    """Set per-repo MR target branch for a project's EPIC-LESS (loose) tasks — repo -> branch
+    (empty = the repo's default branch). What you see here is authoritative."""
+    CSS = """
+    ProjectTargetScreen { align: center middle; }
+    #tbox { width: 94; max-width: 95%; height: auto; max-height: 90%;
+            border: thick $accent; background: $surface; padding: 1 2; }
+    #tbox > Label { margin-bottom: 1; }
+    #tbody { height: auto; max-height: 22; overflow-y: auto; margin-bottom: 1; }
+    .trow { height: 3; }
+    .trow Label { width: 24; content-align: left middle; }
+    .trow Input { width: 1fr; }
+    #trbtn { height: auto; align-horizontal: right; }
+    #trbtn Button { margin: 0 0 0 2; min-width: 14; }
+    """
+    BINDINGS = [Binding("escape", "cancel", "Cancel")]
+
+    def __init__(self, project):
+        super().__init__()
+        self.project = project
+
+    def compose(self):
+        s = cc.load_state()
+        lk = cc.loose_epic_key(self.project)
+        targets = (s["epics"].get(lk, {}) or {}).get("targets") or {}
+        with Vertical(id="tbox"):
+            yield Label("[b]Куда льют MR задачи БЕЗ эпика[/b] — проект %s · repo → ветка" % self.project)
+            yield Label("[dim]пусто = дефолтная ветка репо; задаёшь ветку — новые задачи копятся в неё[/dim]")
+            with VerticalScroll(id="tbody"):
+                for r, ri in s["projects"][self.project]["repos"].items():
+                    with Horizontal(classes="trow"):
+                        yield Label(r)
+                        yield Input(value=targets.get(r, ""),
+                                    placeholder="default: %s" % ri.get("default_branch", "?"),
+                                    id="tgt__" + r)
+            with Horizontal(id="trbtn"):
+                yield Button("Cancel", id="cancel")
+                yield Button("Save", variant="success", id="ok")
+
+    def on_button_pressed(self, event):
+        if event.button.id == "cancel":
+            self.dismiss(None); return
+        s = cc.load_state()
+        pairs = {}
+        for r in s["projects"][self.project]["repos"]:
+            v = self.query_one("#tgt__" + r, Input).value.strip()
+            if v:
+                pairs[r] = v
+        self.dismiss({"targets": pairs})
+
+    def action_cancel(self):
+        self.dismiss(None)
+
+
 class CCApp(App):
     CSS = """
     Tree { width: 44%; border-right: solid $accent; }
@@ -1417,10 +1471,30 @@ class CCApp(App):
         self.push_screen(ReviewersScreen(proj))
 
     def action_targets(self):
+        data = self.current()
+        if data and data.get("type") == "project":   # project node -> MR target for epic-less tasks
+            proj = data["id"]
+            self.push_screen(ProjectTargetScreen(proj), lambda res: self._project_target_set(proj, res))
+            return
         ekey = self._current_epic()
         if not ekey:
-            self.notify("выбери эпик (или его задачу)", severity="error"); return
+            self.notify("выбери проект (MR-таргет задач без эпика) или эпик (его интеграционные ветки)",
+                        severity="error"); return
         self.push_screen(EpicTargetsScreen(ekey), lambda res: self._targets_set(ekey, res))
+
+    def _project_target_set(self, project, res):
+        if res is None:
+            return
+        pairs = res["targets"]
+        # the screen is authoritative: clear, then set whatever is filled in
+        subprocess.run([sys.executable, ENGINE, "project", "target", project, "--clear"], capture_output=True)
+        if pairs:
+            subprocess.run([sys.executable, ENGINE, "project", "target", project]
+                           + ["%s=%s" % (r, b) for r, b in pairs.items()], capture_output=True)
+            self.notify("MR-таргет задач без эпика для %s сохранён (%s)"
+                        % (project, ", ".join("%s→%s" % (r, b) for r, b in pairs.items())))
+        else:
+            self.notify("MR-таргет задач без эпика для %s сброшен на дефолтные ветки" % project)
 
     def _targets_set(self, ekey, res):
         if not res:
