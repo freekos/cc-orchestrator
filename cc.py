@@ -373,6 +373,15 @@ two execution modes** they want, and WAIT for their answer before doing anything
 ALWAYS present both and ask: "1 — фоновые сессии, или 2 — я строю на ветке для ревью?" Do not
 proceed until the user picks. (A truly trivial one-liner can be done directly — use judgement.)
 
+## Epic-less projects (work purely on tasks)
+If this project doesn't use epics, create tasks with the PROJECT as the first arg — no epic:
+  cc task add {project} "<title>" --prompt "<...>" [--manual] [--no-jira]
+These attach to the project and MR to each repo's default branch. To COLLECT them into an
+integration branch instead (e.g. one open "everything" MR's branch), set it once:
+  cc project target {project} <repo>=<branch>     # e.g. web=feature/api-integrations
+  cc project target {project}                     # show current   ·   --clear to revert to default
+New epic-less tasks then MR into that branch (existing tasks keep their original target).
+
 Status / visibility (both modes):
   cc epic ls {project}        # epics here       cc task diff <task-id>   # a task's diff
   cc task mrs <task-id>       # per-task state
@@ -399,6 +408,38 @@ def cmd_project_setup(args):
     print("setup chat dir: %s" % sdir)
     print("  open:  cd %s && claude --permission-mode auto --add-dir %s%s"
           % (shlex.quote(str(sdir)), shlex.quote(str(base)), chat_jira_flags(proj, args.project)))
+
+def cmd_project_target(args):
+    """Where epic-LESS (loose) tasks of this project send their MRs. Default = each repo's default
+    branch; set repo=branch to collect work into an integration branch instead (e.g. point web at the
+    branch behind an open 'collect everything' MR). Affects NEW loose tasks; existing ones keep the
+    target baked at creation. Stored on the project's hidden loose container."""
+    s = load_state()
+    proj = s["projects"].get(args.project) or die("unknown project '%s'" % args.project)
+    key = ensure_loose_epic(s, args.project)
+    e = s["epics"][key]
+    if args.clear:
+        e["targets"] = {}
+        save_state(s)
+        print("loose-task MR target очищен — задачи без эпика снова льют в дефолтную ветку репо")
+    elif args.spec:
+        targets = dict(e.get("targets") or {})
+        for pair in args.spec:
+            if "=" not in pair:
+                die("ожидается repo=branch, получено '%s'" % pair)
+            r, br = pair.split("=", 1)
+            if r not in proj["repos"]:
+                die("repo '%s' нет в проекте '%s' (repos: %s)" % (r, args.project, ", ".join(proj["repos"])))
+            targets[r] = br
+        e["targets"] = targets
+        save_state(s)
+        print("loose-task MR target обновлён")
+    cur = e.get("targets") or {}
+    print("MR-таргет задач БЕЗ эпика для '%s':" % args.project)
+    for r, ri in proj["repos"].items():
+        tgt = cur.get(r)
+        print("  %-12s -> %s" % (r, tgt if tgt else (ri.get("default_branch", "?") + "  (default)")))
+    print("(новые задачи без эпика льют MR сюда; существующие сохраняют свой таргет на момент создания)")
 
 def cmd_project_new(args):
     """Create a brand-new EMPTY project (the folder too), ready to fill with repos via `cc repo add`."""
@@ -2324,6 +2365,7 @@ def build_parser():
     a = pj.add_parser("add"); a.add_argument("path"); a.add_argument("name", nargs="?"); a.set_defaults(fn=cmd_project_add)
     a = pj.add_parser("new"); a.add_argument("name"); a.add_argument("path", nargs="?"); a.set_defaults(fn=cmd_project_new)
     a = pj.add_parser("setup"); a.add_argument("project"); a.set_defaults(fn=cmd_project_setup)
+    a = pj.add_parser("target"); a.add_argument("project"); a.add_argument("spec", nargs="*"); a.add_argument("--clear", action="store_true"); a.set_defaults(fn=cmd_project_target)
     pj.add_parser("ls").set_defaults(fn=cmd_project_ls)
     a = pj.add_parser("jira"); a.add_argument("project")
     a.add_argument("--site"); a.add_argument("--email"); a.add_argument("--token")

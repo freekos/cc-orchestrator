@@ -96,6 +96,30 @@ def test_unique_branch():
     assert cc._unique_branch(s, "fix-login") == "fix-login-3"  # base + -2 taken -> -3
 
 
+def test_project_target():
+    import types
+    st = {"projects": {"visco": {"repos": {"web": {"default_branch": "dev"}, "api": {"default_branch": "dev"}}}},
+          "epics": {}, "tasks": {}}
+    saved = (cc.load_state, cc.save_state)
+    cc.load_state = lambda: st
+    cc.save_state = lambda s: None
+    try:
+        # set web -> a collect branch; loose container is created and holds the target
+        cc.cmd_project_target(types.SimpleNamespace(project="visco", spec=["web=feature/api-integrations"], clear=False))
+        lk = cc.loose_epic_key("visco")
+        assert st["epics"][lk]["targets"] == {"web": "feature/api-integrations"}, st["epics"][lk]
+        # target_for now routes a loose web task there, api stays default
+        e = st["epics"][lk]; proj = st["projects"]["visco"]
+        assert cc.target_for(e, proj, "web") == "feature/api-integrations"
+        assert cc.target_for(e, proj, "api") == "dev"
+        # clear -> back to default
+        cc.cmd_project_target(types.SimpleNamespace(project="visco", spec=[], clear=True))
+        assert st["epics"][lk]["targets"] == {}
+        assert cc.target_for(st["epics"][lk], proj, "web") == "dev"
+    finally:
+        cc.load_state, cc.save_state = saved
+
+
 def test_jira_chat_setup():
     import shutil, tempfile
     d = tempfile.mkdtemp(prefix="cc-jcs-")
