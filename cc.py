@@ -352,23 +352,26 @@ Structure REAL work (the MVP, a feature, a bug) as an EPIC on the board with TAS
 silently build into main. After you and the user agree WHAT to build, you **MUST ASK which of
 two execution modes** they want, and WAIT for their answer before doing anything:
 
-  ▸ MODE 1 — parallel BACKGROUND sessions:
-    cc creates/uses the epic and dispatches each task to its OWN background agent (a real headless
-    `claude -p` in an isolated worktree). They actually run in parallel while you keep going; the
-    user reviews/merges each in cc tui.
-      cc epic add {project} <KEY> --summary "<area>"        (or reuse an existing epic)
-      cc task add <KEY> "<title>" --prompt "<what to do>" --no-jira [--repos r1,r2]
-    Each `task add` LAUNCHES the agent immediately (pid tracked, status "running") — not idle.
+  First decide GROUPING by the project: if it uses epics, group tasks under an epic; if it works
+  PURELY on tasks (no epic — e.g. a single-app project), create epic-LESS tasks with the PROJECT as
+  the first arg. The two modes below are orthogonal to grouping (each shows both forms).
 
-  ▸ MODE 2 — YOU build it on a review branch (no auto-merge to main):
-    You do the work in THIS session, isolated on the epic's branch, so the user can test / find
-    bugs / fix BEFORE deciding to merge. Tasks still show on the board for review.
-      cc epic add {project} <KEY> --summary "<area>"
-      cc task add <KEY> "<title>" --prompt "<plan>" --no-jira --manual   # board entry, NO bg agent
-    `--manual` makes the task + its worktree but spawns NO agent — YOU do the work in the task's
-    worktree (its dir is printed), run/test, commit. NEVER commit to main. When the epic is ready,
-    tell the user it's on its branch; THEY decide to merge epic -> main (in cc tui, or `cc epic mr`
-    once a remote is set).
+  ▸ MODE 1 — parallel BACKGROUND agents:
+    Each task → its OWN headless `claude -p` in an isolated worktree; they run in parallel while you
+    keep going; the user reviews/merges each in cc tui. Each `task add` LAUNCHES immediately.
+      epic project:  cc epic add {project} <KEY> --summary "<area>"   (or reuse an epic)
+                     cc task add <KEY> "<title>" --prompt "<what>" --no-jira [--repos r1,r2]
+      epic-less:     cc task add {project} "<title>" --prompt "<what>" --no-jira [--repos r1,r2]
+
+  ▸ MODE 2 — I build each task MYSELF on its branch for review (no auto-merge):
+    I do the work in THIS session on each TASK's own branch — never on a repo's default branch — so
+    the user can test / fix BEFORE merge. Tasks show on the board. Add --manual (board task + worktree,
+    NO bg agent — I do it; the worktree dir is printed; run/test/commit there):
+      epic project:  cc epic add {project} <KEY> --summary "<area>"
+                     cc task add <KEY> "<title>" --prompt "<plan>" --no-jira --manual
+      epic-less:     cc task add {project} "<title>" --prompt "<plan>" --no-jira --manual
+    Each task's MR targets its branch's base: the epic integration branch, or for epic-less the
+    `cc project target` collect branch (else the repo default). The user merges in cc tui.
 
 ALWAYS present both and ask: "1 — фоновые сессии, или 2 — я строю на ветке для ревью?" Do not
 proceed until the user picks. (A truly trivial one-liner can be done directly — use judgement.)
