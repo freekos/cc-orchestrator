@@ -399,6 +399,9 @@ to review and no isolated branch. Use it only for (a) work you did in THIS sessi
 with no remote yet (then "release" = a local merge to main, no prod). For team prod releases prefer
 the layered flow: task chats land work, then release per EPIC (`cc epic mr` -> merge -> deploy,
 respecting the release train) — never merge to main without the user's explicit OK.
+Whichever path: ACTUALIZE first (merge the latest `origin/<default>` into the branch so you ship on
+top of current main, not a stale base), and if the repo is versioned bump to a genuinely NEW version
+(never reuse an existing version/tag).
 
 ## Constraints
 - Propose, confirm, THEN build. Never pick a stack, restructure, or commit to main silently.
@@ -757,7 +760,11 @@ def cmd_task_add(args):
             "\n## Release (when the user says релиз / merge / залей)\n"
             "This task has NO epic — its MRs target master/main, so merging it IS a prod-bound release.\n"
             "- `cc task mrs %s` — show each repo's MR (the user reviews it).\n"
+            "- Before merging, ACTUALIZE: `git fetch origin <default>` + merge `origin/<default>` into the\n"
+            "  task branch (resolve conflicts) so you ship ON TOP of current master/main, not a stale base.\n"
             "- `cc task merge %s` — merge the OPEN MRs into master/main (`--dry-run` to preview).\n"
+            "- If the repo is versioned, bump to a genuinely NEW version (current version + latest `git tag`,\n"
+            "  increment, never reuse; verify the tag is free) and tag it.\n"
             "Merge ONLY on the user's explicit word — never merge to a default branch on your own. After the\n"
             "merge it is PROD-bound: deploy per the project's release process (release train — backend+mobile\n"
             "land on prod before web/admin; feature-flag-gated surfaces ship dark). Local-only repos with no\n"
@@ -1849,12 +1856,20 @@ with no open MR. This is "land the reviewed work"; the prod release below is a s
 Per repo — **only repos `cc epic plan` marked РЕЛИЗИТЬ** (NEVER disturb the user's working checkout —
 use a temp `git worktree` off the integration branch for the version bump):
 1. Confirm the integration branch is green on stage (CI) before releasing.
-2. Bump version (package.json / equivalent) on a release branch off the integration branch.
-3. MR integration -> main (reviewer = area lead); merge once the pipeline is green.
-4. Tag vX.Y.Z on main -> the tag pipeline runs the prod jobs.
-5. Play/await `Containerize Prod` + `Deploy ECS Prod` (GitLab), or `eas update --branch production` (Expo/mobile).
-6. New website routes (e.g. /loyalty): POST build-website-routes so they register on prod.
-7. Close the epic's Jira tasks + the epic -> Done.
+2. ACTUALIZE with prod FIRST: `git fetch origin <default>` then merge `origin/<default>` INTO the
+   integration branch and resolve conflicts — so you release ON TOP of the current master/main, never a
+   stale base. (Sanity: `git rev-list --count origin/<default>..<branch>` should be a small,
+   release-sized number — if it's thousands, the branch is on the wrong/unrelated base, STOP.) Re-run
+   stage CI after the merge if the base moved.
+3. Bump to a genuinely NEW version on a release branch off the (now-actualized) integration branch:
+   read the current version (package.json / equivalent) AND `git tag --sort=-v:refname | head`,
+   increment it (patch for fixes, minor for features) — NEVER reuse an existing version, and verify the
+   target tag `vX.Y.Z` does NOT already exist before tagging. Commit the bump.
+4. MR integration -> main (reviewer = area lead); merge once the pipeline is green.
+5. Tag the NEW vX.Y.Z on main -> the tag pipeline runs the prod jobs.
+6. Play/await `Containerize Prod` + `Deploy ECS Prod` (GitLab), or `eas update --branch production` (Expo/mobile).
+7. New website routes (e.g. /loyalty): POST build-website-routes so they register on prod.
+8. Close the epic's Jira tasks + the epic -> Done.
 
 ## Release train & safety (read before prod)
 - Backend has no API versioning: web/admin must not hit prod before backend+mobile. Release
