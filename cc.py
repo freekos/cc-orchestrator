@@ -1483,6 +1483,9 @@ def cmd_epic_mr(args):
     have_any = made = 0
     for r, ri in proj["repos"].items():
         rp = ri["path"]
+        # refresh the epic branch from the remote FIRST — a task MR merged into it lands on origin, and
+        # a stale local origin/<key> would read 0-ahead (so `M` wrongly says "no changes"). No-op if absent.
+        run(["git", "fetch", "origin", key], cwd=rp, check=False)
         if not (have_ref(rp, key) or have_ref(rp, "origin/" + key)):
             continue
         have_any += 1
@@ -1490,7 +1493,14 @@ def cmd_epic_mr(args):
             print("[%s] remote не задан — пропуск (`cc repo set %s %s --remote <slug>`)" % (r, e["project"], r))
             continue
         db = default_branch(rp)
-        ahead = _ahead_count(rp, key, db)
+        run(["git", "fetch", "origin", db], cwd=rp, check=False)   # fresh base, so ahead-count is accurate
+        # compare the REMOTE epic branch vs the REMOTE base — that's what the MR would contain. Tasks
+        # merge into origin/<key>, while the local <key> in this checkout is often stale; _ahead_count
+        # prefers the local branch, so use origin refs here explicitly.
+        bref = ("origin/" + key) if have_ref(rp, "origin/" + key) else key
+        baseref = ("origin/" + db) if have_ref(rp, "origin/" + db) else db
+        _out = run(["git", "rev-list", "--count", baseref + ".." + bref], cwd=rp, check=False).stdout.strip()
+        ahead = int(_out) if _out.isdigit() else 0
         if ahead == 0:
             # epic branch == master here: no task merged into it -> nothing to MR. Skip this repo.
             print("[%s] ветка эпика '%s' без изменений vs %s — пропуск (влей задачи в неё сначала)" % (r, key, db))
