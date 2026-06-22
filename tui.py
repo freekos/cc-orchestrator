@@ -16,7 +16,7 @@ import threading
 ENGINE = str(Path(__file__).parent / "cc.py")
 GLYPH = {"running": "🔵", "review": "🟡", "mr": "🟣", "merged": "✅", "idle": "⚪", "done": "✅"}
 LEGEND = ("🟡 ждёт тебя   🔵 агент работает   🟣 MR открыт   ✅ влито   ⚪ простаивает   "
-          "💬 новый ответ агента   ·   # эпик   ⚠️ потеряшки на диске (U — вернуть)")
+          "💬 новый ответ   ❓ ждёт твоего ответа   ·   # эпик   ⚠️ потеряшки (U — вернуть)")
 
 
 def fast_status(t):
@@ -1029,20 +1029,24 @@ class CCApp(App):
         # finishes surface. Runs on a daemon thread; the board stays small because finished work is
         # removed via "Готово и убрать с доски", so this isn't the per-focus git storm we killed.
         snap = cc.load_state()
-        new = {}
+        new, ni = {}, {}
         for tid, t in snap["tasks"].items():
             if self._closing:
                 return
-            pid = t.get("pid")
-            new[tid] = "running" if (pid and cc.pid_alive(pid)) else cc.task_status(t)
+            running = bool(t.get("pid") and cc.pid_alive(t["pid"]))
+            new[tid] = "running" if running else cc.task_status(t)
+            ni[tid] = None if running else cc.task_needs_input(t)   # only a finished agent can have left a question
         if self._closing:
             return
-        if all(snap["tasks"][tid].get("status") == st for tid, st in new.items()):
+        changed = (any(snap["tasks"][tid].get("status") != st for tid, st in new.items())
+                   or any((snap["tasks"][tid].get("needs_input") or None) != (v or None) for tid, v in ni.items()))
+        if not changed:
             return
         def apply(s):
             for tid, st in new.items():
                 if tid in s["tasks"]:
                     s["tasks"][tid]["status"] = st
+                    s["tasks"][tid]["needs_input"] = ni.get(tid)
         # best-effort: never block/starve a foreground `cc` command; retry next tick if busy
         if cc.mutate_try(apply):
             self._safe_build_tree()
@@ -1082,7 +1086,12 @@ class CCApp(App):
 
     def _add_task_leaf(self, parent, tid, t):
         st = fast_status(t)
-        badge = "💬 " if (st == "review" and self._unseen(t)) else ""
+        if t.get("needs_input") and self._unseen(t):
+            badge = "❓ "                                   # agent finished with a question for you
+        elif st == "review" and self._unseen(t):
+            badge = "💬 "                                   # new unreviewed output
+        else:
+            badge = ""
         row = "%s%s %s" % (badge, GLYPH.get(st, "?"), t["title"])
         parent.add_leaf("[dim]%s[/dim]" % row if st == "merged" else row,
                         data={"type": "task", "id": tid})
@@ -1303,7 +1312,11 @@ class CCApp(App):
         if data["type"] == "task" and data["id"] in s["tasks"]:
             t = s["tasks"][data["id"]]
             L = ["[b]%s[/b]   status=%s" % (t["title"], fast_status(t)),
-                 "epic: %s    branch: %s" % (t["epic"], t["branch"]), "", "repos -> target:"]
+                 "epic: %s    branch: %s" % (t["epic"], t["branch"])]
+            if t.get("needs_input"):
+                L += ["", "[bold yellow]❓ агент ждёт твоего ответа:[/bold yellow] %s" % t["needs_input"],
+                      "[dim]o — открыть чат и ответить (агент продолжит)[/dim]"]
+            L += ["", "repos -> target:"]
             for r in t["repos"]:
                 L.append("  %s -> %s" % (r, t["base"][r]))
                 if t["mrs"].get(r):

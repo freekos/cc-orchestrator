@@ -756,7 +756,15 @@ def cmd_task_add(args):
     full_prompt = (args.prompt
                    + "\n\n[cc] This task spans the repo worktrees below (branch %s). "
                      "Edit files ONLY inside these subfolders (your cwd is their parent):\n%s"
-                     "\nDo NOT run git; cc handles branches/commits/MRs." % (branch, repo_map))
+                     "\nDo NOT run git; cc handles branches/commits/MRs."
+                     "\n\n[cc] You run NON-INTERACTIVELY in the background — there is NO ONE to answer "
+                     "questions right now. NEVER call AskUserQuestion and never wait for input. If "
+                     "something is ambiguous, pick the most reasonable option, STATE the assumption in "
+                     "one line, and KEEP GOING until the task is fully done. Only if you genuinely "
+                     "cannot finish without the user's decision: do everything you safely can first, "
+                     "then make the VERY LAST line of your output exactly `[cc-needs-input] <one-line "
+                     "question + your recommended default>` (nothing after it). The user sees that on "
+                     "the board (❓) and answers when they open the chat." % (branch, repo_map))
     STATE_DIR.mkdir(parents=True, exist_ok=True)
     if getattr(args, "manual", False):
         # MODE 2: no background agent — the command-center chat (or the user) does the work itself
@@ -827,6 +835,21 @@ def pid_alive(pid):
         return True
     except Exception:
         return False
+
+def task_needs_input(t):
+    """The background agent's question, if it finished by emitting `[cc-needs-input] <q>` as its last
+    line (it can't pause to ask in headless -p). Reads only the log TAIL. Returns the text or None."""
+    log = t.get("log")
+    if not (log and os.path.exists(log)):
+        return None
+    try:
+        with open(log, "rb") as f:
+            f.seek(0, 2); size = f.tell(); f.seek(max(0, size - 4096))
+            tail = f.read().decode("utf-8", "replace")
+    except Exception:
+        return None
+    hits = re.findall(r"\[cc-needs-input\]\s*(.*)", tail)
+    return (hits[-1].strip() or "агент ждёт твоего ответа") if hits else None
 
 def task_status(t):
     """Derive status from reality:

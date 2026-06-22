@@ -2,6 +2,21 @@ import sys, types, pathlib
 sys.path.insert(0, str(pathlib.Path(__file__).parent))
 import cc
 
+
+def test_task_needs_input():
+    import os, tempfile
+    d = tempfile.mkdtemp(prefix="cc-ni-")
+    try:
+        log = os.path.join(d, "t.log")
+        open(log, "w").write("did stuff...\nmore work\n[cc-needs-input] Какой порт использовать для web?\n")
+        assert cc.task_needs_input({"log": log}) == "Какой порт использовать для web?"
+        open(log, "w").write("finished cleanly, no questions\n")
+        assert cc.task_needs_input({"log": log}) is None
+        assert cc.task_needs_input({"log": os.path.join(d, "nope.log")}) is None
+        assert cc.task_needs_input({}) is None
+    finally:
+        import shutil; shutil.rmtree(d, ignore_errors=True)
+
 def test_jira_move_visco_miscategorized():
     # visco footgun: review/qa statuses miscategorized as 'new', NO 'new' status actually named
     # like to-do. `todo` must REFUSE (don't move to a wrong status — this is the VIS-117 prevention).
