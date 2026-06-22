@@ -393,6 +393,13 @@ Status / visibility (both modes):
   cc task mrs <task-id>       # per-task state
 The user sees every epic/task live in cc tui and reviews/merges there.
 
+## Releasing from THIS project chat
+Releasing straight from here (merge -> main + deploy) is the LESS-SAFE path: there's no per-repo MR
+to review and no isolated branch. Use it only for (a) work you did in THIS session, or (b) greenfield
+with no remote yet (then "release" = a local merge to main, no prod). For team prod releases prefer
+the layered flow: task chats land work, then release per EPIC (`cc epic mr` -> merge -> deploy,
+respecting the release train) — never merge to main without the user's explicit OK.
+
 ## Constraints
 - Propose, confirm, THEN build. Never pick a stack, restructure, or commit to main silently.
 - Real work = epic + tasks on the board; ALWAYS ask mode 1 vs 2 first.
@@ -745,6 +752,25 @@ def cmd_task_add(args):
                  "(cc opens a Merge Request only for repos you modify, so untouched repos cost nothing). "
                  "Do NOT run git — cc handles branches/commits/MRs.\n") % (
                  header, epic_mem or "(no epic notes yet)", branch, repo_map)
+    if loose:
+        claude_md += (
+            "\n## Release (when the user says релиз / merge / залей)\n"
+            "This task has NO epic — its MRs target master/main, so merging it IS a prod-bound release.\n"
+            "- `cc task mrs %s` — show each repo's MR (the user reviews it).\n"
+            "- `cc task merge %s` — merge the OPEN MRs into master/main (`--dry-run` to preview).\n"
+            "Merge ONLY on the user's explicit word — never merge to a default branch on your own. After the\n"
+            "merge it is PROD-bound: deploy per the project's release process (release train — backend+mobile\n"
+            "land on prod before web/admin; feature-flag-gated surfaces ship dark). Local-only repos with no\n"
+            "remote just merge locally (no prod).\n") % (tid, tid)
+    else:
+        claude_md += (
+            "\n## Release (when the user says релиз / merge / залей)\n"
+            "This is an EPIC task — its MRs target the epic's branch (%s), NOT master/main. Merging it only\n"
+            "LANDS the work INTO the epic; it is NOT a prod release.\n"
+            "- `cc task mrs %s` — show the MR (the user reviews it).\n"
+            "- `cc task merge %s` — merge it into the epic branch, on the user's word.\n"
+            "The PROD release of the WHOLE epic happens in the EPIC chat (`cc epic mr` → merge → deploy,\n"
+            "respecting the release train) — not from this task chat.\n") % (ekey, tid, tid)
     claude_md += jira_chat_setup(task_dir, proj, epic["project"])   # project-scoped Jira + block the MCP
     try:
         (Path(task_dir) / "CLAUDE.md").write_text(claude_md)
@@ -1790,6 +1816,13 @@ RELEASE_RUNBOOK = """# Epic %s: %s — release & coordination chat
 
 You drive RELEASES and cross-repo coordination for THIS epic. The repos are added with
 --add-dir (their MAIN checkouts). cc does NOT own git here — you run git/glab/eas yourself.
+
+## Release levels (the model)
+task -> epic -> prod. A TASK's MR lands its work INTO the epic branch (merging a task is NOT a prod
+release). The EPIC is the prod RELEASE unit: once the needed task MRs are in the epic branch, you MR
+the epic branch -> master/main and deploy. Merge task MRs with `cc epic merge <KEY>` (all) or
+`cc task merge <tid>` (one); the user reviews the MRs and you merge on their word — never to master
+without an explicit OK.
 
 ## Repos & integration branches (release source / MR target)
 %s
