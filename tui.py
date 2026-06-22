@@ -1204,7 +1204,13 @@ class CCApp(App):
 
     def on_tree_node_highlighted(self, event):
         data = event.node.data if event.node else None
-        self.show_detail(data)
+        try:
+            self.show_detail(data)            # a detail-render error must NEVER crash the whole TUI
+        except Exception as ex:
+            try:
+                self.query_one("#detail", Static).update("[red]ошибка отрисовки детали:[/red] %s" % ex)
+            except Exception:
+                pass
         # First time you rest on a task, fetch its working-tree changes ONCE (debounced, off-thread)
         # and cache them. We never re-shell git on subsequent focuses — only `r` re-fetches. This is
         # what used to lag: git status ran for every repo on every cursor move across the tree.
@@ -1375,7 +1381,7 @@ class CCApp(App):
             p = s["projects"][data["id"]]
             j = p.get("jira", {})
             jira_line = ("on — %s @ %s" % (j.get("project_key", "?"), j.get("site", "?"))) if j.get("token") else "off"
-            L = ["[b]project %s[/b]  (%s, %d repos)" % (data["id"], p["kind"], len(p["repos"])),
+            L = ["[b]project %s[/b]  (%s, %d repos)" % (data["id"], p.get("kind", "—"), len(p.get("repos", {}))),
                  "assignee: %s    Jira: %s" % (p.get("default_assignee") or "-", jira_line),
                  "", "repos (reviewer):"]
             L += ["repos — deploy / reviewer:"]
