@@ -2,6 +2,34 @@ import sys, types, pathlib
 sys.path.insert(0, str(pathlib.Path(__file__).parent))
 import cc
 
+def test_jira_move_visco_miscategorized():
+    # visco footgun: review/qa statuses miscategorized as 'new', NO 'new' status actually named
+    # like to-do. `todo` must REFUSE (don't move to a wrong status — this is the VIS-117 prevention).
+    TRS = {"transitions": [
+        {"id": "41", "name": "Готово к проверке", "to": {"name": "Готово к проверке", "statusCategory": {"key": "new"}}},
+        {"id": "42", "name": "Ready for QA", "to": {"name": "Ready for QA", "statusCategory": {"key": "new"}}},
+        {"id": "31", "name": "Готово", "to": {"name": "Готово", "statusCategory": {"key": "done"}}},
+    ]}
+    posted = {}
+    def fake(cfg, method, path, body=None):
+        if method == "GET" and path.endswith("/transitions"):
+            return TRS
+        if method == "POST" and "/transitions" in path:
+            posted["id"] = body["transition"]["id"]; return {}
+        return {}
+    saved = cc.jira_req
+    cc.jira_req = fake
+    try:
+        ok, info = cc.jira_move({}, "VIS-1", "todo")          # no to-do-NAMED 'new' status -> refuse, no move
+        assert not ok and not posted, (ok, info, posted)
+        ok, info = cc.jira_move({}, "VIS-1", "Готово к проверке")  # exact name still works (deterministic)
+        assert ok and posted.get("id") == "41", (ok, posted)
+        posted.clear(); ok, info = cc.jira_move({}, "VIS-1", "готово")  # 'done' token -> the real Готово
+        assert ok and posted.get("id") == "31", (ok, posted)   # NOT "Готово к проверке" (that's category new)
+    finally:
+        cc.jira_req = saved
+
+
 def test_jira_move():
     TRS = {"transitions": [
         {"id": "11", "name": "К выполнению", "to": {"name": "К выполнению", "statusCategory": {"key": "new"}}},

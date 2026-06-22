@@ -2219,26 +2219,51 @@ def jira_transitions(cfg, key):
                     "to_cat": ((to.get("statusCategory") or {}).get("key") or "").lower()})
     return out
 
-# free-text -> Jira statusCategory, so `move <KEY> todo` works without knowing exact status names
-_CAT_KW = {"todo": "new", "to do": "new", "к выполнению": "new", "new": "new", "backlog": "new",
-           "doing": "indeterminate", "in progress": "indeterminate", "в работе": "indeterminate",
-           "wip": "indeterminate", "done": "done", "готово": "done", "complete": "done"}
+# keyword -> (statusCategory, name-tokens). A keyword matches a transition ONLY if its target status
+# is in that category AND its NAME contains one of the tokens. The name requirement matters because a
+# project may MIScategorize statuses (visco puts "Готово к проверке"/"in test" in `new`); matching by
+# category alone could silently move an issue to a semantically-wrong status. Use an exact name to be sure.
+_KW = {
+    "todo": ("new", ("к выполнению", "to do", "todo", "backlog", "новая")),
+    "to do": ("new", ("к выполнению", "to do", "todo", "backlog", "новая")),
+    "к выполнению": ("new", ("к выполнению", "to do", "todo", "backlog", "новая")),
+    "backlog": ("new", ("backlog", "бэклог", "к выполнению")),
+    "doing": ("indeterminate", ("в работе", "in progress", "doing", "progress", "wip")),
+    "in progress": ("indeterminate", ("в работе", "in progress", "doing", "progress", "wip")),
+    "в работе": ("indeterminate", ("в работе", "in progress", "doing", "progress", "wip")),
+    "wip": ("indeterminate", ("в работе", "in progress", "doing", "progress", "wip")),
+    "done": ("done", ("готово", "done", "complete", "выполнено", "closed", "завершен")),
+    "готово": ("done", ("готово", "done", "complete", "выполнено", "closed", "завершен")),
+    "complete": ("done", ("готово", "done", "complete", "выполнено", "closed", "завершен")),
+}
 
 def jira_move(cfg, key, target):
-    """Transition issue to `target` (a status NAME, case-insensitive, or a category keyword like
-    todo/doing/done). Picks a matching transition AVAILABLE from the current status. (ok, info).
-    Backward moves work iff the workflow allows them — else we report what IS reachable."""
+    """Transition issue to `target` — a status NAME (case-insensitive, EXACT) or a keyword
+    (todo/doing/done/…). Only transitions AVAILABLE from the current status are considered; backward
+    moves work iff the workflow allows them. EXACT NAME is deterministic and always preferred. A
+    keyword resolves to a transition whose target is in the keyword's category AND whose NAME matches
+    a token — never by category alone (a miscategorized status would be a footgun). If a keyword/
+    substring matches 0 or >1 transitions, we REFUSE and ask for an exact name. (ok, info)."""
     trs = jira_transitions(cfg, key)
     if not trs:
         return (False, "нет доступных переходов")
     tl = (target or "").strip().lower()
-    cat = _CAT_KW.get(tl)
-    pick = next((t for t in trs if t["to_name"].strip().lower() == tl), None)          # exact status name
-    pick = pick or (next((t for t in trs if t["to_cat"] == cat), None) if cat else None)  # category keyword
-    pick = pick or next((t for t in trs if tl and tl in t["to_name"].lower()), None)    # substring
+    avail = ", ".join(t["to_name"] for t in trs)
+    pick = next((t for t in trs if t["to_name"].strip().lower() == tl), None)   # 1) exact status name
     if not pick:
-        return (False, "нет перехода в '%s' из текущего статуса (доступно: %s)"
-                % (target, ", ".join(t["to_name"] for t in trs)))
+        kw = _KW.get(tl)
+        if kw:
+            catk, tokens = kw                                                   # 2) keyword: category + name token
+            cands = [t for t in trs if t["to_cat"] == catk
+                     and any(tok in t["to_name"].lower() for tok in tokens)]
+        else:
+            cands = [t for t in trs if tl and tl in t["to_name"].lower()]       # 3) name substring
+        if len(cands) > 1:
+            return (False, "'%s' неоднозначно — подходят: %s. Укажи точное имя статуса."
+                    % (target, ", ".join(t["to_name"] for t in cands)))
+        pick = cands[0] if cands else None
+    if not pick:
+        return (False, "нет перехода в '%s' из текущего статуса (доступно: %s)" % (target, avail))
     try:
         jira_req(cfg, "POST", "/issue/%s/transitions" % key, {"transition": {"id": pick["id"]}})
         return (True, pick["to_name"])
