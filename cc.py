@@ -241,7 +241,10 @@ def repo_info(p):
     m = re.search(r"[:/]([^/]+(?:/[^/]+)+)$", clean)
     remote = m.group(1) if m else clean
     provider = "gitlab" if "gitlab" in url else ("github" if "github" in url else "unknown")
-    db = git(["symbolic-ref", "--short", "HEAD"], cwd=p, check=False).stdout.strip() or "main"
+    # the repo's TRUE default branch (origin/HEAD), NOT whatever branch is checked out now — capturing
+    # the current branch made tasks base off random feature branches (e.g. invictusgo on
+    # `feat-add-website-source`) and produce MRs carrying the whole unrelated history.
+    db = default_branch(p)
     setup, run_cmd = detect_setup_run(p)
     return {"path": str(p), "provider": provider, "remote": remote, "default_branch": db,
             "setup": setup, "run": run_cmd, "reviewer": ""}
@@ -1325,6 +1328,7 @@ def cmd_task_mr(args):
     epic = s["epics"][t["epic"]]
     proj = s["projects"][epic["project"]]
     epic_mode = epic.get("mode") or ("targets" if epic.get("targets") else "epic_branch")
+    tag = "" if epic.get("loose") else "[%s] " % t["epic"]   # epic-less tasks: no internal "[<key>__loose]" prefix in the MR title
     assignee = proj.get("default_assignee") or glab_user()
     any_real = False
     for r in t["repos"]:
@@ -1344,7 +1348,7 @@ def cmd_task_mr(args):
             print("[%s] no changes vs %s - skipped" % (r, cmp_base))
             continue
         lead = ri.get("reviewer", "")
-        title = "[%s] %s" % (t["epic"], t["title"])
+        title = tag + t["title"]
         push = ["git", "push", "--no-verify", "-u", "origin", branch]
         if args.dry_run:
             print("[%s] DRY-RUN: %s -> %s | title=%r reviewer=%s assignee=%s label=%s" % (
@@ -1385,7 +1389,7 @@ def cmd_task_mr(args):
         else:
             print("[%s] MR-текст через claude (CLAUDE.md репо) ..." % r)
             ai_title, mr_desc = gen_mr_text(wt, cmp_ref, t["title"], fb_desc)
-            mr_title = "[%s] %s" % (t["epic"], ai_title)
+            mr_title = tag + ai_title
         mr_desc += "\n\n_MR by cc — epic %s_" % t["epic"]
         glab_cmd = ["glab", "mr", "create", "-R", ri["remote"],
                     "--source-branch", branch, "--target-branch", target,
@@ -1910,9 +1914,11 @@ def cmd_repo_set(args):
         if args.remote:
             r["provider"] = ("gitlab" if "gitlab" in args.remote
                             else "github" if "github" in args.remote else r.get("provider", "unknown"))
+    if getattr(args, "default_branch", None):
+        r["default_branch"] = args.default_branch
     save_state(s)
-    print("%s/%s  remote=%r  run=%r  reviewer=%r" % (
-        args.project, args.repo, r.get("remote", ""), r.get("run", ""), r.get("reviewer", "")))
+    print("%s/%s  remote=%r  default_branch=%r  run=%r  reviewer=%r" % (
+        args.project, args.repo, r.get("remote", ""), r.get("default_branch", ""), r.get("run", ""), r.get("reviewer", "")))
 
 def cmd_repo_ls(args):
     s = load_state()
@@ -2564,7 +2570,8 @@ def build_parser():
     g.add_argument("--new", action="store_true"); g.add_argument("--clone"); g.add_argument("--path")
     a.add_argument("--remote"); a.add_argument("--run"); a.set_defaults(fn=cmd_repo_add)
     a = rp_.add_parser("set"); a.add_argument("project"); a.add_argument("repo")
-    a.add_argument("--setup"); a.add_argument("--run"); a.add_argument("--reviewer"); a.add_argument("--remote"); a.set_defaults(fn=cmd_repo_set)
+    a.add_argument("--setup"); a.add_argument("--run"); a.add_argument("--reviewer"); a.add_argument("--remote")
+    a.add_argument("--default-branch", dest="default_branch"); a.set_defaults(fn=cmd_repo_set)
     a = rp_.add_parser("ls"); a.add_argument("project"); a.set_defaults(fn=cmd_repo_ls)
     a = rp_.add_parser("members"); a.add_argument("project"); a.add_argument("repo"); a.set_defaults(fn=cmd_repo_members)
 
