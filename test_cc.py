@@ -1,6 +1,9 @@
-import sys, types, pathlib
+import sys, types, pathlib, tempfile
 sys.path.insert(0, str(pathlib.Path(__file__).parent))
 import cc
+# Process-wide isolation: many tests exercise audit()-instrumented functions (jira_move, load_state
+# self-heal, …). Point the audit log at a throwaway temp file so NO test ever writes ~/.cc/audit.log.
+cc.AUDIT_FILE = pathlib.Path(tempfile.mkdtemp(prefix="cc-audit-run-")) / "audit.log"
 
 
 def test_task_needs_input():
@@ -330,6 +333,84 @@ def test_valid_state():
     assert cc._valid_state({"projects": {}, "epics": {}, "tasks": {}})
     assert not cc._valid_state({"projects": {}, "epics": {}})       # missing tasks
     assert not cc._valid_state([])                                  # not a dict
+
+
+def _audit_sandbox():
+    """Redirect cc.AUDIT_FILE to a fresh temp file so audit tests never touch ~/.cc/audit.log."""
+    import tempfile
+    saved = cc.AUDIT_FILE
+    cc.AUDIT_FILE = pathlib.Path(tempfile.mkdtemp(prefix="cc-audit-")) / "audit.log"
+    return saved
+
+
+def test_audit_append_and_read():
+    import shutil
+    saved = _audit_sandbox()
+    try:
+        cc.audit("task.add", task="E-1", epic="E", repos=["web", "api"], skipped=[])
+        cc.audit("task.merge", task="E-1", repo="web", mr=42, base="main")
+        recs = cc.read_audit()
+        assert len(recs) == 2
+        assert recs[0]["action"] == "task.merge"                    # newest first
+        assert recs[0]["mr"] == 42
+        assert recs[1]["repos"] == ["web", "api"]
+        assert "skipped" not in recs[1]                             # empty values dropped
+        assert all("ts" in r for r in recs)
+    finally:
+        shutil.rmtree(cc.AUDIT_FILE.parent, ignore_errors=True); cc.AUDIT_FILE = saved
+
+
+def test_audit_filters():
+    import shutil, time
+    saved = _audit_sandbox()
+    try:
+        cc.audit("task.merge", task="A", epic="E1", repo="web")
+        cc.audit("task.merge", task="B", epic="E2", repo="api")
+        cc.audit("jira.transition", key="IK-9", to="Done")
+        assert [r["task"] for r in cc.read_audit(task="A")] == ["A"]
+        assert [r["epic"] for r in cc.read_audit(epic="E2")] == ["E2"]
+        assert len(cc.read_audit(action="jira.transition")) == 1
+        assert cc.read_audit(since=time.time() + 1000) == []        # nothing newer than far future
+    finally:
+        shutil.rmtree(cc.AUDIT_FILE.parent, ignore_errors=True); cc.AUDIT_FILE = saved
+
+
+def test_audit_never_raises_on_unwritable():
+    # logging must be best-effort: an unwritable path can't blow up a real git/jira action.
+    saved = cc.AUDIT_FILE
+    cc.AUDIT_FILE = pathlib.Path("/dev/null/nope/audit.log")        # parent can't be created
+    try:
+        cc.audit("task.add", task="x")          # must not raise
+        assert cc.read_audit() == []            # unreadable -> empty, not crash
+    finally:
+        cc.AUDIT_FILE = saved
+
+
+def test_audit_trim_keeps_newest():
+    import shutil
+    saved = _audit_sandbox()
+    saved_keep, saved_max = cc._AUDIT_KEEP, cc._AUDIT_MAX
+    cc._AUDIT_KEEP, cc._AUDIT_MAX = 5, 1        # force a trim on every append past 1 byte
+    try:
+        for i in range(20):
+            cc.audit("tick", count=i)
+        recs = cc.read_audit(limit=999)
+        assert len(recs) <= 5, len(recs)
+        assert recs[0]["count"] == 19           # newest survived the trim
+    finally:
+        cc._AUDIT_KEEP, cc._AUDIT_MAX = saved_keep, saved_max
+        shutil.rmtree(cc.AUDIT_FILE.parent, ignore_errors=True); cc.AUDIT_FILE = saved
+
+
+def test_cmd_log_smoke():
+    import shutil
+    saved = _audit_sandbox()
+    try:
+        cc.audit("task.add", task="E-1", epic="E", repos=["web"])
+        cc.cmd_log(types.SimpleNamespace(task=None, epic=None, action=None, today=False, n=50))
+        cc.cmd_log(types.SimpleNamespace(task="nope", epic=None, action=None, today=False, n=50))  # empty -> no crash
+    finally:
+        shutil.rmtree(cc.AUDIT_FILE.parent, ignore_errors=True); cc.AUDIT_FILE = saved
 
 
 if __name__ == "__main__":

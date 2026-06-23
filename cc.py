@@ -58,6 +58,7 @@ def load_state():
                 shutil.copy2(str(bk), STATE_FILE)   # restore the good snapshot in place
             except Exception:
                 pass
+            audit("state.restore", detail=bk.name, reason="corrupt-state")
             sys.stderr.write("⚠️ ~/.cc/state.json был повреждён (%s) — восстановлен из бэкапа %s\n"
                              % (str(e)[:60], bk.name))
             return data
@@ -98,6 +99,69 @@ def _newest_valid_backup():
     except Exception:
         pass
     return None
+
+# ----------------------------- audit timeline -----------------------------
+AUDIT_FILE = STATE_DIR / "audit.log"
+_AUDIT_MAX = 4_000_000          # ~4MB; past that, trim to the newest _AUDIT_KEEP lines
+_AUDIT_KEEP = 3000
+
+def audit(action, **fields):
+    """Append one record to ~/.cc/audit.log — the 'what happened' timeline (JSONL, append-only, so it
+    can't tear like state.json could). BEST-EFFORT: never raises, so a logging hiccup can't break a
+    real git/jira action. Never pass secrets (no tokens) — these are plain, readable history lines."""
+    try:
+        STATE_DIR.mkdir(parents=True, exist_ok=True)
+        rec = {"ts": int(time.time()), "action": action}
+        for k, v in fields.items():
+            if v not in (None, [], {}, ""):
+                rec[k] = v
+        new = not AUDIT_FILE.exists()
+        with open(AUDIT_FILE, "a", encoding="utf-8") as f:
+            f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+        if new:
+            try:
+                os.chmod(AUDIT_FILE, 0o600)
+            except OSError:
+                pass
+        if AUDIT_FILE.stat().st_size > _AUDIT_MAX:
+            _trim_audit()
+    except Exception:
+        pass
+
+def _trim_audit():
+    """Keep the log bounded: rewrite (atomically) with only the newest _AUDIT_KEEP lines."""
+    try:
+        lines = AUDIT_FILE.read_text(encoding="utf-8").splitlines()[-_AUDIT_KEEP:]
+        tmp = AUDIT_FILE.with_name(AUDIT_FILE.name + ".tmp.%d" % os.getpid())
+        tmp.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        os.replace(tmp, AUDIT_FILE)
+    except Exception:
+        pass
+
+def read_audit(task=None, epic=None, since=None, action=None, limit=300):
+    """Timeline records, NEWEST first, optionally filtered by task/epic/action/since(epoch seconds)."""
+    recs = []
+    try:
+        for ln in AUDIT_FILE.read_text(encoding="utf-8").splitlines():
+            try:
+                r = json.loads(ln)
+            except Exception:
+                continue
+            if task and r.get("task") != task:
+                continue
+            if epic and r.get("epic") != epic:
+                continue
+            if action and r.get("action") != action:
+                continue
+            if since and r.get("ts", 0) < since:
+                continue
+            recs.append(r)
+    except FileNotFoundError:
+        return []
+    except Exception:
+        return []
+    recs.reverse()
+    return recs[:limit]
 
 def save_state(s):
     """Atomic write (tmp + os.replace) so concurrent readers never see a torn file.
@@ -824,6 +888,7 @@ def cmd_task_add(args):
                        "primary": primary, "dir": task_dir, "claude_session": {}, "status": "running",
                        "mrs": {}, "log": str(log), "skipped": skipped}
     save_state(s)
+    audit("task.add", task=tid, epic=ekey, repos=order, branch=branch, title=title, skipped=skipped)
     full_prompt = (args.prompt
                    + "\n\n[cc] This task spans the repo worktrees below (branch %s). "
                      "Edit files ONLY inside these subfolders (your cwd is their parent):\n%s"
@@ -1092,7 +1157,7 @@ def cmd_task_mrs(args):
         print("\n%d merged, %d still open" % (merged, open_))
 
 
-def _task_merge_pass(t, proj, dry, squash):
+def _task_merge_pass(t, proj, dry, squash, tid=None):
     """Merge the OPEN MR of each repo of task `t` (skip repos with no open MR). Prints per repo,
     returns {merged, failed, skipped}. Repos without changes simply have no open MR -> skipped."""
     branch = t["branch"]
@@ -1110,6 +1175,7 @@ def _task_merge_pass(t, proj, dry, squash):
         ok, msg = merge_mr(ri["remote"], iid, ri["path"], squash=squash)
         if ok:
             print("  [%s] merged !%s  (%s → %s)" % (r, iid, branch, tgt)); merged += 1
+            audit("task.merge", task=tid, epic=t.get("epic"), repo=r, mr=iid, base=tgt, branch=branch)
         else:
             print("  [%s] FAILED !%s: %s" % (r, iid, msg)); failed += 1
     return {"merged": merged, "failed": failed, "skipped": skipped}
@@ -1129,7 +1195,7 @@ def cmd_task_merge(args):
     t = s["tasks"].get(args.task) or die("unknown task '%s'" % args.task)
     proj = s["projects"][s["epics"][t["epic"]]["project"]]
     print("merge task %s (branch %s)%s" % (args.task, t["branch"], "  [DRY-RUN]" if args.dry_run else ""))
-    res = _task_merge_pass(t, proj, args.dry_run, args.squash)
+    res = _task_merge_pass(t, proj, args.dry_run, args.squash, tid=args.task)
     print("  -> %d merged, %d failed, %d skipped" % (res["merged"], res["failed"], res["skipped"]))
     if not args.dry_run and res["merged"]:
         print("  refreshing MR state …")
@@ -1600,6 +1666,7 @@ def cmd_epic_mr(args):
         e.setdefault("mrs", {})[r] = url
         print("[%s] epic MR -> %s  (%d commit(s))" % (r, url, ahead))
         made += 1
+        audit("epic.mr", epic=args.key, repo=r, base=db, url=url)
     if made and not args.dry_run:
         save_state(s)
     if not have_any:
@@ -1698,7 +1765,7 @@ def cmd_epic_merge(args):
         if t.get("merged"):
             print("[%s] уже влита — skip" % tid); continue
         print("[%s] %s" % (tid, t.get("title", "")))
-        res = _task_merge_pass(t, proj, args.dry_run, args.squash)
+        res = _task_merge_pass(t, proj, args.dry_run, args.squash, tid=tid)
         for k in total:
             total[k] += res[k]
         if not args.dry_run and res["merged"]:
@@ -2000,6 +2067,9 @@ def cmd_repo_set(args):
     if getattr(args, "default_branch", None):
         r["default_branch"] = args.default_branch
     save_state(s)
+    audit("repo.set", project=args.project, repo=args.repo,
+          default_branch=(args.default_branch if getattr(args, "default_branch", None) else None),
+          remote=(args.remote if getattr(args, "remote", None) is not None else None))
     print("%s/%s  remote=%r  default_branch=%r  run=%r  reviewer=%r" % (
         args.project, args.repo, r.get("remote", ""), r.get("default_branch", ""), r.get("run", ""), r.get("reviewer", "")))
 
@@ -2157,7 +2227,9 @@ def jira_transition_done(cfg, key):
         return (False, "no Done transition from current status")
     try:
         jira_req(cfg, "POST", "/issue/%s/transitions" % key, {"transition": {"id": t["id"]}})
-        return (True, (t.get("to") or {}).get("name", "Done"))
+        nm = (t.get("to") or {}).get("name", "Done")
+        audit("jira.transition", key=key, to=nm)
+        return (True, nm)
     except Exception as e:
         return (False, str(e)[:50])
 
@@ -2388,6 +2460,7 @@ def jira_move(cfg, key, target):
         return (False, "нет перехода в '%s' из текущего статуса (доступно: %s)" % (target, avail))
     try:
         jira_req(cfg, "POST", "/issue/%s/transitions" % key, {"transition": {"id": pick["id"]}})
+        audit("jira.transition", key=key, to=pick["to_name"])
         return (True, pick["to_name"])
     except Exception as e:
         return (False, str(e)[:100])
@@ -2632,6 +2705,9 @@ def build_parser():
     sub.add_parser("orphans").set_defaults(fn=cmd_orphans)
     sub.add_parser("recover").set_defaults(fn=cmd_recover)
     a = sub.add_parser("doctor"); a.add_argument("--restore", action="store_true"); a.set_defaults(fn=cmd_doctor)
+    a = sub.add_parser("log"); a.add_argument("--task"); a.add_argument("--epic"); a.add_argument("--action")
+    a.add_argument("--today", action="store_true"); a.add_argument("-n", type=int, default=200)
+    a.set_defaults(fn=cmd_log)
 
     jr = sub.add_parser("jira").add_subparsers(dest="cmd", required=True)
     a = jr.add_parser("epics"); a.add_argument("project"); a.add_argument("--search")
@@ -2788,6 +2864,7 @@ def cmd_doctor(args):
     if not raw_ok:
         if getattr(args, "restore", False) and _newest_valid_backup():
             bk = _newest_valid_backup(); shutil.copy2(str(bk), STATE_FILE)
+            audit("state.restore", detail=bk.name, reason="doctor")
             print("→ восстановлено из %s ✓" % bk.name)
         else:
             print("→ запусти `cc doctor --restore` чтобы восстановить из свежего бэкапа" if _newest_valid_backup()
@@ -2842,16 +2919,43 @@ def cmd_recover(args):
     if not recovered:
         print("нечего восстанавливать — потеряшек на диске нет ✓")
         return
+    audit("state.recover", count=len(recovered), detail=",".join(t for t, _, _ in recovered))
     print("восстановлено %d задач(и) на доску:" % len(recovered))
     for tid, epic, br in recovered:
         print("  %s   (epic %s, ветка %s)" % (tid, epic, br))
     print("\n`cc task mrs <tid>` подтянет MR; имя = slug (исходный заголовок не сохранялся в worktree).")
 
+_LOG_FIELDS = ("repo", "base", "mr", "url", "to", "key", "branch", "default_branch",
+               "remote", "title", "repos", "skipped", "count", "reason", "detail")
+
+def cmd_log(args):
+    """`cc log` — the action timeline (newest first): what cc DID, when, to which task/epic/repo.
+    Filter with --task/--epic/--action/--today; limit with -n. Reads ~/.cc/audit.log (append-only)."""
+    since = None
+    if getattr(args, "today", False):
+        since = int(time.mktime(time.strptime(time.strftime("%Y-%m-%d"), "%Y-%m-%d")))
+    recs = read_audit(task=getattr(args, "task", None), epic=getattr(args, "epic", None),
+                      action=getattr(args, "action", None), since=since, limit=getattr(args, "n", 200))
+    if not recs:
+        print("(аудит пуст — записанных действий ещё нет)")
+        return
+    for r in recs:
+        ts = time.strftime("%H:%M %d.%m", time.localtime(r.get("ts", 0)))
+        who = r.get("task") or r.get("epic") or r.get("project") or ""
+        extra = []
+        for k in _LOG_FIELDS:
+            if k in r and k != who:
+                v = r[k]
+                if isinstance(v, list):
+                    v = ",".join(map(str, v))
+                extra.append("%s=%s" % (k, v))
+        print("%s  %-15s %-20s %s" % (ts, r.get("action", "?"), who, "  ".join(extra)))
+
 _READONLY = {cmd_task_diff, cmd_task_ls, cmd_repo_ls, cmd_repo_members,
              cmd_epic_ls, cmd_epic_memory, cmd_project_ls, cmd_jira_epics, cmd_orphans, cmd_epic_plan,
              cmd_jira_search, cmd_jira_get, cmd_jira_comment, cmd_jira_done,
              cmd_jira_attachments, cmd_jira_pull,
-             cmd_jira_transitions, cmd_jira_move, cmd_jira_rollup, cmd_doctor}  # no cc-state writes; network off the lock
+             cmd_jira_transitions, cmd_jira_move, cmd_jira_rollup, cmd_doctor, cmd_log}  # no cc-state writes; network off the lock
 
 _SELF_LOCKED = {cmd_epic_mrs, cmd_task_mrs, cmd_repo_add, cmd_project_new, cmd_recover,
                 cmd_task_merge, cmd_epic_merge}   # do git/network lock-free, then save under a brief mutate() themselves

@@ -43,9 +43,10 @@ def _walk(node):
 
 async def _smoke():
     tmp = pathlib.Path(tempfile.mkdtemp(prefix="cc-smoke-"))
-    saved = (cc.STATE_FILE, cc._BACKUP_DIR, cc._scan_orphans)
+    saved = (cc.STATE_FILE, cc._BACKUP_DIR, cc._scan_orphans, cc.AUDIT_FILE)
     cc.STATE_FILE = tmp / "state.json"
     cc._BACKUP_DIR = tmp / "backups"
+    cc.AUDIT_FILE = tmp / "audit.log"           # never touch the real ~/.cc/audit.log
     cc.STATE_FILE.write_text(json.dumps(_make_state(tmp)))
     # force the "⚠️ Потеряшки" node to render too, without touching the real fs
     cc._scan_orphans = lambda s: [{"project": "demo", "epic": "E1", "slug": "ghost",
@@ -80,7 +81,7 @@ async def _smoke():
         # the temp state must still be intact (no clobber)
         assert cc._valid_state(json.loads(cc.STATE_FILE.read_text()))
     finally:
-        cc.STATE_FILE, cc._BACKUP_DIR, cc._scan_orphans = saved
+        cc.STATE_FILE, cc._BACKUP_DIR, cc._scan_orphans, cc.AUDIT_FILE = saved
         import shutil
         shutil.rmtree(tmp, ignore_errors=True)
 

@@ -7,6 +7,7 @@ import os, shutil, subprocess, tempfile, pathlib, sys
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 import cc
+cc.AUDIT_FILE = pathlib.Path(tempfile.mkdtemp(prefix="cc-audit-eng-")) / "audit.log"  # isolate the audit log
 
 
 def _g(args, cwd):
