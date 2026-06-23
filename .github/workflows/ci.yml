@@ -14,7 +14,13 @@ jobs:
           python-version: '3.12'
       - name: Install TUI dep
         run: pip install textual
+      - name: Configure git (worktrees need an identity)
+        run: |
+          git config --global user.email ci@cc.test
+          git config --global user.name ci
       - name: Unit tests
         run: python test_cc.py
+      - name: Engine integration (real git repos)
+        run: python tests/test_engine_integration.py
       - name: TUI smoke (headless)
         run: python tests/test_tui_smoke.py
