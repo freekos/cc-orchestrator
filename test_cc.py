@@ -295,6 +295,43 @@ def test_jira_pull(monkeypatched=True):
         shutil.rmtree(d, ignore_errors=True)
 
 
+def test_load_state_self_heal():
+    import os, json, shutil, tempfile, pathlib
+    d = pathlib.Path(tempfile.mkdtemp(prefix="cc-heal-"))
+    saved = (cc.STATE_FILE, cc._BACKUP_DIR)
+    cc.STATE_FILE = d / "state.json"; cc._BACKUP_DIR = d / "backups"; cc._BACKUP_DIR.mkdir()
+    try:
+        cc.STATE_FILE.write_text("{ this is torn json")          # corrupt
+        good = {"projects": {"p": {"repos": {}}}, "epics": {}, "tasks": {}}
+        (cc._BACKUP_DIR / "state-20260101-000000-1.json").write_text(json.dumps({"oops": 1}))  # invalid backup
+        (cc._BACKUP_DIR / "state-20260102-000000-1.json").write_text(json.dumps(good))          # newest VALID
+        out = cc.load_state()
+        assert out == good, out                                   # self-healed from newest valid backup
+        assert json.loads(cc.STATE_FILE.read_text()) == good      # corrupt file replaced in place
+    finally:
+        cc.STATE_FILE, cc._BACKUP_DIR = saved
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_state_issues():
+    s = {"projects": {"P": {"repos": {"web": {}}}},
+         "epics": {"E": {"project": "P"}, "BAD": {"project": "NOPE"}},
+         "tasks": {"t1": {"epic": "E", "repos": ["web", "ghost"], "worktrees": {}},
+                   "t2": {"epic": "GONE", "repos": [], "worktrees": {}}}}
+    msgs = [m for _, m in cc._state_issues(s)]
+    assert any("BAD" in m and "несуществующий проект" in m for m in msgs), msgs
+    assert any("t2" in m and "несуществующий эпик" in m for m in msgs), msgs
+    assert any("ghost" in m for m in msgs), msgs
+    # a clean state -> no issues
+    assert cc._state_issues({"projects": {}, "epics": {}, "tasks": {}}) == []
+
+
+def test_valid_state():
+    assert cc._valid_state({"projects": {}, "epics": {}, "tasks": {}})
+    assert not cc._valid_state({"projects": {}, "epics": {}})       # missing tasks
+    assert not cc._valid_state([])                                  # not a dict
+
+
 if __name__ == "__main__":
     n = 0
     for k, v in list(globals().items()):

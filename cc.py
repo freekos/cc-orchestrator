@@ -37,10 +37,31 @@ def glab_members(remote):
 
 # ----------------------------- state -----------------------------
 
+def _valid_state(d):
+    return isinstance(d, dict) and all(isinstance(d.get(k), dict) for k in ("projects", "epics", "tasks"))
+
 def load_state():
-    if STATE_FILE.exists():
-        return json.loads(STATE_FILE.read_text())
-    return {"projects": {}, "epics": {}, "tasks": {}}
+    if not STATE_FILE.exists():
+        return {"projects": {}, "epics": {}, "tasks": {}}
+    try:
+        d = json.loads(STATE_FILE.read_text())
+        if not _valid_state(d):
+            raise ValueError("missing projects/epics/tasks")
+        return d
+    except Exception as e:
+        # state.json is torn/corrupt. NEVER fall back to empty — that would let the next save overwrite
+        # everything. Self-heal from the newest VALID backup (the snapshots that saved us before).
+        bk = _newest_valid_backup()
+        if bk:
+            data = json.loads(bk.read_text())
+            try:
+                shutil.copy2(str(bk), STATE_FILE)   # restore the good snapshot in place
+            except Exception:
+                pass
+            sys.stderr.write("⚠️ ~/.cc/state.json был повреждён (%s) — восстановлен из бэкапа %s\n"
+                             % (str(e)[:60], bk.name))
+            return data
+        die("~/.cc/state.json повреждён и нет валидного бэкапа (%s). Проверь ~/.cc/backups/." % str(e)[:80])
 
 _BACKUP_DIR = STATE_DIR / "backups"
 
@@ -64,6 +85,19 @@ def _backup_prev(prev):
                 pass
     except Exception:
         pass
+
+def _newest_valid_backup():
+    """Newest ~/.cc/backups/ snapshot that parses as a valid state — for self-heal of a corrupt state."""
+    try:
+        for bk in sorted(_BACKUP_DIR.glob("state-*.json"), reverse=True):
+            try:
+                if _valid_state(json.loads(bk.read_text())):
+                    return bk
+            except Exception:
+                continue
+    except Exception:
+        pass
+    return None
 
 def save_state(s):
     """Atomic write (tmp + os.replace) so concurrent readers never see a torn file.
@@ -2597,6 +2631,7 @@ def build_parser():
     a.set_defaults(fn=cmd_deploys)
     sub.add_parser("orphans").set_defaults(fn=cmd_orphans)
     sub.add_parser("recover").set_defaults(fn=cmd_recover)
+    a = sub.add_parser("doctor"); a.add_argument("--restore", action="store_true"); a.set_defaults(fn=cmd_doctor)
 
     jr = sub.add_parser("jira").add_subparsers(dest="cmd", required=True)
     a = jr.add_parser("epics"); a.add_argument("project"); a.add_argument("--search")
@@ -2707,6 +2742,71 @@ def _scan_orphans(s):
                                 "branch": branch, "repos": repos})
     return orphans
 
+def _state_issues(s):
+    """Structural problems in the state (dangling refs / missing repos / missing paths). [(severity,msg)]."""
+    issues = []
+    projects, epics, tasks = s.get("projects", {}), s.get("epics", {}), s.get("tasks", {})
+    for ek, e in epics.items():
+        if e.get("project") not in projects:
+            issues.append(("ERR", "эпик %s ссылается на несуществующий проект '%s'" % (ek, e.get("project"))))
+    for tid, t in tasks.items():
+        ep = t.get("epic")
+        if ep not in epics:
+            issues.append(("ERR", "задача %s ссылается на несуществующий эпик '%s'" % (tid, ep)))
+            continue
+        proj = projects.get(epics[ep].get("project"), {})
+        for r in t.get("repos", []):
+            if r not in proj.get("repos", {}):
+                issues.append(("WARN", "задача %s: репо '%s' нет в проекте" % (tid, r)))
+        for r, wt in (t.get("worktrees") or {}).items():
+            if not os.path.isdir(wt):
+                issues.append(("WARN", "задача %s: worktree пропал на диске (%s) — %s" % (tid, r, wt)))
+    for pn, p in projects.items():
+        if p.get("path") and not os.path.isdir(p["path"]):
+            issues.append(("WARN", "проект %s: путь не существует (%s)" % (pn, p["path"])))
+    return issues
+
+def cmd_doctor(args):
+    """Health check: state file integrity, dangling refs, missing worktrees, orphans, backups.
+    --restore: replace a corrupt state.json from the newest valid backup."""
+    print("== cc doctor ==")
+    # 1. state file
+    raw_ok = True
+    if not STATE_FILE.exists():
+        print("state.json: ОТСУТСТВУЕТ (пустой стейт)")
+    else:
+        try:
+            d = json.loads(STATE_FILE.read_text())
+            raw_ok = _valid_state(d)
+            print("state.json: %s" % ("✓ валиден" if raw_ok else "✗ нет projects/epics/tasks"))
+        except Exception as ex:
+            raw_ok = False
+            print("state.json: ✗ ПОВРЕЖДЁН (%s)" % str(ex)[:80])
+    bks = sorted(_BACKUP_DIR.glob("state-*.json"), reverse=True) if _BACKUP_DIR.exists() else []
+    good = _newest_valid_backup()
+    print("бэкапов: %d (свежий валидный: %s)" % (len(bks), good.name if good else "НЕТ"))
+    if not raw_ok:
+        if getattr(args, "restore", False) and _newest_valid_backup():
+            bk = _newest_valid_backup(); shutil.copy2(str(bk), STATE_FILE)
+            print("→ восстановлено из %s ✓" % bk.name)
+        else:
+            print("→ запусти `cc doctor --restore` чтобы восстановить из свежего бэкапа" if _newest_valid_backup()
+                  else "→ валидного бэкапа НЕТ — разбери ~/.cc/backups/ вручную")
+            return
+    # 2. structural integrity + orphans (load is now self-healing)
+    s = load_state()
+    issues = _state_issues(s)
+    errs = [m for sev, m in issues if sev == "ERR"]; warns = [m for sev, m in issues if sev == "WARN"]
+    print("\nпроекты/эпики/задачи: %d/%d/%d" % (len(s["projects"]), len(s["epics"]), len(s["tasks"])))
+    for m in errs:  print("  ✗ " + m)
+    for m in warns: print("  ⚠ " + m)
+    orph = _scan_orphans(s)
+    if orph:
+        print("  ⚠ потеряшек на диске: %d (`cc recover` вернёт)" % len(orph))
+    if not errs and not warns and not orph:
+        print("  ✓ всё консистентно — висячих ссылок и потеряшек нет")
+    print("\nитог: %d ошибк(а), %d предупрежд., %d потеряшек" % (len(errs), len(warns), len(orph)))
+
 def cmd_orphans(args):
     orphans = _scan_orphans(load_state())
     if not orphans:
@@ -2751,7 +2851,7 @@ _READONLY = {cmd_task_diff, cmd_task_ls, cmd_repo_ls, cmd_repo_members,
              cmd_epic_ls, cmd_epic_memory, cmd_project_ls, cmd_jira_epics, cmd_orphans, cmd_epic_plan,
              cmd_jira_search, cmd_jira_get, cmd_jira_comment, cmd_jira_done,
              cmd_jira_attachments, cmd_jira_pull,
-             cmd_jira_transitions, cmd_jira_move, cmd_jira_rollup}  # no cc-state writes; network off the lock
+             cmd_jira_transitions, cmd_jira_move, cmd_jira_rollup, cmd_doctor}  # no cc-state writes; network off the lock
 
 _SELF_LOCKED = {cmd_epic_mrs, cmd_task_mrs, cmd_repo_add, cmd_project_new, cmd_recover,
                 cmd_task_merge, cmd_epic_merge}   # do git/network lock-free, then save under a brief mutate() themselves
