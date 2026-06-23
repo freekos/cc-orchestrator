@@ -733,17 +733,18 @@ def cmd_task_add(args):
     with ThreadPoolExecutor(max_workers=min(8, max(1, len(repos)))) as exr:
         results = list(exr.map(
             lambda r: _provision(ekey, epic, proj, r, branch, slug, epic_mode, args.no_setup), repos))
-    worktrees, base, skipped, order = {}, {}, [], []
+    worktrees, base, skipped, order = {}, {}, {}, []
     for (r, wt, tgt, err) in results:
         if err:
-            print("  [%s] skipped (%s)" % (r, err)); skipped.append(r); continue
+            print("  [%s] skipped (%s)" % (r, err)); skipped[r] = err; continue
         worktrees[r] = wt; base[r] = tgt; order.append(r)
         print("  [%s] ready -> MR target %s" % (r, tgt))
     if not worktrees:
         hint = ("cc repo set %s <repo> --remote …" % epic["project"]) if loose else ("cc epic set %s --repos <a,b>" % ekey)
         die("no usable repos (all skipped). %s" % hint)
     if skipped:
-        print("  (skipped %d: %s)" % (len(skipped), ", ".join(skipped)))
+        # keep the skipped repos VISIBLE (stored on the task, shown in the TUI) — never a silent gap
+        print("  ⚠️ %d repo(s) NOT provisioned: %s" % (len(skipped), ", ".join("%s (%s)" % (r, e) for r, e in skipped.items())))
     primary = order[0]
     task_dir = str(Path(worktrees[primary]).parent)   # cctui/<epic>/<slug>/ — repos are its subfolders
     repo_map = "\n".join("- %s -> %s" % (r, worktrees[r]) for r in order)
@@ -787,7 +788,7 @@ def cmd_task_add(args):
     s["tasks"][tid] = {"epic": ekey, "title": title, "prompt": args.prompt,
                        "repos": order, "branch": branch, "worktrees": worktrees, "base": base,
                        "primary": primary, "dir": task_dir, "claude_session": {}, "status": "running",
-                       "mrs": {}, "log": str(log)}
+                       "mrs": {}, "log": str(log), "skipped": skipped}
     save_state(s)
     full_prompt = (args.prompt
                    + "\n\n[cc] This task spans the repo worktrees below (branch %s). "

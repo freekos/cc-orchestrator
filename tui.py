@@ -1330,6 +1330,11 @@ class CCApp(App):
                     i = len(self._detail_urls)
                     self._detail_urls.append(url)
                     L.append("     [@click=app.open_url_idx(%d)][u]MR: %s[/u][/]" % (i, url))
+            skipped = t.get("skipped") or {}
+            if skipped:
+                L += ["", "[yellow]⚠️ репо НЕ развёрнуты (%d):[/yellow]" % len(skipped)]
+                for r, e in skipped.items():
+                    L.append("  [yellow]%s — %s[/yellow]" % (r, e))
             if t.get("merged"):
                 L += ["", "[bold green]✓ все MR влиты — x = очистить worktrees[/bold green]"]
             L += ["", "[b]changes:[/b]"]
