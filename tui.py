@@ -109,6 +109,19 @@ def fast_status(t):
     return "review"
 
 
+def _ops_status(o):
+    """Live status of an ops run: agent alive -> running; log ends with [cc-needs-input] -> needs_input;
+    else done. Reuses cc.task_needs_input's [cc-needs-input] sniffer on the ops log."""
+    if o.get("pid") and cc.pid_alive(o["pid"]):
+        return "running"
+    if cc.task_needs_input({"log": o.get("log")}):
+        return "needs_input"
+    return "done"
+
+
+OPS_GLYPH = {"running": "🔵", "needs_input": "❓", "done": "✅"}
+
+
 class NewEpicScreen(ModalScreen):
     CSS = """
     NewEpicScreen { align: center middle; }
@@ -1357,10 +1370,13 @@ class CCApp(App):
             running = bool(t.get("pid") and cc.pid_alive(t["pid"]))
             new[tid] = "running" if running else cc.task_status(t)
             ni[tid] = None if running else cc.task_needs_input(t)   # only a finished agent can have left a question
+        ops = snap.get("ops") or {}
+        new_ops = {oid: _ops_status(o) for oid, o in ops.items()}
         if self._closing:
             return
         changed = (any(snap["tasks"][tid].get("status") != st for tid, st in new.items())
-                   or any((snap["tasks"][tid].get("needs_input") or None) != (v or None) for tid, v in ni.items()))
+                   or any((snap["tasks"][tid].get("needs_input") or None) != (v or None) for tid, v in ni.items())
+                   or any(ops[oid].get("status") != st for oid, st in new_ops.items()))
         if not changed:
             return
         def apply(s):
@@ -1368,6 +1384,9 @@ class CCApp(App):
                 if tid in s["tasks"]:
                     s["tasks"][tid]["status"] = st
                     s["tasks"][tid]["needs_input"] = ni.get(tid)
+            for oid, st in new_ops.items():
+                if oid in s.get("ops", {}):
+                    s["ops"][oid]["status"] = st
         # best-effort: never block/starve a foreground `cc` command; retry next tick if busy
         if cc.mutate_try(apply):
             self._safe_build_tree()
@@ -1417,6 +1436,15 @@ class CCApp(App):
         parent.add_leaf("[dim]%s[/dim]" % row if st == "merged" else row,
                         data={"type": "task", "id": tid})
 
+    def _add_ops_leaves(self, parent, ekey, s):
+        """Render the group's ops-agent runs (test/stage/deploy) under it, with a live status glyph."""
+        for oid, o in (s.get("ops") or {}).items():
+            if o.get("epic") != ekey:
+                continue
+            st = o.get("status") or _ops_status(o)
+            parent.add_leaf("%s ⚙ ops: %s" % (OPS_GLYPH.get(st, "⚙"), o.get("kind", "?")),
+                            data={"type": "ops", "id": oid})
+
     def _add_epic_node(self, parent, ekey, e, s, expand=True):
         en = parent.add("# %s  %s" % (ekey, e.get("summary", "")),
                         data={"type": "epic", "id": ekey}, expand=expand)
@@ -1425,6 +1453,7 @@ class CCApp(App):
             self._add_task_leaf(en, tid, t)
         if not tasks:
             en.add_leaf("[dim](нет задач — n чтобы добавить)[/dim]", data=None)
+        self._add_ops_leaves(en, ekey, s)
         return en
 
     def _add_loose_tasks(self, pn, pname, s):
@@ -1433,6 +1462,7 @@ class CCApp(App):
         loose = self._sorted_tasks((tid, t) for tid, t in s["tasks"].items() if t.get("epic") == lk)
         for tid, t in loose:
             self._add_task_leaf(pn, tid, t)
+        self._add_ops_leaves(pn, lk, s)   # loose-group ops runs render under the project too
         return bool(loose)
 
     @staticmethod
@@ -1441,7 +1471,7 @@ class CCApp(App):
         if not data:
             return None
         t = data.get("type")
-        if t in ("project", "epic", "task"):
+        if t in ("project", "epic", "task", "ops"):
             return "%s:%s" % (t, data["id"])
         if t == "orphans":
             return "orphans:"
@@ -1635,6 +1665,23 @@ class CCApp(App):
         if data["type"] == "archive":
             n = sum(1 for e in s["epics"].values() if e["project"] == data["id"] and e.get("archived"))
             d.update("[b]Архив[/b] — %d архивн. эпик(ов) в '%s'\n[dim]разверни узел; на эпике x → Разархивировать[/dim]" % (n, data["id"]))
+            return
+        if data["type"] == "ops" and data["id"] in (s.get("ops") or {}):
+            o = s["ops"][data["id"]]
+            st = o.get("status") or _ops_status(o)
+            L = ["[b]ops: %s[/b]   группа %s   status=%s" % (o.get("kind", "?"), o.get("epic", "?"), st)]
+            ni = cc.task_needs_input({"log": o.get("log")})
+            if ni:
+                L += ["", "[bold yellow]❓ агент ждёт ответа:[/bold yellow] %s" % ni,
+                      "[dim]o — открыть сессию и ответить (агент продолжит)[/dim]"]
+            L += ["", "[b]лог (хвост):[/b]"]
+            try:
+                tail = open(o["log"], encoding="utf-8", errors="replace").read().splitlines()[-15:]
+                L += ["  " + ln for ln in tail] if tail else ["  [dim](пусто)[/dim]"]
+            except Exception:
+                L += ["  [dim](лога ещё нет)[/dim]"]
+            L += ["", "[dim]o — открыть/ответить   v — весь лог[/dim]"]
+            d.update("\n".join(L))
             return
         if data["type"] == "task" and data["id"] in s["tasks"]:
             t = s["tasks"][data["id"]]
@@ -2082,6 +2129,12 @@ class CCApp(App):
         cc.mutate(_set)
 
     def action_view_chat(self):
+        data = self.current()
+        if data and data.get("type") == "ops":
+            o = (self.state().get("ops") or {}).get(data["id"])
+            if o and o.get("log"):
+                self.push_screen(OutputScreen("ops log: %s" % o.get("kind", ""), ["cat", o["log"]]))
+            return
         tid = self._cur_task()
         if not tid:
             return
@@ -2106,8 +2159,23 @@ class CCApp(App):
         subprocess.run([cm, "rename-tab", "--surface", ref, name], capture_output=True)
         return "cmux"
 
+    def _open_ops(self, oid):
+        o = (self.state().get("ops") or {}).get(oid)
+        if not o:
+            self.notify("ops-прогон не найден"); return
+        cwd = o.get("dir")
+        if not cwd or not os.path.isdir(cwd):
+            self.notify("ops dir отсутствует", severity="error"); return
+        sid = cc.resolve_session(cwd)
+        chat = "claude --resume %s --permission-mode auto" % sid if sid else "claude --permission-mode auto"
+        chat += self._jira_flags(self.state()["epics"].get(o.get("epic"), {}).get("project"))
+        where = self._open_chat_tab("cc:ops %s" % o.get("kind", ""), cwd, chat)
+        self.notify("ops-сессия [%s] открыта (%s) — ответь на ❓ если есть" % (o.get("kind", ""), where))
+
     def action_open(self):
         data = self.current()
+        if data and data.get("type") == "ops":
+            self._open_ops(data["id"]); return
         if data and data.get("type") == "project":
             self.action_project_setup(); return
         tid = self._cur_task()

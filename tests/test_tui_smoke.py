@@ -30,6 +30,10 @@ def _make_state(tmp):
                         "repos": ["web"], "base": {"web": "main"}, "worktrees": {}, "mrs": {},
                         "log": "", "needs_input": "какой порт?", "skipped": {"api": "not a git repo"}},
         },
+        "ops": {                                   # an ops-agent run under E1 (must render + detail cleanly)
+            "ops_test_e1": {"epic": "E1", "kind": "test", "dir": str(tmp), "log": str(tmp / "ops.log"),
+                            "status": "running"},
+        },
     }
 
 
@@ -65,7 +69,7 @@ async def _smoke():
                     pass
             await pilot.pause()
             detail = app.query_one("#detail", Static)
-            errors, visited, saw_timeline = [], 0, False
+            errors, visited, saw_timeline, saw_ops = [], 0, False, False
             for n in _walk(tree.root):
                 if not n.data:
                     continue
@@ -77,9 +81,12 @@ async def _smoke():
                     errors.append((n.data, txt[:120]))
                 if n.data.get("type") == "task" and n.data.get("id") == "t_loose" and "timeline:" in txt:
                     saw_timeline = True         # per-task audit block rendered from the audit log
-            assert visited >= 5, "expected to visit project/epic/2 tasks/orphans, got %d" % visited
+                if n.data.get("type") == "ops" and "ops: test" in txt:
+                    saw_ops = True              # ops run rendered + its detail panel works
+            assert visited >= 6, "expected project/epic/2 tasks/ops/orphans, got %d" % visited
             assert not errors, "detail render errors:\n" + "\n".join(str(e) for e in errors)
             assert saw_timeline, "task detail should show the audit timeline block"
+            assert saw_ops, "ops run should render in the tree with a working detail panel"
             # the legend must be present (its absence == compose regression)
             assert "ждёт тебя" in str(app.query_one("#legend", Static).render())
             print("TUI SMOKE OK: %d nodes rendered, 0 errors" % visited)
