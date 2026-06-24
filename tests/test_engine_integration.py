@@ -76,6 +76,38 @@ def test_scan_orphans_finds_unclaimed_worktree():
         shutil.rmtree(d, ignore_errors=True)
 
 
+def test_cmd_task_add_end_to_end_manual():
+    # the WHOLE cmd_task_add path on real repos (manual mode = no agent launch). Catches regressions
+    # like the full_prompt building a now-out-of-scope repo_map (NameError on real task creation).
+    import json, types
+    d = pathlib.Path(tempfile.mkdtemp(prefix="cc-taskadd-"))
+    saved = (cc.STATE_FILE, cc._BACKUP_DIR)
+    try:
+        web = _make_repo(d, "web", "main")
+        state = {"projects": {"P": {"path": str(d), "kind": "multi",
+                                    "repos": {"web": {"path": str(web), "default_branch": "main", "remote": "x/web"}}}},
+                 "epics": {}, "tasks": {}}
+        cc.STATE_FILE = d / "state.json"
+        cc._BACKUP_DIR = d / "backups"
+        cc.STATE_FILE.write_text(json.dumps(state))
+        ns = types.SimpleNamespace(epic="P", title="fix thing", prompt="do the fix",
+                                   repos=None, no_setup=True, manual=True, sync=False, jira=None, no_jira=True)
+        cc.cmd_task_add(ns)                                      # must NOT raise
+        s = json.loads(cc.STATE_FILE.read_text())
+        assert len(s["tasks"]) == 1
+        tid, t = next(iter(s["tasks"].items()))
+        assert t["status"] == "review" and t.get("manual"), t
+        assert t["base"]["web"] == "main", t["base"]            # loose task -> default branch
+        assert os.path.isdir(t["worktrees"]["web"]), t["worktrees"]
+        cmd = os.path.join(t["dir"], "CLAUDE.md")
+        assert os.path.isfile(cmd), "CLAUDE.md not written"
+        md = open(cmd).read()
+        assert "no epic" in md and ("branch %s" % t["branch"]) in md   # fresh rules rendered
+    finally:
+        cc.STATE_FILE, cc._BACKUP_DIR = saved
+        shutil.rmtree(d, ignore_errors=True)
+
+
 if __name__ == "__main__":
     n = 0
     for k, v in list(globals().items()):

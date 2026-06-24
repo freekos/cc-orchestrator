@@ -917,6 +917,7 @@ def cmd_task_add(args):
         print("  ⚠️ %d repo(s) NOT provisioned: %s" % (len(skipped), ", ".join("%s (%s)" % (r, e) for r, e in skipped.items())))
     primary = order[0]
     task_dir = str(Path(worktrees[primary]).parent)   # cctui/<epic>/<slug>/ — repos are its subfolders
+    repo_map = "\n".join("- %s -> %s" % (r, worktrees[r]) for r in order)   # used by the agent's full_prompt below
     log = STATE_DIR / ("%s.log" % tid)
     s["tasks"][tid] = {"epic": ekey, "title": title, "prompt": args.prompt,
                        "repos": order, "branch": branch, "worktrees": worktrees, "base": base,
