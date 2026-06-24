@@ -228,19 +228,40 @@ async def _panelscreen():
         assert "AA" in txt and "MR открыт" in txt and "влит" in txt and "итог: 2 задач, 1 влито" in txt, txt
         assert scr._urls == ["http://mr/1"]              # only real MR urls collected
         assert len(scr.query("#release_mr")) == 1        # epic group -> Release button present
-        scr.on_button_pressed(_Ev("release_mr"))         # press Release
+        assert len(scr.query("#merge_tasks")) == 1       # ...and the "влить задачи" button
+        scr.on_button_pressed(_Ev("merge_tasks"))        # press "влить задачи"
         await pilot.pause()
-        assert res.get("r") == {"action": "release_mr"}, res
-    # loose group -> no Release button
+        assert res.get("r") == {"action": "merge_tasks"}, res
+    # loose group -> neither action button
     app2 = tui.CCApp()
     async with app2.run_test() as pilot:
         await pilot.pause()
         app2.push_screen(tui.GroupPanelScreen("P__loose", {"loose": True}, []))
         await pilot.pause()
-        assert len(app2.screen.query("#release_mr")) == 0
+        assert len(app2.screen.query("#release_mr")) == 0 and len(app2.screen.query("#merge_tasks")) == 0
         app2.screen.action_close()
         await pilot.pause()
     print("PANELSCREEN OK")
+
+
+async def _confirmscreen():
+    # generic ConfirmScreen: ok -> True, cancel -> False
+    app = tui.CCApp()
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        r1 = {}
+        app.push_screen(tui.ConfirmScreen("t", "msg", ok_label="Влить"), lambda r: r1.__setitem__("r", r))
+        await pilot.pause()
+        app.screen.action_ok()
+        await pilot.pause()
+        assert r1.get("r") is True, r1
+        r2 = {}
+        app.push_screen(tui.ConfirmScreen("t", "msg"), lambda r: r2.__setitem__("r", r))
+        await pilot.pause()
+        app.screen.action_cancel()
+        await pilot.pause()
+        assert r2.get("r") is False, r2
+    print("CONFIRMSCREEN OK")
 
 
 if __name__ == "__main__":
@@ -258,3 +279,5 @@ if __name__ == "__main__":
     print("ok test_group_panel_rows")
     asyncio.run(_panelscreen())
     print("ok test_panelscreen")
+    asyncio.run(_confirmscreen())
+    print("ok test_confirmscreen")

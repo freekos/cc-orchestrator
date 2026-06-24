@@ -741,6 +741,42 @@ class MRConfirmScreen(ModalScreen):
         self.dismiss(False)
 
 
+class ConfirmScreen(ModalScreen):
+    """Generic yes/no confirm -> dismiss(True/False). For low-stakes actions (e.g. merging task MRs
+    into an epic branch — not prod). The heavy per-repo gate (MRConfirmScreen) is for prod MR creation."""
+    CSS = """
+    ConfirmScreen { align: center middle; }
+    #cdlg { width: 72; max-width: 92%; height: auto; padding: 1 2; border: round $accent; background: $surface; }
+    #cdlg Label { margin-bottom: 1; }
+    #cdlg Button { margin: 0 2 0 0; min-width: 14; }
+    """
+    BINDINGS = [Binding("escape", "cancel", "Отмена"), Binding("q", "cancel", "Отмена"),
+                Binding("y", "ok", "Да"), Binding("enter", "ok", "Да")]
+
+    def __init__(self, title, message, ok_label="Да"):
+        super().__init__()
+        self._title = title
+        self._message = message
+        self._ok_label = ok_label
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="cdlg"):
+            yield Label("[b]%s[/b]" % self._title)
+            yield Label("[dim]%s[/dim]" % self._message)
+            with Horizontal():
+                yield Button(self._ok_label, id="ok", variant="primary")
+                yield Button("Отмена", id="cancel")
+
+    def on_button_pressed(self, event):
+        self.dismiss(event.button.id == "ok")
+
+    def action_ok(self):
+        self.dismiss(True)
+
+    def action_cancel(self):
+        self.dismiss(False)
+
+
 class ReviewersScreen(ModalScreen):
     CSS = """
     ReviewersScreen { align: center middle; }
@@ -1008,6 +1044,7 @@ class GroupPanelScreen(ModalScreen):
                 yield Static("", id="pc")
             with Horizontal(id="prow"):
                 if not self._epic.get("loose"):
+                    yield Button("Влить задачи в эпик", id="merge_tasks")
                     yield Button("Release: MR эпик→master", id="release_mr", variant="warning")
                 yield Button("Закрыть", id="close")
         yield Footer()
@@ -1053,8 +1090,8 @@ class GroupPanelScreen(ModalScreen):
         self.query_one("#pc", Static).update(t)
 
     def on_button_pressed(self, event):
-        if event.button.id == "release_mr":
-            self.dismiss({"action": "release_mr"})
+        if event.button.id in ("release_mr", "merge_tasks"):
+            self.dismiss({"action": event.button.id})
         else:
             self.dismiss(None)
 
@@ -1728,12 +1765,24 @@ class CCApp(App):
         self.push_screen(GroupPanelScreen(ekey, epic, rows), lambda res: self._panel_action(ekey, res))
 
     def _panel_action(self, ekey, res):
-        # the panel's action buttons. Release = epic->master MR via the same MR-confirm gate as `M`.
+        # the panel's action buttons. merge_tasks = task MRs -> epic branch (not prod, light confirm);
+        # release_mr = epic->master MR via the same MR-confirm gate as `M`.
         if not res:
             return
-        if res.get("action") == "release_mr":
+        act = res.get("action")
+        if act == "release_mr":
             argv = [sys.executable, "-u", ENGINE, "epic", "mr", ekey]
             self._mr_with_gate(argv, "Epic MR: %s" % ekey, lambda _: self._after_epic_sync(ekey))
+        elif act == "merge_tasks":
+            def go(ok):
+                if not ok:
+                    self.notify("отменено — ничего не влито"); return
+                self.push_screen(OutputScreen("Влить задачи в %s" % ekey,
+                                 [sys.executable, "-u", ENGINE, "epic", "merge", ekey]),
+                                 lambda _: self._after_epic_sync(ekey))
+            self.push_screen(ConfirmScreen("Влить задачи в ветку эпика %s" % ekey,
+                             "Сольёт ОТКРЫТЫЕ task-MR группы в ветку эпика (это НЕ прод-релиз). Продолжить?",
+                             ok_label="Влить"), go)
 
     def action_regroup(self):
         # move the focused task to another group on the board (task-based regrouping)
