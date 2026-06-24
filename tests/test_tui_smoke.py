@@ -48,6 +48,8 @@ async def _smoke():
     cc._BACKUP_DIR = tmp / "backups"
     cc.AUDIT_FILE = tmp / "audit.log"           # never touch the real ~/.cc/audit.log
     cc.STATE_FILE.write_text(json.dumps(_make_state(tmp)))
+    cc.audit("task.add", task="t_loose", epic="demo__loose", repos=["web"])  # so the detail's timeline block renders
+    cc.audit("task.merge", task="t_loose", repo="web", mr=7, base="main")
     # force the "⚠️ Потеряшки" node to render too, without touching the real fs
     cc._scan_orphans = lambda s: [{"project": "demo", "epic": "E1", "slug": "ghost",
                                    "branch": "E1-ghost", "repos": {"web": "/x"}}]
@@ -63,7 +65,7 @@ async def _smoke():
                     pass
             await pilot.pause()
             detail = app.query_one("#detail", Static)
-            errors, visited = [], 0
+            errors, visited, saw_timeline = [], 0, False
             for n in _walk(tree.root):
                 if not n.data:
                     continue
@@ -73,8 +75,11 @@ async def _smoke():
                 txt = str(detail.render())
                 if "ошибка отрисовки" in txt:   # the guard's fallback == show_detail threw
                     errors.append((n.data, txt[:120]))
+                if n.data.get("type") == "task" and n.data.get("id") == "t_loose" and "timeline:" in txt:
+                    saw_timeline = True         # per-task audit block rendered from the audit log
             assert visited >= 5, "expected to visit project/epic/2 tasks/orphans, got %d" % visited
             assert not errors, "detail render errors:\n" + "\n".join(str(e) for e in errors)
+            assert saw_timeline, "task detail should show the audit timeline block"
             # the legend must be present (its absence == compose regression)
             assert "ждёт тебя" in str(app.query_one("#legend", Static).render())
             print("TUI SMOKE OK: %d nodes rendered, 0 errors" % visited)

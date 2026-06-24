@@ -16,7 +16,29 @@ import threading
 ENGINE = str(Path(__file__).parent / "cc.py")
 GLYPH = {"running": "🔵", "review": "🟡", "mr": "🟣", "merged": "✅", "idle": "⚪", "done": "✅"}
 LEGEND = ("🟡 ждёт тебя   🔵 агент работает   🟣 MR открыт   ✅ влито   ⚪ простаивает   "
-          "💬 новый ответ   ❓ ждёт твоего ответа   ·   # эпик   ⚠️ потеряшки (U — вернуть)")
+          "💬 новый ответ   ❓ ждёт твоего ответа   ·   # эпик   ⚠️ потеряшки (U — вернуть)   ·   L — таймлайн")
+
+_AUDIT_VERB = {"task.add": "создана", "task.merge": "влита", "epic.mr": "MR эпик→master",
+               "jira.transition": "Jira", "repo.set": "repo set", "state.restore": "восстановлен стейт",
+               "state.recover": "возврат задач"}
+
+def _audit_brief(r):
+    """One compact human line for an audit record (used in the task detail's timeline block)."""
+    verb = _AUDIT_VERB.get(r.get("action"), r.get("action", "?"))
+    bits = []
+    if r.get("repo"):
+        bits.append(r["repo"])
+    if r.get("mr"):
+        bits.append("!%s" % r["mr"])
+    if r.get("base"):
+        bits.append("→ %s" % r["base"])
+    if r.get("to"):
+        bits.append(r["to"])
+    if r.get("default_branch"):
+        bits.append("default=%s" % r["default_branch"])
+    if r.get("detail") and r.get("action", "").startswith("state."):
+        bits.append(r["detail"])
+    return ("%s  %s" % (verb, "  ".join(bits))).rstrip()
 
 
 def fast_status(t):
@@ -926,6 +948,7 @@ class CCApp(App):
         Binding("x", "cleanup", "Cleanup/Epic"),
         Binding("r", "refresh", "Refresh"),
         Binding("U", "recover", "Recover lost"),
+        Binding("L", "timeline", "Timeline"),
         Binding("q", "quit", "Quit"),
     ]
 
@@ -1345,7 +1368,13 @@ class CCApp(App):
                 for r in t["repos"]:
                     st = cached.get(r, "")
                     L.append("  [%s] %s" % (r, st.replace("\n", "; ") if st else "(none)"))
-            L += ["", "[dim]o=chat v=view c=cursor d=diff m=dry M=create g=links x=cleanup[/dim]"]
+            recent = cc.read_audit(task=data["id"], limit=5)   # what cc DID to this task (audit timeline)
+            if recent:
+                L += ["", "[b]timeline:[/b]  [dim](L — весь лог)[/dim]"]
+                for ar in recent:
+                    ts = time.strftime("%H:%M %d.%m", time.localtime(ar.get("ts", 0)))
+                    L.append("  [dim]%s[/dim] %s" % (ts, _audit_brief(ar)))
+            L += ["", "[dim]o=chat v=view c=cursor d=diff m=dry M=create g=links x=cleanup  L=timeline[/dim]"]
             d.update("\n".join(L))
         elif data["type"] == "epic":
             e = s["epics"][data["id"]]
@@ -1435,6 +1464,17 @@ class CCApp(App):
         self.push_screen(OutputScreen("recover lost tasks",
                          [sys.executable, "-u", ENGINE, "recover"]),
                          lambda _: self.build_tree())
+
+    def action_timeline(self):
+        # the 'what happened' log; context-aware — filtered to the focused task/epic, else everything
+        cur = self.current()
+        argv = [sys.executable, "-u", ENGINE, "log", "-n", "150"]
+        title = "timeline — всё"
+        if cur and cur.get("type") == "task":
+            argv += ["--task", cur["id"]]; title = "timeline · задача %s" % cur["id"]
+        elif cur and cur.get("type") == "epic":
+            argv += ["--epic", cur["id"]]; title = "timeline · эпик %s" % cur["id"]
+        self.push_screen(OutputScreen(title, argv))
 
     def action_refresh(self):
         cur = self.current()
