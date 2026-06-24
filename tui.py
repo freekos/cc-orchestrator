@@ -987,7 +987,10 @@ class GroupPanelScreen(ModalScreen):
     CSS = """
     GroupPanelScreen { align: center middle; }
     #pbox { width: 88%; height: 85%; border: thick $accent; background: $surface; }
+    #pscroll { height: 1fr; }
     #pc { padding: 0 1; }
+    #prow { height: auto; align-horizontal: right; padding: 1 1 0 1; }
+    #prow Button { margin: 0 0 0 2; }
     """
     BINDINGS = [Binding("escape", "close", "Close"), Binding("q", "close", "Close"),
                 Binding("o", "open_links", "Открыть MR")]
@@ -1000,14 +1003,19 @@ class GroupPanelScreen(ModalScreen):
         self._urls = []
 
     def compose(self) -> ComposeResult:
-        with VerticalScroll(id="pbox"):
-            yield Static("", id="pc")
+        with Vertical(id="pbox"):
+            with VerticalScroll(id="pscroll"):
+                yield Static("", id="pc")
+            with Horizontal(id="prow"):
+                if not self._epic.get("loose"):
+                    yield Button("Release: MR эпик→master", id="release_mr", variant="warning")
+                yield Button("Закрыть", id="close")
         yield Footer()
 
     def on_mount(self):
         mode = self._epic.get("mode") or ("targets" if self._epic.get("targets") else "epic_branch")
         try:
-            self.query_one("#pbox", VerticalScroll).border_title = "Группа %s · %s · esc=закрыть" % (self.ekey, mode)
+            self.query_one("#pbox", Vertical).border_title = "Группа %s · %s · esc=закрыть" % (self.ekey, mode)
         except Exception:
             pass
         from rich.text import Text
@@ -1035,10 +1043,20 @@ class GroupPanelScreen(ModalScreen):
             t.append("\n")
         if self._rows:
             t.append("итог: %d задач, %d влито\n\n" % (len(self._rows), merged_n), style="bold")
-        t.append("[действия Test / Stage / Release — следующий шаг; «что на stage» появится с деплой-кнопками]\n",
-                 style="dim")
+        if self._epic.get("loose"):
+            t.append("loose-группа: задачи идут в master сами — релизь задачу на доске (M на задаче).\n", style="dim")
+        else:
+            t.append("Release ниже = MR ветка-эпика → master (через подтверждение). Сначала влей задачи "
+                     "в ветку эпика на доске.  Test / Stage — следующий шаг.\n", style="dim")
+        t.append("«что на stage/prod» пока не трекается — появится с деплой-кнопками.\n", style="dim")
         t.append("o — открыть MR-ссылки (%d) в браузере" % len(self._urls), style="dim")
         self.query_one("#pc", Static).update(t)
+
+    def on_button_pressed(self, event):
+        if event.button.id == "release_mr":
+            self.dismiss({"action": "release_mr"})
+        else:
+            self.dismiss(None)
 
     def action_open_links(self):
         urls = list(dict.fromkeys(self._urls))
@@ -1702,12 +1720,20 @@ class CCApp(App):
                          lambda _: self.build_tree())
 
     def action_panel(self):
-        # read-only control panel for a group: all its tasks + MR/merge state at a glance
+        # read-only control panel for a group: all its tasks + MR/merge state at a glance + actions
         ekey = self._current_epic()
         if not ekey:
             self.notify("выбери группу (эпик) или её задачу — P покажет панель группы"); return
         epic, rows = _group_panel_rows(self.state(), ekey)
-        self.push_screen(GroupPanelScreen(ekey, epic, rows))
+        self.push_screen(GroupPanelScreen(ekey, epic, rows), lambda res: self._panel_action(ekey, res))
+
+    def _panel_action(self, ekey, res):
+        # the panel's action buttons. Release = epic->master MR via the same MR-confirm gate as `M`.
+        if not res:
+            return
+        if res.get("action") == "release_mr":
+            argv = [sys.executable, "-u", ENGINE, "epic", "mr", ekey]
+            self._mr_with_gate(argv, "Epic MR: %s" % ekey, lambda _: self._after_epic_sync(ekey))
 
     def action_regroup(self):
         # move the focused task to another group on the board (task-based regrouping)
@@ -2162,7 +2188,11 @@ class CCApp(App):
         if dry:
             self.push_screen(OutputScreen(title + " (dry)", argv + ["--dry-run"]), after)
             return
-        # REAL MR creation -> confirm WHERE it goes first (esp. prod-bound master/main)
+        self._mr_with_gate(argv, title, after)
+
+    def _mr_with_gate(self, argv, title, after):
+        # REAL MR creation -> confirm WHERE it goes first (esp. prod-bound master/main), then create.
+        # Shared by the `M` key and the panel's Release button.
         def go(ok):
             if not ok:
                 self.notify("MR отменён — ничего не создано")

@@ -203,8 +203,14 @@ def test_group_panel_rows():
     assert tui._group_panel_rows(s, "EMPTY") == ({}, [])
 
 
+class _Ev:
+    def __init__(self, bid):
+        self.button = type("B", (), {"id": bid})()
+
+
 async def _panelscreen():
-    # GroupPanelScreen mounts, renders task rows + MR state, closes cleanly
+    # GroupPanelScreen mounts, renders task rows + MR state; Release button returns the action;
+    # loose group has NO Release button.
     epic = {"summary": "epic one", "mode": "epic_branch"}
     rows = [{"tid": "t_a", "title": "AA", "status": "mr", "merged": False,
              "repos": [("web", "http://mr/1", "E1")]},
@@ -213,14 +219,26 @@ async def _panelscreen():
     app = tui.CCApp()
     async with app.run_test() as pilot:
         await pilot.pause()
-        app.push_screen(tui.GroupPanelScreen("E1", epic, rows))
+        res = {}
+        app.push_screen(tui.GroupPanelScreen("E1", epic, rows), lambda r: res.__setitem__("r", r))
         await pilot.pause()
         scr = app.screen
         assert isinstance(scr, tui.GroupPanelScreen)
         txt = str(scr.query_one("#pc", Static).render())
         assert "AA" in txt and "MR открыт" in txt and "влит" in txt and "итог: 2 задач, 1 влито" in txt, txt
-        assert scr._urls == ["http://mr/1"]             # only real MR urls collected
-        scr.action_close()
+        assert scr._urls == ["http://mr/1"]              # only real MR urls collected
+        assert len(scr.query("#release_mr")) == 1        # epic group -> Release button present
+        scr.on_button_pressed(_Ev("release_mr"))         # press Release
+        await pilot.pause()
+        assert res.get("r") == {"action": "release_mr"}, res
+    # loose group -> no Release button
+    app2 = tui.CCApp()
+    async with app2.run_test() as pilot:
+        await pilot.pause()
+        app2.push_screen(tui.GroupPanelScreen("P__loose", {"loose": True}, []))
+        await pilot.pause()
+        assert len(app2.screen.query("#release_mr")) == 0
+        app2.screen.action_close()
         await pilot.pause()
     print("PANELSCREEN OK")
 
