@@ -714,6 +714,15 @@ def cmd_epic_ls(args):
 def target_for(epic, proj, repo):
     return epic.get("targets", {}).get(repo) or proj["repos"][repo]["default_branch"]
 
+def mr_target_for(epic_key, epic, proj, repo):
+    """The MR target branch a task in this group would use — mirrors _provision: epic_branch mode
+    targets the epic's own branch; targets/loose mode targets the per-repo integration branch or the
+    repo default. Used when a task is (re)grouped so its base reflects the new group."""
+    mode = epic.get("mode") or ("targets" if epic.get("targets") else "epic_branch")
+    if mode == "epic_branch":
+        return epic_key
+    return target_for(epic, proj, repo)
+
 def worktree_path(project_path, epic, slug, repo_name):
     return Path(project_path) / "cctui" / epic / slug / repo_name
 
@@ -867,6 +876,44 @@ def cmd_task_setup(args):
         print("task %s — CLAUDE.md обновлён (правила свежие): %s/CLAUDE.md" % (args.task, t.get("dir", "?")))
     else:
         die("не смог записать CLAUDE.md (нет dir/worktree у задачи?)")
+
+def cmd_task_regroup(args):
+    """Move a task to another GROUP (epic) within the SAME project, recomputing its MR targets. The
+    branch and worktrees are untouched — only group membership + per-repo base change (single-membership:
+    a task is in exactly one group). Pass a project name to UNGROUP (move to the project's loose group).
+    Refuses cross-project moves and tasks that already have an MR (an open MR's target won't change)."""
+    s = load_state()
+    t = s["tasks"].get(args.task) or die("unknown task '%s'" % args.task)
+    proj_name = s["epics"][t["epic"]]["project"]
+    tgt = args.group
+    if tgt in s["epics"]:
+        new_key = tgt
+        if s["epics"][new_key].get("project") != proj_name:
+            die("группа '%s' в проекте '%s' — перенос только внутри проекта '%s'" % (
+                new_key, s["epics"][new_key].get("project"), proj_name))
+    elif tgt in s["projects"]:
+        if tgt != proj_name:
+            die("проект '%s' не тот, в котором задача (проект '%s')" % (tgt, proj_name))
+        new_key = ensure_loose_epic(s, proj_name)          # ungroup -> the project's loose container
+    else:
+        die("неизвестная группа/эпик/проект '%s'" % tgt)
+    if new_key == t["epic"]:
+        die("задача уже в группе '%s'" % new_key)
+    if t.get("mrs"):
+        die("у задачи уже есть MR — перенос только для задач без MR (target открытого MR не сменится автоматически).\n"
+            "Закрой/смёржи MR (cc task abort/merge), потом переноси.")
+    proj = s["projects"][proj_name]
+    new_epic = s["epics"][new_key]
+    old_key = t["epic"]
+    t["epic"] = new_key
+    t["base"] = {r: mr_target_for(new_key, new_epic, proj, r) for r in t["repos"]}
+    save_state(s)
+    write_task_claude_md(s, args.task)                     # rules reflect the new group's release model
+    audit("task.regroup", task=args.task, **{"from": old_key, "to": new_key})
+    loose = bool(new_epic.get("loose"))
+    print("task %s перенесена: %s -> %s%s" % (args.task, old_key, new_key, "  (без группы)" if loose else ""))
+    for r in t["repos"]:
+        print("  %s -> %s" % (r, t["base"][r]))
 
 def cmd_task_add(args):
     s = load_state()
@@ -2801,6 +2848,7 @@ def build_parser():
     a.set_defaults(fn=cmd_task_add)
     a = tk.add_parser("ls"); a.add_argument("epic", nargs="?"); a.set_defaults(fn=cmd_task_ls)
     a = tk.add_parser("setup"); a.add_argument("task"); a.set_defaults(fn=cmd_task_setup)  # regen CLAUDE.md (fresh rules)
+    a = tk.add_parser("regroup"); a.add_argument("task"); a.add_argument("group"); a.set_defaults(fn=cmd_task_regroup)
     a = tk.add_parser("diff"); a.add_argument("task"); a.set_defaults(fn=cmd_task_diff)
     a = tk.add_parser("open"); a.add_argument("task"); a.set_defaults(fn=cmd_task_open)
     a = tk.add_parser("done"); a.add_argument("task"); a.add_argument("--force", action="store_true"); a.set_defaults(fn=cmd_task_done)

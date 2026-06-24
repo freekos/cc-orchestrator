@@ -460,6 +460,64 @@ def test_write_task_claude_md_is_always_fresh():
         shutil.rmtree(d, ignore_errors=True)
 
 
+def test_mr_target_for():
+    proj = {"repos": {"web": {"default_branch": "main"}, "api": {"default_branch": "master"}}}
+    eb = {"mode": "epic_branch", "branch": "E1"}                       # epic-branch -> the epic branch
+    assert cc.mr_target_for("E1", eb, proj, "web") == "E1"
+    tg = {"mode": "targets", "targets": {"web": "E1-integration"}}     # targets -> per-repo target / default
+    assert cc.mr_target_for("E1", tg, proj, "web") == "E1-integration"
+    assert cc.mr_target_for("E1", tg, proj, "api") == "master"         # no target -> repo default
+    loose = {"loose": True, "mode": "targets", "targets": {}}          # loose -> default branch
+    assert cc.mr_target_for("P__loose", loose, proj, "web") == "main"
+
+
+def _regroup_state(tmpd):
+    return {
+        "projects": {"P": {"path": tmpd, "repos": {"web": {"default_branch": "main", "remote": "x/web"}}},
+                     "Q": {"path": tmpd, "repos": {"web": {"default_branch": "main"}}}},
+        "epics": {"A": {"project": "P", "summary": "A", "mode": "epic_branch", "branch": "A"},
+                  "B": {"project": "P", "summary": "B", "mode": "targets", "targets": {"web": "B-int"}},
+                  "Z": {"project": "Q", "summary": "Z", "mode": "epic_branch", "branch": "Z"}},
+        "tasks": {"t_x": {"epic": "A", "title": "x", "branch": "A-x", "repos": ["web"],
+                          "base": {"web": "A"}, "worktrees": {}, "mrs": {}}},
+    }
+
+
+def test_cmd_task_regroup():
+    import os, json, shutil, tempfile
+    d = tempfile.mkdtemp(prefix="cc-regroup-")
+    saved = (cc.STATE_FILE, cc._BACKUP_DIR)
+    try:
+        cc.STATE_FILE = pathlib.Path(d) / "state.json"; cc._BACKUP_DIR = pathlib.Path(d) / "bk"
+        def run(group):
+            cc.STATE_FILE.write_text(json.dumps(_regroup_state(d)))
+            cc.cmd_task_regroup(types.SimpleNamespace(task="t_x", group=group))
+            return json.loads(cc.STATE_FILE.read_text())["tasks"]["t_x"]
+
+        t = run("B")                                   # A (epic_branch) -> B (targets)
+        assert t["epic"] == "B" and t["base"]["web"] == "B-int", t
+        assert t["branch"] == "A-x"                     # branch UNCHANGED (only membership/target move)
+        t = run("P")                                   # -> ungroup (project's loose group)
+        assert t["epic"] == "P__loose" and t["base"]["web"] == "main", t
+        # refusals (all SystemExit, state untouched):
+        for bad, why in [("Z", "cross-project"), ("A", "same group as start"), ("nope", "unknown group")]:
+            try:
+                run(bad); assert False, "expected refuse: %s" % why
+            except SystemExit:
+                pass
+        # refuse when the task already has an MR
+        st = _regroup_state(d); st["tasks"]["t_x"]["mrs"] = {"web": "http://mr/1"}
+        cc.STATE_FILE.write_text(json.dumps(st))
+        try:
+            cc.cmd_task_regroup(types.SimpleNamespace(task="t_x", group="B")); assert False
+        except SystemExit:
+            pass
+        assert json.loads(cc.STATE_FILE.read_text())["tasks"]["t_x"]["epic"] == "A"  # unchanged
+    finally:
+        cc.STATE_FILE, cc._BACKUP_DIR = saved
+        shutil.rmtree(d, ignore_errors=True)
+
+
 if __name__ == "__main__":
     n = 0
     for k, v in list(globals().items()):
