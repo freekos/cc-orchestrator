@@ -518,6 +518,56 @@ def test_cmd_task_regroup():
         shutil.rmtree(d, ignore_errors=True)
 
 
+def _ops_state(tmpd):
+    return {
+        "projects": {"P": {"path": tmpd, "repos": {"web": {"default_branch": "main"},
+                                                   "api": {"default_branch": "master"}}}},
+        "epics": {"E1": {"project": "P", "summary": "epic one", "mode": "epic_branch", "branch": "E1"}},
+        "tasks": {"t_x": {"epic": "E1", "title": "x", "branch": "E1-x", "repos": ["web", "api"],
+                          "worktrees": {"web": tmpd + "/wt/web", "api": tmpd + "/wt/api"}}},
+    }
+
+
+def test_ops_id_and_kinds():
+    assert cc.ops_id("IK-8894", "test") == "ops_test_ik-8894"
+    assert set(cc.OPS_KINDS) >= {"test", "stage", "deploy"}
+
+
+def test_render_ops_runbook():
+    s = _ops_state("/tmp/p")
+    test_rb = cc.render_ops_runbook(s, "E1", "test")
+    assert "group E1" in test_rb and "E1-x" in test_rb and "wt/web" in test_rb and "wt/api" in test_rb
+    assert "[cc-needs-input]" in test_rb and "Do NOT run git" in test_rb
+    assert "LOCAL only" in test_rb                       # test = local, no deploy
+    stage_rb = cc.render_ops_runbook(s, "E1", "stage")
+    assert "STAGE only" in stage_rb and "never touch production" in stage_rb
+    assert "[cc-needs-input]" in stage_rb               # ask-when-unsure baked into every kind
+
+
+def test_cmd_epic_ops_manual():
+    import os, json, shutil, tempfile
+    d = tempfile.mkdtemp(prefix="cc-ops-")
+    saved = (cc.STATE_FILE, cc._BACKUP_DIR)
+    try:
+        cc.STATE_FILE = pathlib.Path(d) / "state.json"; cc._BACKUP_DIR = pathlib.Path(d) / "bk"
+        cc.STATE_FILE.write_text(json.dumps(_ops_state(d)))
+        cc.cmd_epic_ops(types.SimpleNamespace(key="E1", kind="test", manual=True))  # no claude launch
+        s = json.loads(cc.STATE_FILE.read_text())
+        oid = cc.ops_id("E1", "test")
+        assert oid in s["ops"] and s["ops"][oid]["kind"] == "test" and s["ops"][oid]["status"] == "running"
+        cmd = os.path.join(d, "cctui", "E1", "_ops-test", "CLAUDE.md")
+        assert os.path.isfile(cmd), "ops runbook not written"
+        assert "cc OPS agent" in open(cmd).read()
+        # bad kind refuses; empty group refuses
+        try:
+            cc.cmd_epic_ops(types.SimpleNamespace(key="E1", kind="nope", manual=True)); assert False
+        except SystemExit:
+            pass
+    finally:
+        cc.STATE_FILE, cc._BACKUP_DIR = saved
+        shutil.rmtree(d, ignore_errors=True)
+
+
 if __name__ == "__main__":
     n = 0
     for k, v in list(globals().items()):

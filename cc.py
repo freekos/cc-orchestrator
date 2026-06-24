@@ -2070,6 +2070,109 @@ use a temp `git worktree` off the integration branch for the version bump):
 - Full autonomy through prod is authorized for this chat — still narrate every step and the result.
 """
 
+# ----------------------------- ops agents (test / stage / deploy) -----------------------------
+# A control-panel action does NOT hard-code per-project commands. It launches a headless claude
+# (an "ops agent") scoped to the group, with a generic runbook telling it to STUDY the repos and
+# figure out how to run/deploy them itself, report each step, and ask via [cc-needs-input] when
+# unsure. cc owns scope + runbook + visibility (log/audit/[cc-needs-input]); the agent owns the
+# project-specific knowledge. See memory: cc-orchestrate-not-hardcode.
+
+OPS_KINDS = {
+    "test": ("LOCAL TEST", (
+        "Get this group's work RUNNING locally so the user can test it.\n"
+        "1. STUDY each repo: read its CLAUDE.md, package.json scripts, README, .env.example, any\n"
+        "   docker-compose/Procfile, and CI config — figure out how to run it.\n"
+        "2. Run the repos TOGETHER locally (backends first, then frontend). Swap env so the frontend\n"
+        "   points at the LOCAL backend — find the right URL/port keys in the .env files yourself.\n"
+        "3. Smoke-check it's up (curl the health endpoint / hit the port) and report what you see.\n"
+        "- This is LOCAL only. Do NOT deploy anything.")),
+    "stage": ("DEPLOY TO STAGE", (
+        "Deploy this group's merged work to STAGING.\n"
+        "1. STUDY how each repo ships to stage: read CLAUDE.md, CI config (.gitlab-ci.yml / eas.json),\n"
+        "   deploy scripts. Figure out the exact stage step (which CI job / which command).\n"
+        "2. Trigger the stage deploy for each repo of the group. Report each step + the result/URL.\n"
+        "- STAGE only — never touch production. If a repo has no stage path you can find, ask.")),
+    "deploy": ("DEPLOY (per project's release process)", (
+        "Deploy this group per the project's own release process.\n"
+        "1. STUDY each repo's release/deploy docs (CLAUDE.md, CI, scripts).\n"
+        "2. Follow that process, respecting the release train. Report each step.\n"
+        "- Confirm the target (stage vs prod) before any prod action via [cc-needs-input].")),
+}
+
+def _group_worktrees(s, ekey):
+    """[(repo, worktree, branch)] across all tasks of the group — where the work physically lives."""
+    out = []
+    for tid, t in s["tasks"].items():
+        if t.get("epic") != ekey:
+            continue
+        for r, wt in (t.get("worktrees") or {}).items():
+            out.append((r, wt, t.get("branch", "?")))
+    return out
+
+def render_ops_runbook(s, ekey, kind):
+    """The ops agent's CLAUDE.md — generic per-kind rules + the group's repo/worktree map. The agent
+    studies the repos itself; cc never bakes in per-project commands."""
+    label, body = OPS_KINDS[kind]
+    wts = _group_worktrees(s, ekey)
+    repo_map = "\n".join("- %s  (branch %s)  ->  %s" % (r, br, wt) for r, wt, br in wts) or "(нет worktrees)"
+    return (
+        "# cc OPS agent — %s — group %s\n\n"
+        "You are a cc OPS agent. cc gives you the scope + rules; YOU figure out the project specifics.\n\n"
+        "## Group repos & worktrees (the work lives here — touch ONLY these):\n%s\n\n"
+        "## Your job\n%s\n\n"
+        "## Rules\n"
+        "- Do NOT run git — cc owns branches/commits/MRs. Edit only inside the worktrees above.\n"
+        "- You run NON-INTERACTIVELY in the background: NEVER call AskUserQuestion, never wait. Do\n"
+        "  everything you safely can first. If you genuinely cannot proceed (don't know how to run a\n"
+        "  repo, missing a secret/port, ambiguous which services, or a prod action needs the user's\n"
+        "  ok) — make the VERY LAST line of your output exactly:\n"
+        "  `[cc-needs-input] <one-line question + your recommended default>`  (nothing after it).\n"
+        "  The user sees ❓ on the board and answers when they open this chat.\n"
+        "- REPORT each step you take and its result, clearly, as you go.\n"
+    ) % (label, ekey, repo_map, body)
+
+def ops_id(ekey, kind):
+    return "ops_%s_%s" % (kind, slugify(ekey))
+
+def cmd_epic_ops(args):
+    """Launch a headless ops agent (test/stage/deploy) for a group. cc prepares the scope + runbook
+    and runs claude in the background; the agent studies the repos and acts, logging visibly and
+    asking via [cc-needs-input]. NOT per-project hard-coded — the agent owns the how."""
+    kind = args.kind
+    if kind not in OPS_KINDS:
+        die("kind должен быть один из: %s" % ", ".join(OPS_KINDS))
+    s = load_state()
+    e = s["epics"].get(args.key) or die("unknown epic '%s'" % args.key)
+    proj = s["projects"][e["project"]]
+    wts = _group_worktrees(s, args.key)
+    if not wts:
+        die("в группе %s нет worktrees (создай/проведи задачи сначала)" % args.key)
+    opsdir = Path(proj["path"]) / "cctui" / args.key / ("_ops-" + kind)
+    opsdir.mkdir(parents=True, exist_ok=True)
+    (opsdir / "CLAUDE.md").write_text(render_ops_runbook(s, args.key, kind))
+    oid = ops_id(args.key, kind)
+    log = STATE_DIR / ("%s.log" % oid)
+    adds = [wt for _, wt, _ in wts]
+    s.setdefault("ops", {})[oid] = {"epic": args.key, "kind": kind, "dir": str(opsdir),
+                                    "log": str(log), "status": "running", "claude_session": {}}
+    save_state(s)
+    audit("ops.start", epic=args.key, kind=kind)
+    if getattr(args, "manual", False):
+        print("ops dir готов (manual, агент не запущен): %s" % opsdir)
+        return
+    prompt = ("[cc] You are the OPS agent for group %s (%s). Follow this folder's CLAUDE.md: study the "
+              "repos, do the job, report each step, and if you must stop, end with a single "
+              "`[cc-needs-input] …` line." % (args.key, kind))
+    addflags = []
+    for a in adds:
+        addflags += ["--add-dir", a]
+    with open(log, "w") as lf:
+        proc = subprocess.Popen(["claude", "--permission-mode", "bypassPermissions", "-p", prompt] + addflags,
+                                cwd=str(opsdir), stdout=lf, stderr=lf)
+    s = load_state(); s["ops"][oid]["pid"] = proc.pid; save_state(s)
+    print("ops-агент [%s] запущен для группы %s (pid=%s)\n  лог: %s\n  следить: cc tui (или tail -f лог)"
+          % (kind, args.key, proc.pid, log))
+
 def cmd_epic_open(args):
     s = load_state()
     e = s["epics"].get(args.key) or die("unknown epic '%s'" % args.key)
@@ -2833,6 +2936,8 @@ def build_parser():
     a = ep.add_parser("memory"); a.add_argument("key"); a.set_defaults(fn=cmd_epic_memory)
     a = ep.add_parser("sync"); a.add_argument("key"); a.set_defaults(fn=cmd_epic_sync)
     a = ep.add_parser("open"); a.add_argument("key"); a.set_defaults(fn=cmd_epic_open)
+    a = ep.add_parser("ops"); a.add_argument("key"); a.add_argument("--kind", default="test")
+    a.add_argument("--manual", action="store_true"); a.set_defaults(fn=cmd_epic_ops)
     a = ep.add_parser("done"); a.add_argument("key"); a.set_defaults(fn=cmd_epic_done)
     a = ep.add_parser("archive"); a.add_argument("key"); a.set_defaults(fn=cmd_epic_archive)
     a = ep.add_parser("unarchive"); a.add_argument("key"); a.set_defaults(fn=cmd_epic_unarchive)
