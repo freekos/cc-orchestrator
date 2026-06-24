@@ -413,6 +413,53 @@ def test_cmd_log_smoke():
         shutil.rmtree(cc.AUDIT_FILE.parent, ignore_errors=True); cc.AUDIT_FILE = saved
 
 
+def _rules_state(loose_dir, epic_dir):
+    return {
+        "projects": {"P": {"path": "/tmp/p", "repos": {"web": {"default_branch": "main", "remote": "x/web"}},
+                           "jira": {}}},
+        "epics": {"P__loose": {"project": "P", "loose": True, "mode": "targets", "targets": {}},
+                  "E1": {"project": "P", "summary": "My epic", "mode": "epic_branch", "branch": "E1",
+                         "memory": "epic note v1"}},
+        "tasks": {
+            "t_loose": {"epic": "P__loose", "title": "fix login", "branch": "fix-login", "repos": ["web"],
+                        "worktrees": {"web": loose_dir + "/web"}, "dir": loose_dir},
+            "t_epic": {"epic": "E1", "title": "feat x", "branch": "E1-feat-x", "repos": ["web"],
+                       "worktrees": {"web": epic_dir + "/web"}, "dir": epic_dir},
+        },
+    }
+
+
+def test_render_task_claude_md_loose_vs_epic():
+    s = _rules_state("/tmp/loose", "/tmp/epic")
+    loose = cc.render_task_claude_md(s, "t_loose")
+    assert "no epic" in loose and "master/main" in loose, loose[:200]
+    assert "branch fix-login" in loose and "cc task merge t_loose" in loose
+    epic = cc.render_task_claude_md(s, "t_epic")
+    assert "Epic E1: My epic" in epic and "epic note v1" in epic       # epic memory baked in
+    assert "EPIC task" in epic and "epic's branch (E1)" in epic and "cc task merge t_epic" in epic
+
+
+def test_write_task_claude_md_is_always_fresh():
+    import os, shutil, tempfile
+    d = tempfile.mkdtemp(prefix="cc-rules-")
+    try:
+        s = _rules_state(d, d)                                          # epic task writes into d/CLAUDE.md
+        assert cc.write_task_claude_md(s, "t_epic")
+        md1 = open(os.path.join(d, "CLAUDE.md")).read()
+        assert "epic note v1" in md1
+        # change the rules (epic memory), regenerate -> file reflects the NEW rules (the staleness fix)
+        s["epics"]["E1"]["memory"] = "epic note v2 — NEW RULE"
+        assert cc.write_task_claude_md(s, "t_epic")
+        md2 = open(os.path.join(d, "CLAUDE.md")).read()
+        assert "epic note v2 — NEW RULE" in md2 and "epic note v1" not in md2
+        # no dir -> best-effort False, never raises
+        s["tasks"]["t_epic"]["dir"] = None; s["tasks"]["t_epic"]["worktrees"] = {}
+        assert cc.write_task_claude_md(s, "t_epic") is False
+        assert cc.write_task_claude_md(s, "nope") is False
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
 if __name__ == "__main__":
     n = 0
     for k, v in list(globals().items()):

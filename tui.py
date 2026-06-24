@@ -1771,6 +1771,7 @@ class CCApp(App):
         if not os.path.isdir(cwd):
             self.notify("worktree missing — recreate the task", severity="error"); return
         self._mark_seen(tid)
+        subprocess.run([sys.executable, ENGINE, "task", "setup", tid], capture_output=True)  # rules always fresh on open
         sid = (t.get("claude_session") or {}).get(t["primary"]) or cc.resolve_session(cwd)
         chat = "claude --resume %s --permission-mode auto" % sid if sid else "claude --permission-mode auto"
         pname = self.state()["epics"].get(t.get("epic"), {}).get("project")

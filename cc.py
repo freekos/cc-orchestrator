@@ -796,6 +796,78 @@ def _unique_branch(s, slug):
         i += 1
     return "%s-%d" % (slug, i)
 
+def render_task_claude_md(s, tid):
+    """The task chat's CLAUDE.md (rules + repo map + release model), rebuilt from CURRENT state and
+    templates. PURE — returns the markdown. Used at task creation AND on every chat reopen so the rules
+    are NEVER stale (this is the answer to 'do I reopen chats after changing rules?' — no, cc refreshes
+    them on open, same as `cc epic open` / `cc project setup` already do)."""
+    t = s["tasks"][tid]
+    ekey = t["epic"]; epic = s["epics"][ekey]; loose = bool(epic.get("loose"))
+    proj = s["projects"][epic["project"]]
+    order = t.get("repos", [])
+    worktrees = t.get("worktrees", {})
+    branch = t.get("branch", "")
+    task_dir = t.get("dir") or (str(Path(next(iter(worktrees.values()))).parent) if worktrees else "")
+    repo_map = "\n".join("- %s -> %s" % (r, worktrees.get(r, "?")) for r in order)
+    epic_mem = (epic.get("memory") or "").strip()
+    header = ("# Task in project %s (no epic) -> MR to master/main" % epic["project"]) if loose \
+             else ("# Epic %s: %s" % (ekey, epic.get("summary", "")))
+    md = ("%s\n\n%s\n\n## Repos available for THIS task (branch %s):\n%s\n\n"
+          "Touch ONLY the repos actually relevant to this task; leave the rest UNCHANGED "
+          "(cc opens a Merge Request only for repos you modify, so untouched repos cost nothing). "
+          "Do NOT run git — cc handles branches/commits/MRs.\n") % (
+          header, epic_mem or "(no epic notes yet)", branch, repo_map)
+    if loose:
+        md += (
+            "\n## Release (when the user says релиз / merge / залей)\n"
+            "This task has NO epic — its MRs target master/main, so merging it IS a prod-bound release.\n"
+            "- `cc task mrs %s` — show each repo's MR (the user reviews it).\n"
+            "- Before merging, ACTUALIZE: `git fetch origin <default>` + merge `origin/<default>` into the\n"
+            "  task branch (resolve conflicts) so you ship ON TOP of current master/main, not a stale base.\n"
+            "- `cc task merge %s` — merge the OPEN MRs into master/main (`--dry-run` to preview).\n"
+            "- If the repo is versioned, bump to a genuinely NEW version (current version + latest `git tag`,\n"
+            "  increment, never reuse; verify the tag is free) and tag it.\n"
+            "Merge ONLY on the user's explicit word — never merge to a default branch on your own. After the\n"
+            "merge it is PROD-bound: deploy per the project's release process (release train — backend+mobile\n"
+            "land on prod before web/admin; feature-flag-gated surfaces ship dark). Local-only repos with no\n"
+            "remote just merge locally (no prod).\n") % (tid, tid)
+    else:
+        md += (
+            "\n## Release (when the user says релиз / merge / залей)\n"
+            "This is an EPIC task — its MRs target the epic's branch (%s), NOT master/main. Merging it only\n"
+            "LANDS the work INTO the epic; it is NOT a prod release.\n"
+            "- `cc task mrs %s` — show the MR (the user reviews it).\n"
+            "- `cc task merge %s` — merge it into the epic branch, on the user's word.\n"
+            "The PROD release of the WHOLE epic happens in the EPIC chat (`cc epic mr` → merge → deploy,\n"
+            "respecting the release train) — not from this task chat.\n") % (ekey, tid, tid)
+    md += jira_chat_setup(task_dir, proj, epic["project"])   # project-scoped Jira + block the MCP
+    return md
+
+def write_task_claude_md(s, tid):
+    """(Re)write the task's CLAUDE.md from render_task_claude_md. Best-effort -> bool."""
+    t = s["tasks"].get(tid)
+    if not t:
+        return False
+    wts = t.get("worktrees") or {}
+    task_dir = t.get("dir") or (str(Path(next(iter(wts.values()))).parent) if wts else None)
+    if not task_dir:
+        return False
+    try:
+        (Path(task_dir) / "CLAUDE.md").write_text(render_task_claude_md(s, tid))
+        return True
+    except Exception:
+        return False
+
+def cmd_task_setup(args):
+    """Regenerate the task's CLAUDE.md so its rules are FRESH (called on chat reopen by the TUI).
+    Mirrors `cc epic open` / `cc project setup`, which already rebuild their runbooks on open."""
+    s = load_state()
+    t = s["tasks"].get(args.task) or die("unknown task '%s'" % args.task)
+    if write_task_claude_md(s, args.task):
+        print("task %s — CLAUDE.md обновлён (правила свежие): %s/CLAUDE.md" % (args.task, t.get("dir", "?")))
+    else:
+        die("не смог записать CLAUDE.md (нет dir/worktree у задачи?)")
+
 def cmd_task_add(args):
     s = load_state()
     # `args.epic` may be a real epic key OR a PROJECT name — the latter creates an epic-LESS task that
@@ -845,49 +917,13 @@ def cmd_task_add(args):
         print("  ⚠️ %d repo(s) NOT provisioned: %s" % (len(skipped), ", ".join("%s (%s)" % (r, e) for r, e in skipped.items())))
     primary = order[0]
     task_dir = str(Path(worktrees[primary]).parent)   # cctui/<epic>/<slug>/ — repos are its subfolders
-    repo_map = "\n".join("- %s -> %s" % (r, worktrees[r]) for r in order)
-    epic_mem = (epic.get("memory") or "").strip()
-    header = ("# Task in project %s (no epic) -> MR to master/main" % epic["project"]) if loose \
-             else ("# Epic %s: %s" % (ekey, epic.get("summary", "")))
-    claude_md = ("%s\n\n%s\n\n## Repos available for THIS task (branch %s):\n%s\n\n"
-                 "Touch ONLY the repos actually relevant to this task; leave the rest UNCHANGED "
-                 "(cc opens a Merge Request only for repos you modify, so untouched repos cost nothing). "
-                 "Do NOT run git — cc handles branches/commits/MRs.\n") % (
-                 header, epic_mem or "(no epic notes yet)", branch, repo_map)
-    if loose:
-        claude_md += (
-            "\n## Release (when the user says релиз / merge / залей)\n"
-            "This task has NO epic — its MRs target master/main, so merging it IS a prod-bound release.\n"
-            "- `cc task mrs %s` — show each repo's MR (the user reviews it).\n"
-            "- Before merging, ACTUALIZE: `git fetch origin <default>` + merge `origin/<default>` into the\n"
-            "  task branch (resolve conflicts) so you ship ON TOP of current master/main, not a stale base.\n"
-            "- `cc task merge %s` — merge the OPEN MRs into master/main (`--dry-run` to preview).\n"
-            "- If the repo is versioned, bump to a genuinely NEW version (current version + latest `git tag`,\n"
-            "  increment, never reuse; verify the tag is free) and tag it.\n"
-            "Merge ONLY on the user's explicit word — never merge to a default branch on your own. After the\n"
-            "merge it is PROD-bound: deploy per the project's release process (release train — backend+mobile\n"
-            "land on prod before web/admin; feature-flag-gated surfaces ship dark). Local-only repos with no\n"
-            "remote just merge locally (no prod).\n") % (tid, tid)
-    else:
-        claude_md += (
-            "\n## Release (when the user says релиз / merge / залей)\n"
-            "This is an EPIC task — its MRs target the epic's branch (%s), NOT master/main. Merging it only\n"
-            "LANDS the work INTO the epic; it is NOT a prod release.\n"
-            "- `cc task mrs %s` — show the MR (the user reviews it).\n"
-            "- `cc task merge %s` — merge it into the epic branch, on the user's word.\n"
-            "The PROD release of the WHOLE epic happens in the EPIC chat (`cc epic mr` → merge → deploy,\n"
-            "respecting the release train) — not from this task chat.\n") % (ekey, tid, tid)
-    claude_md += jira_chat_setup(task_dir, proj, epic["project"])   # project-scoped Jira + block the MCP
-    try:
-        (Path(task_dir) / "CLAUDE.md").write_text(claude_md)
-    except Exception:
-        pass
     log = STATE_DIR / ("%s.log" % tid)
     s["tasks"][tid] = {"epic": ekey, "title": title, "prompt": args.prompt,
                        "repos": order, "branch": branch, "worktrees": worktrees, "base": base,
                        "primary": primary, "dir": task_dir, "claude_session": {}, "status": "running",
                        "mrs": {}, "log": str(log), "skipped": skipped}
     save_state(s)
+    write_task_claude_md(s, tid)   # rules from current templates — SAME path as a chat reopen
     audit("task.add", task=tid, epic=ekey, repos=order, branch=branch, title=title, skipped=skipped)
     full_prompt = (args.prompt
                    + "\n\n[cc] This task spans the repo worktrees below (branch %s). "
@@ -2763,6 +2799,7 @@ def build_parser():
     a.add_argument("--manual", action="store_true", help="board entry + worktree but NO background agent (you do the work)")
     a.set_defaults(fn=cmd_task_add)
     a = tk.add_parser("ls"); a.add_argument("epic", nargs="?"); a.set_defaults(fn=cmd_task_ls)
+    a = tk.add_parser("setup"); a.add_argument("task"); a.set_defaults(fn=cmd_task_setup)  # regen CLAUDE.md (fresh rules)
     a = tk.add_parser("diff"); a.add_argument("task"); a.set_defaults(fn=cmd_task_diff)
     a = tk.add_parser("open"); a.add_argument("task"); a.set_defaults(fn=cmd_task_open)
     a = tk.add_parser("done"); a.add_argument("task"); a.add_argument("--force", action="store_true"); a.set_defaults(fn=cmd_task_done)
@@ -2955,7 +2992,8 @@ _READONLY = {cmd_task_diff, cmd_task_ls, cmd_repo_ls, cmd_repo_members,
              cmd_epic_ls, cmd_epic_memory, cmd_project_ls, cmd_jira_epics, cmd_orphans, cmd_epic_plan,
              cmd_jira_search, cmd_jira_get, cmd_jira_comment, cmd_jira_done,
              cmd_jira_attachments, cmd_jira_pull,
-             cmd_jira_transitions, cmd_jira_move, cmd_jira_rollup, cmd_doctor, cmd_log}  # no cc-state writes; network off the lock
+             cmd_jira_transitions, cmd_jira_move, cmd_jira_rollup, cmd_doctor, cmd_log,
+             cmd_task_setup}  # no cc-state writes; network/file off the lock
 
 _SELF_LOCKED = {cmd_epic_mrs, cmd_task_mrs, cmd_repo_add, cmd_project_new, cmd_recover,
                 cmd_task_merge, cmd_epic_merge}   # do git/network lock-free, then save under a brief mutate() themselves
