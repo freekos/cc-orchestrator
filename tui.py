@@ -41,6 +41,23 @@ def _audit_brief(r):
     return ("%s  %s" % (verb, "  ".join(bits))).rstrip()
 
 
+def _parse_mr_plan(text):
+    """Parse `cc task mr --dry-run` / `cc epic mr --dry-run` output into [(repo, source, target, prod)].
+    `prod` = the MR lands on master/main (epic->master is always a release). Used to show the user
+    EXACTLY where each MR will go before any is created."""
+    rows = []
+    for ln in text.splitlines():
+        m = re.match(r"\[([^\]]+)\] DRY-RUN epic MR: (\S+) -> (\S+)", ln)   # epic->master release MR
+        if m:
+            rows.append((m.group(1), m.group(2), m.group(3), True))
+            continue
+        m = re.match(r"\[([^\]]+)\] DRY-RUN: (\S+) -> (\S+)", ln)           # task MR (-> base/epic branch)
+        if m:
+            tgt = m.group(3)
+            rows.append((m.group(1), m.group(2), tgt, tgt in ("master", "main")))
+    return rows
+
+
 def fast_status(t):
     """Cheap status for rendering: live agent -> running; otherwise the cached status computed
     off-thread by _refresh_statuses (it encodes merged-with-new-edits -> review). Falls back to
@@ -616,6 +633,78 @@ class OutputScreen(ModalScreen):
 
     def action_close(self):
         self.dismiss(None)
+
+
+class MRConfirmScreen(ModalScreen):
+    """Loud confirmation BEFORE any MR is created: shows each repo's source -> target, flags the
+    prod-bound ones (master/main), and refuses to proceed without an explicit y/Enter. Computes the
+    plan off-thread by running the dry-run first (creates nothing)."""
+    CSS = """
+    MRConfirmScreen { align: center middle; }
+    #mrbox { width: 80%; height: auto; max-height: 80%; border: thick $warning; background: $surface; padding: 1 2; }
+    #mrc { padding: 0 1; }
+    """
+    BINDINGS = [Binding("escape", "cancel", "Отмена"), Binding("q", "cancel", "Отмена"),
+                Binding("y", "confirm", "Создать"), Binding("enter", "confirm", "Создать")]
+
+    def __init__(self, title, dry_argv):
+        super().__init__()
+        self._title = title
+        self._dry = dry_argv
+        self._rows = None          # None = still computing; [] = nothing to create
+
+    def compose(self) -> ComposeResult:
+        with VerticalScroll(id="mrbox"):
+            yield Static("⏳ считаю, куда пойдут MR …", id="mrc")
+        yield Footer()
+
+    def on_mount(self):
+        try:
+            self.query_one("#mrbox", VerticalScroll).border_title = self._title
+        except Exception:
+            pass
+        self.app._bg("mrplan:%d" % id(self), self._compute)
+
+    def _compute(self):
+        try:
+            out = subprocess.run(self._dry, capture_output=True, text=True, timeout=60)
+            text = (out.stdout or "") + "\n" + (out.stderr or "")
+        except Exception as ex:
+            text = "ERR %s" % ex
+        self.app.call_from_thread(self._show_plan, _parse_mr_plan(text))
+
+    def _show_plan(self, rows):   # NB: not `_render` — that name collides with textual's Widget._render
+        self._rows = rows
+        from rich.text import Text
+        t = Text()
+        if not rows:
+            t.append("Нечего создавать — изменений нет ни в одном репо.\n\n", style="dim")
+            t.append("esc — закрыть", style="bold")
+            self.query_one("#mrc", Static).update(t); return
+        prod = [r for r in rows if r[3]]
+        t.append("СОЗДАТЬ %d MR — проверь, куда они пойдут:\n\n" % len(rows), style="bold")
+        for repo, src, tgt, is_prod in rows:
+            if is_prod:
+                t.append("  %s\n" % repo, style="bold")
+                t.append("     %s  →  %s   ⚠ PROD (master/main)\n" % (src, tgt), style="bold red")
+            else:
+                t.append("  %s\n" % repo)
+                t.append("     %s  →  %s\n" % (src, tgt), style="green")
+        t.append("\n")
+        if prod:
+            t.append("⚠ %d MR идут в master/main — это прод-bound релиз.\n" % len(prod), style="bold yellow")
+        t.append("\ny / Enter — создать", style="bold")
+        t.append("        esc / q — отмена", style="dim")
+        self.query_one("#mrc", Static).update(t)
+
+    def action_confirm(self):
+        if self._rows:          # only confirm once the plan is loaded AND non-empty
+            self.dismiss(True)
+        else:
+            self.dismiss(False)
+
+    def action_cancel(self):
+        self.dismiss(False)
 
 
 class ReviewersScreen(ModalScreen):
@@ -1897,11 +1986,18 @@ class CCApp(App):
         else:
             self.notify("select a task (MR) or epic (epic->master MR)")
             return
-        if dry:
-            argv.append("--dry-run"); title += " (dry)"
         ekey = data["id"] if data["type"] == "epic" else None
-        self.push_screen(OutputScreen(title, argv),
-                         lambda _: (self._after_epic_sync(ekey) if ekey else self.build_tree()))
+        after = (lambda _: (self._after_epic_sync(ekey) if ekey else self.build_tree()))
+        if dry:
+            self.push_screen(OutputScreen(title + " (dry)", argv + ["--dry-run"]), after)
+            return
+        # REAL MR creation -> confirm WHERE it goes first (esp. prod-bound master/main)
+        def go(ok):
+            if not ok:
+                self.notify("MR отменён — ничего не создано")
+                return
+            self.push_screen(OutputScreen(title, argv), after)
+        self.push_screen(MRConfirmScreen("Создать MR — %s" % title, argv + ["--dry-run"]), go)
 
 
 if __name__ == "__main__":

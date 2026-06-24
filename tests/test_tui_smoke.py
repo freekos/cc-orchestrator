@@ -91,6 +91,67 @@ async def _smoke():
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+def test_parse_mr_plan():
+    # task MR dry-run + epic MR dry-run + skipped lines -> only the real targets, prod-flagged
+    out = "\n".join([
+        "[web] DRY-RUN: fix-login -> master | title='x' reviewer=- assignee=me label=E",
+        "[api] DRY-RUN: fix-login -> E1-integration | title='x' reviewer=- assignee=me label=E",
+        "[mob] no changes vs master - skipped",
+        "[svc] DRY-RUN epic MR: E1 -> main  (3 commit(s) ahead, reviewer lead)",
+    ])
+    rows = tui._parse_mr_plan(out)
+    assert ("web", "fix-login", "master", True) in rows          # task -> master = PROD
+    assert ("api", "fix-login", "E1-integration", False) in rows # task -> integration = not prod
+    assert ("svc", "E1", "main", True) in rows                   # epic->main = release (prod)
+    assert all(r[0] != "mob" for r in rows)                      # skipped repo absent
+    assert len(rows) == 3
+    assert tui._parse_mr_plan("nothing here\n[x] no changes vs main - skipped") == []
+
+
+async def _mrconfirm():
+    # MRConfirmScreen renders the plan, flags PROD, and only confirms (->True) with rows present.
+    tmp = pathlib.Path(tempfile.mkdtemp(prefix="cc-mrc-"))
+    saved = (cc.STATE_FILE, cc._BACKUP_DIR, cc.AUDIT_FILE)
+    cc.STATE_FILE = tmp / "state.json"; cc._BACKUP_DIR = tmp / "backups"; cc.AUDIT_FILE = tmp / "audit.log"
+    cc.STATE_FILE.write_text(json.dumps(_make_state(tmp)))
+    try:
+        app = tui.CCApp()
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            result = {}
+            scr = tui.MRConfirmScreen("Создать MR — test", ["true"])
+            scr._compute = lambda: None                       # don't spawn the dry-run subprocess
+            app.push_screen(scr, lambda r: result.__setitem__("r", r))
+            await pilot.pause()
+            scr._show_plan([("web", "fix", "master", True), ("api", "fix", "E1-int", False)])
+            await pilot.pause()
+            txt = str(scr.query_one("#mrc", Static).render())
+            assert "PROD" in txt and "СОЗДАТЬ" in txt, txt
+            scr.action_confirm()
+            await pilot.pause()
+            assert result.get("r") is True, result            # rows present -> confirm yields True
+        # empty plan must NOT confirm (guards an accidental create when nothing changed)
+        app2 = tui.CCApp()
+        async with app2.run_test() as pilot:
+            await pilot.pause()
+            res2 = {}
+            scr2 = tui.MRConfirmScreen("x", ["true"]); scr2._compute = lambda: None
+            app2.push_screen(scr2, lambda r: res2.__setitem__("r", r))
+            await pilot.pause()
+            scr2._show_plan([])
+            scr2.action_confirm()
+            await pilot.pause()
+            assert res2.get("r") is False, res2
+        print("MRCONFIRM OK")
+    finally:
+        cc.STATE_FILE, cc._BACKUP_DIR, cc.AUDIT_FILE = saved
+        import shutil; shutil.rmtree(tmp, ignore_errors=True)
+
+
 if __name__ == "__main__":
     asyncio.run(_smoke())
     print("ok test_tui_smoke")
+    test_parse_mr_plan()
+    print("ok test_parse_mr_plan")
+    asyncio.run(_mrconfirm())
+    print("ok test_mrconfirm")
