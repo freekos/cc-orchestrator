@@ -16,7 +16,7 @@ import threading
 ENGINE = str(Path(__file__).parent / "cc.py")
 GLYPH = {"running": "🔵", "review": "🟡", "mr": "🟣", "merged": "✅", "idle": "⚪", "done": "✅"}
 LEGEND = ("🟡 ждёт тебя   🔵 агент работает   🟣 MR открыт   ✅ влито   ⚪ простаивает   "
-          "💬 новый ответ   ❓ ждёт твоего ответа   ·   # эпик   ⚠️ потеряшки (U — вернуть)   ·   L — таймлайн")
+          "💬 новый ответ   ❓ ждёт твоего ответа   ·   # эпик   ⚠️ потеряшки (U — вернуть)   ·   L — таймлайн   G — в группу")
 
 _AUDIT_VERB = {"task.add": "создана", "task.merge": "влита", "epic.mr": "MR эпик→master",
                "jira.transition": "Jira", "repo.set": "repo set", "state.restore": "восстановлен стейт",
@@ -56,6 +56,22 @@ def _parse_mr_plan(text):
             tgt = m.group(3)
             rows.append((m.group(1), m.group(2), tgt, tgt in ("master", "main")))
     return rows
+
+
+def _group_options(s, tid):
+    """(options, cur_key) for moving a task to another group: non-loose/non-archived epics in the
+    task's project, excluding its current group, plus an ungroup option (unless the task is already
+    loose). Option value is the epic key, or the project name for ungroup."""
+    t = s["tasks"][tid]
+    cur = t["epic"]
+    proj_name = s["epics"][cur]["project"]
+    opts = []
+    for k, e in s["epics"].items():
+        if e.get("project") == proj_name and not e.get("loose") and not e.get("archived") and k != cur:
+            opts.append(("%s — %s" % (k, (e.get("summary") or "")[:40]), k))
+    if not s["epics"].get(cur, {}).get("loose"):
+        opts.append(("(без группы — прямо в проект)", proj_name))
+    return opts, cur
 
 
 def fast_status(t):
@@ -907,6 +923,46 @@ class TaskManageScreen(ModalScreen):
         self.dismiss(None)
 
 
+class MoveToGroupScreen(ModalScreen):
+    """Pick a group to move a task into (task-based regrouping). Returns the chosen epic key, the
+    project name for ungroup, or None on cancel."""
+    CSS = """
+    MoveToGroupScreen { align: center middle; }
+    #dlg { width: 78; max-width: 92%; height: auto; padding: 1 2; border: round $accent; background: $surface; }
+    #dlg Label { margin-bottom: 1; }
+    #dlg Select { margin-bottom: 1; width: 1fr; }
+    #dlg Button { margin: 0 2 0 0; min-width: 14; }
+    """
+    BINDINGS = [Binding("escape", "cancel", "Cancel")]
+
+    def __init__(self, tid, options, cur):
+        super().__init__()
+        self.tid = tid
+        self._options = options
+        self.cur = cur
+
+    def compose(self):
+        with Vertical(id="dlg"):
+            yield Label("[b]Перенести задачу %s[/b]   (сейчас: %s)" % (self.tid, self.cur))
+            yield Label("[dim]Сменит группу и пересчитает target MR. Ветка и worktree не тронутся. "
+                        "Только для задач без MR.[/dim]")
+            yield Select(self._options, id="grp", prompt="выбери группу")
+            with Horizontal():
+                yield Button("Перенести", id="ok", variant="primary")
+                yield Button("Отмена", id="cancel")
+
+    def on_button_pressed(self, event):
+        if event.button.id == "cancel":
+            self.dismiss(None); return
+        val = self.query_one("#grp", Select).value
+        if val in (None, Select.BLANK):
+            self.app.notify("выбери группу", severity="error"); return
+        self.dismiss(str(val))
+
+    def action_cancel(self):
+        self.dismiss(None)
+
+
 class EpicTargetsScreen(ModalScreen):
     """Set per-repo integration branches (targets) for an epic — repo -> branch."""
     CSS = """
@@ -1038,6 +1094,7 @@ class CCApp(App):
         Binding("r", "refresh", "Refresh"),
         Binding("U", "recover", "Recover lost"),
         Binding("L", "timeline", "Timeline"),
+        Binding("G", "regroup", "→Group"),
         Binding("q", "quit", "Quit"),
     ]
 
@@ -1553,6 +1610,22 @@ class CCApp(App):
         self.push_screen(OutputScreen("recover lost tasks",
                          [sys.executable, "-u", ENGINE, "recover"]),
                          lambda _: self.build_tree())
+
+    def action_regroup(self):
+        # move the focused task to another group on the board (task-based regrouping)
+        tid = self._cur_task()
+        if not tid:
+            self.notify("встань на задачу, чтобы перенести её в другую группу"); return
+        opts, cur = _group_options(self.state(), tid)
+        if not opts:
+            self.notify("нет других групп в этом проекте — создай эпик (e)"); return
+        def go(val):
+            if not val:
+                return
+            self.push_screen(OutputScreen("regroup %s -> %s" % (tid, val),
+                             [sys.executable, "-u", ENGINE, "task", "regroup", tid, val]),
+                             lambda _: self.build_tree())
+        self.push_screen(MoveToGroupScreen(tid, opts, cur), go)
 
     def action_timeline(self):
         # the 'what happened' log; context-aware — filtered to the focused task/epic, else everything

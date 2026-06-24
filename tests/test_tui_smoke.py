@@ -148,6 +148,40 @@ async def _mrconfirm():
         import shutil; shutil.rmtree(tmp, ignore_errors=True)
 
 
+def test_group_options():
+    s = {"projects": {"P": {}, "Q": {}},
+         "epics": {"A": {"project": "P", "summary": "aaa"}, "B": {"project": "P", "summary": "bbb"},
+                   "C": {"project": "P", "summary": "ccc", "archived": True},
+                   "P__loose": {"project": "P", "loose": True},
+                   "Z": {"project": "Q", "summary": "zzz"}},
+         "tasks": {"t": {"epic": "A"}, "t2": {"epic": "P__loose"}}}
+    opts, cur = tui._group_options(s, "t")
+    vals = [v for _, v in opts]
+    assert cur == "A"
+    assert "B" in vals and "A" not in vals           # other epic offered, current excluded
+    assert "C" not in vals and "Z" not in vals        # archived + other-project excluded
+    assert "P__loose" not in vals and "P" in vals     # loose container not a named group; ungroup offered
+    opts2, _ = tui._group_options(s, "t2")            # already loose -> no ungroup option
+    vals2 = [v for _, v in opts2]
+    assert "P" not in vals2 and "A" in vals2 and "B" in vals2
+
+
+async def _movescreen():
+    # MoveToGroupScreen mounts and renders without error; cancel -> None (regression guard)
+    app = tui.CCApp()
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        res = {}
+        app.push_screen(tui.MoveToGroupScreen("t_x", [("B — bbb", "B"), ("(без группы)", "P")], "A"),
+                        lambda r: res.__setitem__("r", r))
+        await pilot.pause()
+        assert isinstance(app.screen, tui.MoveToGroupScreen)
+        app.screen.action_cancel()
+        await pilot.pause()
+        assert res.get("r") is None
+    print("MOVESCREEN OK")
+
+
 if __name__ == "__main__":
     asyncio.run(_smoke())
     print("ok test_tui_smoke")
@@ -155,3 +189,7 @@ if __name__ == "__main__":
     print("ok test_parse_mr_plan")
     asyncio.run(_mrconfirm())
     print("ok test_mrconfirm")
+    test_group_options()
+    print("ok test_group_options")
+    asyncio.run(_movescreen())
+    print("ok test_movescreen")
