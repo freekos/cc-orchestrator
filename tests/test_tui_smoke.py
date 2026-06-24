@@ -229,18 +229,24 @@ async def _panelscreen():
         assert scr._urls == ["http://mr/1"]              # only real MR urls collected
         assert len(scr.query("#release_mr")) == 1        # epic group -> Release button present
         assert len(scr.query("#merge_tasks")) == 1       # ...and the "влить задачи" button
-        scr.on_button_pressed(_Ev("merge_tasks"))        # press "влить задачи"
+        assert len(scr.query("#ops_test")) == 1 and len(scr.query("#ops_stage")) == 1  # ops agent buttons
+        scr.on_button_pressed(_Ev("ops_test"))           # press Test (агент)
         await pilot.pause()
-        assert res.get("r") == {"action": "merge_tasks"}, res
-    # loose group -> neither action button
+        assert res.get("r") == {"action": "ops", "kind": "test"}, res
+    # loose group -> no release/merge, but Test/Stage ops buttons still available
     app2 = tui.CCApp()
     async with app2.run_test() as pilot:
         await pilot.pause()
-        app2.push_screen(tui.GroupPanelScreen("P__loose", {"loose": True}, []))
+        r2 = {}
+        app2.push_screen(tui.GroupPanelScreen("P__loose", {"loose": True}, []),
+                         lambda r: r2.__setitem__("r", r))
         await pilot.pause()
-        assert len(app2.screen.query("#release_mr")) == 0 and len(app2.screen.query("#merge_tasks")) == 0
-        app2.screen.action_close()
+        s2 = app2.screen
+        assert len(s2.query("#release_mr")) == 0 and len(s2.query("#merge_tasks")) == 0
+        assert len(s2.query("#ops_test")) == 1            # ops still offered for loose groups
+        s2.on_button_pressed(_Ev("ops_stage"))
         await pilot.pause()
+        assert r2.get("r") == {"action": "ops", "kind": "stage"}, r2
     print("PANELSCREEN OK")
 
 

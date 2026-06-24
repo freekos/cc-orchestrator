@@ -1043,6 +1043,8 @@ class GroupPanelScreen(ModalScreen):
             with VerticalScroll(id="pscroll"):
                 yield Static("", id="pc")
             with Horizontal(id="prow"):
+                yield Button("Test (агент)", id="ops_test", variant="success")
+                yield Button("Stage (агент)", id="ops_stage", variant="success")
                 if not self._epic.get("loose"):
                     yield Button("Влить задачи в эпик", id="merge_tasks")
                     yield Button("Release: MR эпик→master", id="release_mr", variant="warning")
@@ -1090,8 +1092,13 @@ class GroupPanelScreen(ModalScreen):
         self.query_one("#pc", Static).update(t)
 
     def on_button_pressed(self, event):
-        if event.button.id in ("release_mr", "merge_tasks"):
-            self.dismiss({"action": event.button.id})
+        bid = event.button.id
+        if bid in ("release_mr", "merge_tasks"):
+            self.dismiss({"action": bid})
+        elif bid == "ops_test":
+            self.dismiss({"action": "ops", "kind": "test"})
+        elif bid == "ops_stage":
+            self.dismiss({"action": "ops", "kind": "stage"})
         else:
             self.dismiss(None)
 
@@ -1783,6 +1790,12 @@ class CCApp(App):
             self.push_screen(ConfirmScreen("Влить задачи в ветку эпика %s" % ekey,
                              "Сольёт ОТКРЫТЫЕ task-MR группы в ветку эпика (это НЕ прод-релиз). Продолжить?",
                              ok_label="Влить"), go)
+        elif act == "ops":
+            # launch a headless ops agent (test/stage) — it studies the repos & acts, asks via ❓
+            kind = res.get("kind", "test")
+            self.push_screen(OutputScreen("Запуск ops-агента [%s] для %s" % (kind, ekey),
+                             [sys.executable, "-u", ENGINE, "epic", "ops", ekey, "--kind", kind]),
+                             lambda _: self.build_tree())
 
     def action_regroup(self):
         # move the focused task to another group on the board (task-based regrouping)
