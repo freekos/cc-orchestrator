@@ -182,6 +182,49 @@ async def _movescreen():
     print("MOVESCREEN OK")
 
 
+def test_group_panel_rows():
+    s = {"projects": {"P": {"repos": {}}},
+         "epics": {"E1": {"project": "P", "summary": "epic one", "mode": "epic_branch"}},
+         "tasks": {
+             "t_a": {"epic": "E1", "title": "AA", "status": "mr", "repos": ["web"],
+                     "base": {"web": "E1"}, "mrs": {"web": "http://mr/1"}},
+             "t_b": {"epic": "E1", "title": "BB", "status": "merged", "repos": ["web", "api"],
+                     "base": {"web": "E1", "api": "E1"}, "mrs": {"web": "http://mr/2"}, "merged": True},
+             "t_other": {"epic": "OTHER", "title": "X", "repos": []},
+         }}
+    epic, rows = tui._group_panel_rows(s, "E1")
+    assert epic["summary"] == "epic one"
+    tids = [r["tid"] for r in rows]
+    assert tids == ["t_a", "t_b"]                       # only E1's tasks, un-merged first
+    a = rows[0]
+    assert a["repos"] == [("web", "http://mr/1", "E1")] and not a["merged"]
+    b = rows[1]
+    assert b["merged"] and ("api", None, "E1") in b["repos"]   # api has no MR -> None
+    assert tui._group_panel_rows(s, "EMPTY") == ({}, [])
+
+
+async def _panelscreen():
+    # GroupPanelScreen mounts, renders task rows + MR state, closes cleanly
+    epic = {"summary": "epic one", "mode": "epic_branch"}
+    rows = [{"tid": "t_a", "title": "AA", "status": "mr", "merged": False,
+             "repos": [("web", "http://mr/1", "E1")]},
+            {"tid": "t_b", "title": "BB", "status": "merged", "merged": True,
+             "repos": [("api", None, "E1")]}]
+    app = tui.CCApp()
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        app.push_screen(tui.GroupPanelScreen("E1", epic, rows))
+        await pilot.pause()
+        scr = app.screen
+        assert isinstance(scr, tui.GroupPanelScreen)
+        txt = str(scr.query_one("#pc", Static).render())
+        assert "AA" in txt and "MR открыт" in txt and "влит" in txt and "итог: 2 задач, 1 влито" in txt, txt
+        assert scr._urls == ["http://mr/1"]             # only real MR urls collected
+        scr.action_close()
+        await pilot.pause()
+    print("PANELSCREEN OK")
+
+
 if __name__ == "__main__":
     asyncio.run(_smoke())
     print("ok test_tui_smoke")
@@ -193,3 +236,7 @@ if __name__ == "__main__":
     print("ok test_group_options")
     asyncio.run(_movescreen())
     print("ok test_movescreen")
+    test_group_panel_rows()
+    print("ok test_group_panel_rows")
+    asyncio.run(_panelscreen())
+    print("ok test_panelscreen")

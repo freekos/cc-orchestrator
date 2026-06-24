@@ -16,7 +16,7 @@ import threading
 ENGINE = str(Path(__file__).parent / "cc.py")
 GLYPH = {"running": "🔵", "review": "🟡", "mr": "🟣", "merged": "✅", "idle": "⚪", "done": "✅"}
 LEGEND = ("🟡 ждёт тебя   🔵 агент работает   🟣 MR открыт   ✅ влито   ⚪ простаивает   "
-          "💬 новый ответ   ❓ ждёт твоего ответа   ·   # эпик   ⚠️ потеряшки (U — вернуть)   ·   L — таймлайн   G — в группу")
+          "💬 новый ответ   ❓ ждёт твоего ответа   ·   # эпик   ⚠️ потеряшки (U — вернуть)   ·   L — таймлайн   G — в группу   P — панель")
 
 _AUDIT_VERB = {"task.add": "создана", "task.merge": "влита", "epic.mr": "MR эпик→master",
                "jira.transition": "Jira", "repo.set": "repo set", "state.restore": "восстановлен стейт",
@@ -72,6 +72,24 @@ def _group_options(s, tid):
     if not s["epics"].get(cur, {}).get("loose"):
         opts.append(("(без группы — прямо в проект)", proj_name))
     return opts, cur
+
+
+def _group_panel_rows(s, ekey):
+    """Read-only data for the group control panel: the epic + one row per task, each with per-repo
+    MR/merge state. Returns (epic_dict, [ {tid,title,status,merged, repos:[(repo, mr_url|None, base)]} ]).
+    Honest about what we track: MR url + task-level merged flag; deploy/stage state is NOT here yet."""
+    e = s["epics"].get(ekey, {})
+    rows = []
+    for tid, t in s["tasks"].items():
+        if t.get("epic") != ekey:
+            continue
+        mrs = t.get("mrs") or {}
+        base = t.get("base") or {}
+        repos = [(r, mrs.get(r), base.get(r, "?")) for r in t.get("repos", [])]
+        rows.append({"tid": tid, "title": t.get("title", tid), "status": fast_status(t),
+                     "merged": bool(t.get("merged")), "repos": repos})
+    rows.sort(key=lambda r: (r["merged"], r["tid"]))   # un-merged first (active on top), stable by tid
+    return e, rows
 
 
 def fast_status(t):
@@ -963,6 +981,77 @@ class MoveToGroupScreen(ModalScreen):
         self.dismiss(None)
 
 
+class GroupPanelScreen(ModalScreen):
+    """Read-only control panel for a GROUP: every task + per-repo MR/merge state at a glance.
+    Action buttons (Test / Stage / Release) come next; deploy/stage state isn't tracked yet."""
+    CSS = """
+    GroupPanelScreen { align: center middle; }
+    #pbox { width: 88%; height: 85%; border: thick $accent; background: $surface; }
+    #pc { padding: 0 1; }
+    """
+    BINDINGS = [Binding("escape", "close", "Close"), Binding("q", "close", "Close"),
+                Binding("o", "open_links", "Открыть MR")]
+
+    def __init__(self, ekey, epic, rows):
+        super().__init__()
+        self.ekey = ekey
+        self._epic = epic
+        self._rows = rows
+        self._urls = []
+
+    def compose(self) -> ComposeResult:
+        with VerticalScroll(id="pbox"):
+            yield Static("", id="pc")
+        yield Footer()
+
+    def on_mount(self):
+        mode = self._epic.get("mode") or ("targets" if self._epic.get("targets") else "epic_branch")
+        try:
+            self.query_one("#pbox", VerticalScroll).border_title = "Группа %s · %s · esc=закрыть" % (self.ekey, mode)
+        except Exception:
+            pass
+        from rich.text import Text
+        t = Text()
+        t.append("Группа %s" % self.ekey, style="bold")
+        if self._epic.get("summary"):
+            t.append("  %s" % self._epic["summary"])
+        t.append("\n\n")
+        if not self._rows:
+            t.append("в группе нет задач (n — создать)\n", style="dim")
+        merged_n = 0
+        for r in self._rows:
+            if r["merged"]:
+                merged_n += 1
+            t.append("%s %s" % (GLYPH.get(r["status"], "?"), r["title"]), style="bold")
+            t.append("   [%s]\n" % r["tid"], style="dim")
+            for repo, mr, base in r["repos"]:
+                if mr:
+                    self._urls.append(mr)
+                    state = "влит ✓" if r["merged"] else "MR открыт"
+                    t.append("    %-16s → %-22s %s\n" % (repo, base, state),
+                             style=("magenta" if r["merged"] else "green"))
+                else:
+                    t.append("    %-16s → %-22s —\n" % (repo, base), style="dim")
+            t.append("\n")
+        if self._rows:
+            t.append("итог: %d задач, %d влито\n\n" % (len(self._rows), merged_n), style="bold")
+        t.append("[действия Test / Stage / Release — следующий шаг; «что на stage» появится с деплой-кнопками]\n",
+                 style="dim")
+        t.append("o — открыть MR-ссылки (%d) в браузере" % len(self._urls), style="dim")
+        self.query_one("#pc", Static).update(t)
+
+    def action_open_links(self):
+        urls = list(dict.fromkeys(self._urls))
+        if not urls:
+            self.app.notify("MR-ссылок в группе нет"); return
+        for u in urls:
+            subprocess.Popen(["open", u])
+        self.app.notify("открыл %d MR в браузере" % len(urls))
+
+    def action_close(self):
+        self.dismiss(None)
+
+
 class EpicTargetsScreen(ModalScreen):
     """Set per-repo integration branches (targets) for an epic — repo -> branch."""
     CSS = """
@@ -1095,6 +1184,7 @@ class CCApp(App):
         Binding("U", "recover", "Recover lost"),
         Binding("L", "timeline", "Timeline"),
         Binding("G", "regroup", "→Group"),
+        Binding("P", "panel", "Panel"),
         Binding("q", "quit", "Quit"),
     ]
 
@@ -1610,6 +1700,14 @@ class CCApp(App):
         self.push_screen(OutputScreen("recover lost tasks",
                          [sys.executable, "-u", ENGINE, "recover"]),
                          lambda _: self.build_tree())
+
+    def action_panel(self):
+        # read-only control panel for a group: all its tasks + MR/merge state at a glance
+        ekey = self._current_epic()
+        if not ekey:
+            self.notify("выбери группу (эпик) или её задачу — P покажет панель группы"); return
+        epic, rows = _group_panel_rows(self.state(), ekey)
+        self.push_screen(GroupPanelScreen(ekey, epic, rows))
 
     def action_regroup(self):
         # move the focused task to another group on the board (task-based regrouping)
