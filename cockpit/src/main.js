@@ -263,7 +263,7 @@ function showTab(tb){
   if(!tb) return;
   active=tb; lastTab[tb.taskId]=tb;
   tabs.forEach(x=>{ x.el.style.display = x===tb ? (x.type==="chat"?"flex":"block") : "none"; });
-  renderTabbar();
+  renderTabbar(); updateChatContext();   // refresh "в этом чате" for the now-active chat
   if(tb.focus) try{ tb.focus(); }catch(e){}
 }
 function closeTab(tb){
@@ -464,7 +464,7 @@ async function openChatTab(t, eng, opts){
       last.text = e.payload.code===0 ? "_(пустой ответ движка)_"
         : "✗ движок вышел с кодом "+e.payload.code+(e.payload.err?":\n```\n"+e.payload.err.trim()+"\n```":"");
     }
-    tab.render(); harvestMemory(tab); } });
+    tab.render(); harvestMemory(tab); updateChatContext(); } });
   tab.unlisten=()=>{un();ud();};
   tabs.push(tab); tab.render(); showTab(tab);     // chat opens ready; the agent only runs when you send
 }
@@ -599,6 +599,7 @@ async function runAction(args, label, prod){
 function renderFacts(t){
   const f=$("facts"); f.innerHTML="";
   const g=curGroup(), loose=g&&g.loose;
+  const cc=el("div"); cc.id="chatctx"; f.appendChild(cc); updateChatContext();   // "в этом чате" — skills/files/tools of the active chat
   f.appendChild(el("div","sec","ЗАДАЧА"));
   const trow=el("div","row2 acts");
   trow.append(btn("Создать MR", ()=>openMrModal(t, loose), "primary"),
@@ -634,6 +635,31 @@ function renderFacts(t){
               btn("Release: MR→master", ()=>runAction(["group","mr",SEL.g],"group mr "+SEL.g,true), "warn"));
     f.appendChild(g2); }
 }
+// "В ЭТОМ ЧАТЕ" (Claude-Cowork-style): skills + context files + tools used by the ACTIVE chat's session
+function shortTool(n){ return (n||"").replace(/^mcp__/,"").replace(/__/g,":"); }
+async function updateChatContext(){
+  const box=$("chatctx"); if(!box) return;
+  const tab=active;
+  if(!tab || tab.type!=="chat" || !tab.session){ box.innerHTML=""; return; }
+  let ctx=null; try{ ctx=JSON.parse((await invoke("run_cc",{args:["task","context",tab.session,"--json"]}))||"{}"); }catch(_){ return; }
+  if($("chatctx")!==box) return;                              // facts re-rendered while we awaited
+  const skills=ctx.skills||[], files=ctx.files||[], tools=ctx.tools||{};
+  if(!skills.length && !files.length && !Object.keys(tools).length){ box.innerHTML=""; return; }
+  box.innerHTML="";
+  box.appendChild(el("div","sec","В ЭТОМ ЧАТЕ"));
+  if(skills.length){ box.append(el("div","cc-lab","скиллы"));
+    const row=el("div","cc-chips"); skills.forEach(s=>row.append(el("span","cc-skill", s))); box.append(row); }
+  const top=Object.entries(tools).sort((a,b)=>b[1]-a[1]).slice(0,8);
+  if(top.length){ box.append(el("div","cc-lab","инструменты"));
+    const row=el("div","cc-chips"); top.forEach(([n,c])=>row.append(el("span","cc-tool", shortTool(n)+" ×"+c))); box.append(row); }
+  if(files.length){ box.append(el("div","cc-lab","контекст — файлы ("+files.length+")"));
+    const list=el("div","cc-files"); const all=ccCtxExpanded.has(tab.id);
+    (all?files:files.slice(0,12)).forEach(fp=>{ const it=el("div","cc-file"); it.textContent=fp.split("/").pop(); it.title=fp; it.onclick=()=>openExt(fp); list.append(it); });
+    box.append(list);
+    if(!all && files.length>12){ const more=el("div","cc-more","ещё "+(files.length-12)+"…"); more.onclick=()=>{ ccCtxExpanded.add(tab.id); updateChatContext(); }; box.append(more); }
+  }
+}
+const ccCtxExpanded=new Set();
 function setupCenter(){
   const c=$("center"); c.innerHTML="";
   const home=el("div"); home.id="home"; c.append(home);   // triage home shown when no task is selected
