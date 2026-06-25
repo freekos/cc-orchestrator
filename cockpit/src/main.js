@@ -53,9 +53,10 @@ function folderIcon(open){
 }
 function taskRow(t, pn, gkey){
   const row=el("div","task"+(SEL&&SEL.tid===t.tid?" sel":""));
-  const lbl=el("span","label", t.title); lbl.title=t.title;
+  const lbl=el("span","label", t.title);     // full title + context live in the hover-card now
   row.append(statusMark(t.status), lbl);
   row.onclick=()=>{ SEL={p:pn,g:gkey,tid:t.tid}; renderTree(); renderFacts(t); renderLauncher(t); };
+  row.onmouseenter=()=>showTaskCard(t, row); row.onmouseleave=hideCard;
   return row;
 }
 function opsRow(o){
@@ -67,13 +68,74 @@ function projectAlert(p){   // loudest signal across all the project's groups (b
   if (p.groups.some(g=>groupAlert(g)==="failed")) return "failed";
   return null;
 }
+// ---- hover-preview card (replaces the always-on legend): peek at an item without selecting it ----
+let _card=null, _cardTimer=null;
+function card(){ if(!_card){ _card=el("div"); _card.id="hovercard"; document.body.appendChild(_card); } return _card; }
+function relTime(sec){
+  if(!sec) return "—";
+  const d=Math.max(0, Math.floor(Date.now()/1000)-sec);
+  if(d<60) return "только что";
+  if(d<3600) return Math.floor(d/60)+" мин назад";
+  if(d<86400) return Math.floor(d/3600)+" ч назад";
+  if(d<2592000) return Math.floor(d/86400)+" дн назад";
+  return Math.floor(d/2592000)+" мес назад";
+}
+function cardRow(k,v){ const r=el("div","hc-row"); r.append(el("span","hc-k",k), el("span","hc-v",v)); return r; }
+function positionCard(anchor){
+  const c=card(); c.style.display="block";
+  const r=anchor.getBoundingClientRect(), w=c.offsetWidth, h=c.offsetHeight, gap=8;
+  let left=r.right+gap; if(left+w>window.innerWidth-8) left=Math.max(8, r.left-w-gap);
+  let top=Math.max(8, Math.min(r.top, window.innerHeight-8-h));
+  c.style.left=left+"px"; c.style.top=top+"px";
+}
+function showTaskCard(t, anchor){
+  clearTimeout(_cardTimer);
+  _cardTimer=setTimeout(()=>{
+    const c=card(); c.innerHTML="";
+    c.append(el("div","hc-title", t.title));
+    const st=el("div","hc-status"); st.append(el("span","mark m-"+t.status, MARK[t.status]), el("span",null,STATUS_LABEL[t.status]||t.status)); c.append(st);
+    if(t.branch) c.append(cardRow("ветка", t.branch));
+    const tot=(t.repos||[]).length, mrs=(t.repos||[]).filter(r=>r.mr).length;
+    if(tot){ c.append(cardRow("репо → target", (t.repos||[]).map(r=>r.repo+" → "+r.base).join(", ")));
+             c.append(cardRow("MR", mrs+"/"+tot+(t.merged?"  ✅":"")+(t.combined?"  ⊕ combined":""))); }
+    c.append(cardRow("трогали", relTime(t.activity)));
+    positionCard(anchor);
+  }, 220);
+}
+function showGroupCard(g, anchor){
+  clearTimeout(_cardTimer);
+  _cardTimer=setTimeout(()=>{
+    const c=card(); c.innerHTML="";
+    c.append(el("div","hc-title", g.loose?"(без группы)":(g.summary||g.key)));
+    c.append(cardRow("задач", String((g.tasks||[]).length)));
+    const counts={}; (g.tasks||[]).forEach(t=>counts[t.status]=(counts[t.status]||0)+1);
+    const br=el("div","hc-status");
+    LEGEND.forEach(s=>{ if(counts[s]){ const sp=el("span","hc-cnt"); sp.append(el("span","mark m-"+s, MARK[s]), el("span",null,String(counts[s]))); br.append(sp); } });
+    if(br.childNodes.length) c.append(br);
+    const comb=(g.combined||[]).length;
+    if(comb) c.append(cardRow("combined", comb+" → "+g.combined_branch));
+    if((g.ops||[]).length) c.append(cardRow("ops", g.ops.map(o=>o.kind+" "+(MARK[o.status]||o.status)).join(", ")));
+    positionCard(anchor);
+  }, 220);
+}
+function hideCard(){ clearTimeout(_cardTimer); if(_card) _card.style.display="none"; }
+function toggleKey(anchor){
+  const old=document.getElementById("statuskey");
+  if(old){ old.remove(); return; }
+  const k=el("div"); k.id="statuskey";
+  LEGEND.forEach(s=>{ const it=el("div","lg-item"); it.append(el("span","mark m-"+s, MARK[s]), el("span",null,STATUS_LABEL[s])); k.appendChild(it); });
+  document.body.appendChild(k);
+  const r=anchor.getBoundingClientRect();
+  k.style.left=Math.max(8, Math.min(r.left, window.innerWidth-k.offsetWidth-8))+"px"; k.style.top=(r.bottom+6)+"px";
+}
 function renderTree(){
   const tree=$("tree"); tree.innerHTML="";
   // quiet toolbar (collapse / expand all) — like Conductor's section-header icons
   const tools=el("div","tree-tools");
   tools.append(el("span","tt-label","проекты"), el("span","gap"),
                btn("свернуть", ()=>{ allKeys().forEach(k=>collapsed.add(k)); renderTree(); }, "mini"),
-               btn("развернуть", ()=>{ collapsed.clear(); renderTree(); }, "mini"));
+               btn("развернуть", ()=>{ collapsed.clear(); renderTree(); }, "mini"),
+               btn("?", (e)=>toggleKey(e.currentTarget), "mini key"));
   tree.appendChild(tools);
   for (const [pn,p] of Object.entries(STATE.projects)){
     const pk="proj:"+pn, pc=collapsed.has(pk);
@@ -112,6 +174,7 @@ function renderTree(){
       if (alert) { const a=el("span","g-alert mark m-"+alert, MARK[alert]); a.title=STATUS_LABEL[alert]; gh.append(a); }
       gh.append(el("span","cnt", String(g.tasks.length+g.ops.length)));
       gh.onclick=()=>{ gc?collapsed.delete(gk):collapsed.add(gk); renderTree(); };
+      gh.onmouseenter=()=>showGroupCard(g, gh); gh.onmouseleave=hideCard;
       tree.appendChild(gh);
       if (gc) continue;
       const items=el("div","items");
@@ -126,10 +189,6 @@ function renderTree(){
       tree.appendChild(items);
     }
   }
-  // legend — subtle key, out of the per-row density
-  const lg=el("div","legend");
-  for (const st of LEGEND){ const it=el("span","lg-item"); it.append(el("span","mark m-"+st, MARK[st]), el("span",null,STATUS_LABEL[st])); lg.appendChild(it); }
-  tree.appendChild(lg);
 }
 
 // ---- middle: launcher + tabbar + tabbody (persistent so terminals survive) ----
