@@ -33,7 +33,9 @@ async function load(){
   try{
     STATE = JSON.parse(await invoke("get_state"));
     renderTree();
-    const t=findTask(); if(t) renderFacts(t);   // periodic refresh: facts/tree only — never disturb open chats
+    const t=findTask();
+    if(t) renderFacts(t);                 // a task is open → refresh its facts (never disturb open chats)
+    else { renderHome(); centerMode(true); }   // nothing selected → live triage overview (refreshes each tick)
     setStatus("обновлено " + new Date().toLocaleTimeString());
   }catch(e){ setStatus("ошибка движка: "+e, true); }
 }
@@ -210,6 +212,7 @@ const opening = new Set();          // guard so the periodic refresh can't doubl
 function taskTabs(tid){ return tabs.filter(t=>t.taskId===tid); }
 function selectTask(t, pn, gkey){
   SEL={p:pn,g:gkey,tid:t.tid};
+  centerMode(false);
   renderTree(); renderFacts(t); showTaskChats(t);
 }
 function showTaskChats(t){          // bring this task's tabs to the front; open a default chat if it has none
@@ -548,8 +551,72 @@ function renderFacts(t){
 }
 function setupCenter(){
   const c=$("center"); c.innerHTML="";
+  const home=el("div"); home.id="home"; c.append(home);   // triage home shown when no task is selected
   const bar=el("div","tabbar"); bar.id="tabbar"; bar.style.display="none"; c.append(bar);
   const body=el("div","tabbody"); body.id="tabbody"; c.append(body);
+  const f=$("facts"); f.innerHTML=""; f.append(el("div","empty","выбери задачу — здесь появятся MR, ветки и действия"));
+}
+// center has two modes: triage HOME (no task) vs the task's chat/diff tabs (WORK)
+function centerMode(home){
+  const h=$("home"), b=$("tabbody");
+  if(h) h.style.display = home ? "block" : "none";
+  if(b) b.style.display = home ? "none" : "";
+  if(home){ const bar=$("tabbar"); if(bar) bar.style.display="none"; }
+}
+function goHome(){            // clicking the cc logo deselects → back to the overview
+  SEL=null; hideCard();
+  centerMode(true); renderHome(); renderTree();
+  const f=$("facts"); f.innerHTML=""; f.append(el("div","empty","выбери задачу — здесь появятся MR, ветки и действия"));
+}
+// flatten every task across projects/groups, keeping its project + group for selectTask
+function allTasksFlat(){
+  const out=[];
+  for(const [pn,p] of Object.entries(STATE.projects||{}))
+    for(const g of (p.groups||[]))
+      for(const t of (g.tasks||[])) out.push({t, pn, gkey:g.key});
+  return out;
+}
+function homeRow(x){
+  const r=el("div","home-row");
+  r.append(statusMark(x.t.status), el("span","hr-proj", x.pn), el("span","hr-title", x.t.title));
+  const w=shortTime(x.t.activity); if(w){ const sp=el("span","hr-when", w); sp.title="трогали "+relTime(x.t.activity); r.append(sp); }
+  r.onclick=()=>selectTask(x.t, x.pn, x.gkey);
+  return r;
+}
+const HOME_LIMIT=7; const homeExpanded=new Set();   // long sections collapse to N with an "ещё…" expander
+// triage overview: what needs YOU, what's in review, what's running — only non-empty sections
+function renderHome(){
+  const h=$("home"); if(!h) return; h.innerHTML="";
+  if(!STATE){ return; }
+  const all=allTasksFlat();
+  h.append(el("div","home-title","cc — обзор"));
+  const SECTIONS=[
+    {label:"⚠ Ждут тебя",  cls:"wait",   match:t=>t.status==="needs_input"||t.status==="failed"},
+    {label:"◑ На ревью",   cls:"review", match:t=>t.status==="mr"||t.status==="review"},
+    {label:"◐ В работе",   cls:"work",   match:t=>t.status==="running"},
+  ];
+  let shown=0;
+  for(const sec of SECTIONS){
+    const items=all.filter(x=>sec.match(x.t)).sort((a,b)=>(b.t.activity||0)-(a.t.activity||0));
+    if(!items.length) continue;
+    shown+=items.length;
+    const box=el("div","home-sec "+sec.cls);
+    box.append(el("div","home-sec-h", sec.label+"  ("+items.length+")"));
+    const exp=homeExpanded.has(sec.cls);
+    (exp?items:items.slice(0,HOME_LIMIT)).forEach(x=>box.append(homeRow(x)));
+    if(!exp && items.length>HOME_LIMIT){
+      const more=el("div","home-more","ещё "+(items.length-HOME_LIMIT)+"…");
+      more.onclick=()=>{ homeExpanded.add(sec.cls); renderHome(); };
+      box.append(more);
+    }
+    h.append(box);
+  }
+  if(!shown){   // all quiet → show the most recently touched as a soft landing
+    h.append(el("div","home-calm","Всё спокойно — ничего не ждёт ответа."));
+    const recent=all.sort((a,b)=>(b.t.activity||0)-(a.t.activity||0)).slice(0,6);
+    if(recent.length){ const box=el("div","home-sec"); box.append(el("div","home-sec-h","недавние")); recent.forEach(x=>box.append(homeRow(x))); h.append(box); }
+  }
+  h.append(el("div","home-hint","клик по строке откроет задачу"));
 }
 // drag the dividers to resize the panes (like Cursor); widths persist across restarts
 function setupResizers(){
@@ -573,4 +640,6 @@ function setupResizers(){
   drag($("rz-left"),  "sw", +1, 180, 460, "cc_sw", 286);   // drag right → wider sidebar
   drag($("rz-right"), "fw", -1, 220, 540, "cc_fw", 320);   // drag left  → wider facts pane
 }
-window.addEventListener("DOMContentLoaded", ()=>{ setupCenter(); setupResizers(); $("refresh").onclick=load; load(); setInterval(load, 5000); });
+window.addEventListener("DOMContentLoaded", ()=>{ setupCenter(); setupResizers(); $("refresh").onclick=load;
+  const brand=document.querySelector(".brand"); if(brand){ brand.style.cursor="pointer"; brand.title="На обзор"; brand.onclick=goHome; }
+  load(); setInterval(load, 5000); });
