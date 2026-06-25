@@ -2309,16 +2309,87 @@ def render_ops_runbook(s, ekey, kind):
         "  `[cc-needs-input] <one-line question + your recommended default>`  (nothing after it).\n"
         "  The user sees ❓ on the board and answers when they open this chat.\n"
         "- REPORT each step you take and its result, clearly, as you go.\n"
+        "- When you TRIGGER a CI pipeline/run (deploy/stage, or tests in CI), output exactly one line\n"
+        "  `[cc-ci] <github|gitlab> <project> <pipeline-id>` — `<project>` is the repo path (e.g.\n"
+        "  invictusfitness/frontend/invictusv2 or owner/repo), `<pipeline-id>` the numeric id. cc then\n"
+        "  verifies the result FROM CI itself (not your word) — so always emit it after triggering.\n"
     ) % (label, ekey, repo_map, scope_note, body)
 
 def ops_id(ekey, kind):
     return "ops_%s_%s" % (kind, slugify(ekey))
 
-# Launcher wrapper: runs the agent (argv[2:]) and writes its REAL exit code to argv[1]. cc reads that
-# file as the FACT of success/failure — not the agent's prose. argv list avoids any shell quoting.
-_OPS_WRAP = ("import subprocess,sys\n"
-             "rc=subprocess.run(sys.argv[2:]).returncode\n"
-             "open(sys.argv[1],'w').write(str(rc))\n")
+# ---- ops CI verification (②b): a deploy's TRUTH is the CI pipeline FACT, not the agent's exit code
+# or prose. The agent emits `[cc-ci] <provider> <project> <pipeline>` after triggering CI; cc polls
+# that pipeline (gh/glab) and folds the result into the ops status. No per-project job hardcode — the
+# agent reports WHAT it triggered, cc just reads the fact. Missing/unparseable handle -> the op stays
+# "done (unverified)", never a fabricated green; a FAILED pipeline flips a 0-exit agent to ❌.
+_CI_HANDLE_RE = re.compile(r"\[cc-ci\]\s+(github|gitlab)\s+(\S+)\s+(\S+)")
+
+def _parse_ci_handles(text):
+    """All `[cc-ci] <provider> <project> <pipeline>` handles in the agent's output."""
+    return [(m.group(1), m.group(2), m.group(3)) for m in _CI_HANDLE_RE.finditer(text or "")]
+
+def ci_pipeline_status(provider, project, pipeline):
+    """CI pipeline/run status as a FACT: 'running' | 'success' | 'failed' | 'unknown'. GitHub via
+    `gh run view`, GitLab via `glab api .../pipelines/<id>`. Any error/parse miss -> 'unknown' (we
+    never invent success)."""
+    import urllib.parse
+    try:
+        if provider == "github":
+            r = run(["gh", "run", "view", str(pipeline), "-R", project, "--json", "status,conclusion"], check=False)
+            if not r or r.returncode != 0 or not (r.stdout or "").strip():
+                return "unknown"
+            d = json.loads(r.stdout)
+            if d.get("status") != "completed":
+                return "running"
+            return "success" if d.get("conclusion") == "success" else "failed"
+        enc = urllib.parse.quote(project, safe="")
+        r = run(["glab", "api", "projects/%s/pipelines/%s" % (enc, pipeline)], check=False)
+        if not r or r.returncode != 0 or not (r.stdout or "").strip():
+            return "unknown"
+        st = (json.loads(r.stdout) or {}).get("status")
+        if st == "success":
+            return "success"
+        if st in ("failed", "canceled", "skipped"):
+            return "failed"
+        if st in ("running", "pending", "created", "scheduled", "preparing", "waiting_for_resource", "manual"):
+            return "running"
+        return "unknown"
+    except Exception:
+        return "unknown"
+
+def _ops_run_and_verify(exit_file, ci_file, log_file, agent_cmd, poll_interval=15, max_wait=1800):
+    """Background launcher: run the ops agent, then VERIFY from CI. (1) run agent, capture REAL exit
+    code; (2) parse `[cc-ci]` handle(s) from its log; (3) poll each pipeline to terminal (bounded);
+    (4) write CI facts to ci_file, then the exit code to exit_file LAST (so cc treats the op as
+    'running' while CI is still verifying). cc's reader folds exit-code + CI facts — never prose."""
+    rc = subprocess.run(list(agent_cmd)).returncode
+    try:
+        with open(log_file, encoding="utf-8", errors="replace") as f:
+            handles = _parse_ci_handles(f.read()[-8000:])
+    except Exception:
+        handles = []
+    results, deadline = [], time.time() + max_wait
+    for provider, project, pipeline in handles:
+        st = ci_pipeline_status(provider, project, pipeline)
+        while st == "running" and time.time() < deadline:
+            time.sleep(poll_interval)
+            st = ci_pipeline_status(provider, project, pipeline)
+        results.append({"provider": provider, "project": project, "pipeline": pipeline, "status": st})
+    try:
+        with open(ci_file, "w") as f:
+            json.dump({"rc": rc, "checked": bool(handles), "pipelines": results}, f)
+    except Exception:
+        pass
+    with open(exit_file, "w") as f:
+        f.write(str(rc))
+
+# Launcher wrapper: a thin bootstrap that imports cc (by path) and runs _ops_run_and_verify — the
+# agent's REAL exit code + the CI pipeline fact become cc's source of truth, not the agent's prose.
+_OPS_WRAP = ("import sys\n"
+             "sys.path.insert(0, sys.argv[1])\n"
+             "import cc\n"
+             "cc._ops_run_and_verify(sys.argv[2], sys.argv[3], sys.argv[4], sys.argv[5:])\n")
 
 def cmd_epic_ops(args):
     """Launch a headless ops agent (test/stage/deploy) for a group. cc prepares the scope + runbook
@@ -2339,13 +2410,15 @@ def cmd_epic_ops(args):
     oid = ops_id(args.key, kind)
     log = STATE_DIR / ("%s.log" % oid)
     exit_file = STATE_DIR / ("%s.exit" % oid)   # the wrapper writes the agent's REAL exit code here
-    try:
-        exit_file.unlink()                      # clear a stale code from a previous run
-    except OSError:
-        pass
+    ci_file = STATE_DIR / ("%s.ci" % oid)        # ...and the CI pipeline FACT(s) here (②b)
+    for stale in (exit_file, ci_file):
+        try:
+            stale.unlink()                      # clear leftovers from a previous run
+        except OSError:
+            pass
     adds = [wt for _, wt, _ in wts]
     s.setdefault("ops", {})[oid] = {"epic": args.key, "kind": kind, "dir": str(opsdir),
-                                    "log": str(log), "exit": str(exit_file),
+                                    "log": str(log), "exit": str(exit_file), "ci": str(ci_file),
                                     "status": "running", "claude_session": {}}
     save_state(s)
     audit("ops.start", epic=args.key, kind=kind)
@@ -2358,14 +2431,16 @@ def cmd_epic_ops(args):
     addflags = []
     for a in adds:
         addflags += ["--add-dir", a]
-    # Wrap the agent in a tiny launcher that records its REAL exit code to exit_file. cc derives the
-    # ops status from that FACT (+ the [cc-needs-input] marker), never from the agent's prose.
+    # Wrap the agent in a launcher that records its REAL exit code AND verifies the deploy from the CI
+    # pipeline FACT (②b). cc derives ops status from those facts (+ the [cc-needs-input] marker), never
+    # from the agent's prose. cc_dir lets the bootstrap import this module to do the verification.
+    cc_dir = os.path.dirname(os.path.abspath(__file__))
     with open(log, "w") as lf:
-        proc = subprocess.Popen([sys.executable, "-c", _OPS_WRAP, str(exit_file),
+        proc = subprocess.Popen([sys.executable, "-c", _OPS_WRAP, cc_dir, str(exit_file), str(ci_file), str(log),
                                  "claude", "--permission-mode", "bypassPermissions", "-p", prompt] + addflags,
                                 cwd=str(opsdir), stdout=lf, stderr=lf)
     s = load_state(); s["ops"][oid]["pid"] = proc.pid; save_state(s)
-    print("ops-агент [%s] запущен для группы %s (pid=%s)\n  лог: %s\n  статус будет из exit-code (факт), не из слов агента"
+    print("ops-агент [%s] запущен для группы %s (pid=%s)\n  лог: %s\n  статус из exit-code + CI-факта (не из слов агента)"
           % (kind, args.key, proc.pid, log))
 
 def cmd_epic_open(args):
@@ -3356,9 +3431,19 @@ def _snap_task_status(t):
         return st
     return "mr" if t.get("mrs") else (st or "review")
 
+def _ci_facts(o):
+    """The CI verification sentinel the ops launcher wrote (②b), or None if not present/parseable."""
+    cf = o.get("ci")
+    if not (cf and os.path.exists(cf)):
+        return None
+    try:
+        return json.load(open(cf))
+    except Exception:
+        return None
+
 def _snap_ops_status(o):
     if o.get("pid") and pid_alive(o["pid"]):
-        return "running"
+        return "running"                         # agent OR CI-verify still in flight
     if task_needs_input({"log": o.get("log")}):
         return "needs_input"
     if "exit" not in o:
@@ -3367,7 +3452,15 @@ def _snap_ops_status(o):
         rc = int(open(o["exit"]).read().strip())
     except Exception:
         rc = None
-    return "done" if rc == 0 else "failed"
+    if rc != 0:
+        return "failed"                          # the agent itself failed — CI is moot
+    # agent exited 0 — but the TRUTH of a deploy is the CI pipeline (②b), not the exit code
+    ci = _ci_facts(o)
+    if ci and ci.get("checked"):
+        sts = [p.get("status") for p in ci.get("pipelines", [])]
+        if any(x == "failed" for x in sts):
+            return "failed"                      # KEY: 0-exit agent, but the deploy pipeline FAILED
+    return "done"                                # exit 0 (+ CI green, or no CI handle = unverified)
 
 def cmd_snapshot(args):
     """Full board as JSON for the GUI cockpit: projects -> groups (epics incl. loose) -> tasks/ops
@@ -3395,7 +3488,8 @@ def cmd_snapshot(args):
                     "repos": [{"repo": r, "base": (t.get("base") or {}).get(r, "?"),
                                "mr": (t.get("mrs") or {}).get(r)} for r in t.get("repos", [])],
                 })
-            ops = [{"oid": oid, "kind": o.get("kind", "?"), "status": _snap_ops_status(o)}
+            ops = [{"oid": oid, "kind": o.get("kind", "?"), "status": _snap_ops_status(o),
+                    "ci": (_ci_facts(o) or {}).get("pipelines") or None}   # CI pipeline facts (②b)
                    for oid, o in (s.get("ops") or {}).items() if o.get("epic") == k]
             if e.get("loose") and not tasks and not ops:
                 continue                                   # hide an empty loose container
