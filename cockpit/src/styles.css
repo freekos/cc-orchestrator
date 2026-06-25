@@ -10,15 +10,50 @@ html,body { margin:0; height:100%; background:var(--bg); color:var(--text); font
 .brand { font-weight:650; letter-spacing:.01em; }
 #refresh { background:none; border:none; color:var(--dim); cursor:pointer; font-size:15px; transition:color .15s; }
 #refresh:hover { color:var(--text); }
-.proj { display:flex; align-items:center; gap:6px; padding:9px 12px 5px; color:var(--dim); font-size:11px; text-transform:uppercase; letter-spacing:.05em; cursor:pointer; user-select:none; }
-.group { display:flex; align-items:center; gap:6px; padding:5px 12px; font-weight:600; cursor:pointer; user-select:none; border-radius:6px; margin:0 6px; transition:background .12s; }
-.group:hover { background:var(--panel2); }
-.caret { color:var(--dim); width:10px; display:inline-block; font-size:10px; }
-.cnt { margin-left:auto; color:var(--dim); font-weight:400; font-size:11px; background:#222227; padding:0 7px; border-radius:9px; }
-.task,.ops { display:flex; align-items:center; gap:8px; padding:5px 12px 5px 28px; cursor:pointer; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; border-radius:6px; margin:0 6px; transition:background .12s; }
-.task:hover,.ops:hover { background:var(--panel2); }
-.task.sel { background:var(--sel); }
+/* ---- sidebar tree (calm, Conductor-style) ---- */
+#tree { padding:4px 0 8px; }
+.tree-tools { display:flex; align-items:center; gap:6px; padding:8px 14px 6px; }
+.tt-label { color:var(--dim); font-size:11px; text-transform:uppercase; letter-spacing:.06em; }
+.tree-tools .gap { flex:1; }
+.btn.mini { padding:2px 8px; font-size:11px; color:var(--dim); background:transparent; border-color:transparent; }
+.btn.mini:hover { color:var(--text); background:rgba(255,255,255,.05); }
+/* project = folder row (icon implies open/closed), regular case, calm */
+.proj { display:flex; align-items:center; gap:9px; padding:7px 12px; margin:2px 8px 0; border-radius:8px; cursor:pointer; user-select:none; transition:background .12s; }
+.proj:hover { background:rgba(255,255,255,.03); }
+.ficon { flex:0 0 16px; width:16px; height:16px; color:var(--dim); display:inline-flex; align-items:center; }
+.proj .p-name { flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-size:14px; font-weight:600; color:#dcdce2; }
+/* group = quiet sub-header */
+.group { display:flex; align-items:center; gap:7px; padding:5px 12px 5px 14px; margin:1px 8px 0; border-radius:7px; font-size:12.5px; font-weight:600; color:#a9a9b4; cursor:pointer; user-select:none; transition:background .12s; }
+.group:hover { background:rgba(255,255,255,.03); }
+.group .g-name { flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.caret { flex:0 0 11px; width:11px; height:14px; color:var(--dim); font-size:9px; display:inline-flex; align-items:center; justify-content:center; transition:transform .12s; }
+.caret::before { content:"▾"; }
+.collapsed > .caret { transform:rotate(-90deg); }
+.cnt { margin-left:auto; color:#6b6b75; font-weight:500; font-size:11px; padding:0 4px; }
+.g-alert { margin-left:4px; }
+.g-alert.m-needs_input, .g-alert.m-failed { animation:pulse 1.6s ease-in-out infinite; }
+@keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.4} }
+/* tasks under a faint indent rail */
+.items { margin:1px 8px 4px 22px; border-left:1px solid var(--border); padding-left:3px; }
+.task,.ops { display:flex; align-items:center; gap:9px; min-width:0; padding:6px 10px; border-radius:7px; cursor:pointer; transition:background .1s; }
+.task:hover,.ops:hover { background:rgba(255,255,255,.035); }
+.task .label,.ops .label { flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-size:13.5px; }
+.task.sel { background:rgba(255,255,255,.07); }       /* pure neutral tint, like Conductor (no accent bar) */
 .ops { color:var(--dim); font-style:italic; }
+.more { padding:5px 10px 5px 30px; color:var(--dim); font-size:12.5px; cursor:pointer; border-radius:7px; }
+.more:hover { background:rgba(255,255,255,.035); color:var(--text); }
+/* status = colour + shape; quiet for routine states, LOUD for what needs you */
+.mark { flex:0 0 14px; width:14px; height:14px; display:inline-flex; align-items:center; justify-content:center; font-size:11px; line-height:1; }
+.m-needs_input { color:#f59e0b; font-weight:800; text-shadow:0 0 7px rgba(245,158,11,.8); }
+.m-failed { color:#f87171; font-weight:700; }
+.m-running { color:#60a5fa; }
+.m-mr { color:#a78bfa; opacity:.85; }
+.m-review { color:#fbbf24; opacity:.85; }
+.m-merged, .m-done { color:#34d399; opacity:.8; }
+.m-idle { color:#5b5b66; }
+.legend { display:flex; flex-wrap:wrap; gap:5px 12px; padding:14px 14px 16px; margin-top:10px; border-top:1px solid var(--border); color:#6b6b75; font-size:10.5px; }
+.lg-item { display:flex; align-items:center; gap:5px; }
+.lg-item .mark { flex:0 0 12px; width:12px; }
 .dot { width:8px; height:8px; border-radius:50%; flex:0 0 8px; box-shadow:0 0 6px -1px currentColor; }
 .empty { color:var(--dim); padding:28px; }
 .dhead { display:flex; align-items:center; gap:10px; }

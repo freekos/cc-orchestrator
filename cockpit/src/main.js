@@ -2,6 +2,17 @@ const { invoke } = window.__TAURI__.core;
 const listen = window.__TAURI__.event.listen;
 const GLYPH = { running:"🔵", review:"🟡", mr:"🟣", merged:"✅", idle:"⚪", done:"✅", failed:"❌", needs_input:"❓" };
 const COLOR = { running:"#60a5fa", review:"#fbbf24", mr:"#c084fc", merged:"#a78bfa", idle:"#6b7280", done:"#34d399", failed:"#f87171", needs_input:"#fbbf24" };
+// status = colour + SHAPE (WCAG 1.4.1: never colour alone). Distinct glyphs stay legible in greyscale.
+const MARK = { needs_input:"!", failed:"✕", running:"◐", mr:"◆", review:"◑", merged:"✓", done:"✓", idle:"○" };
+const STATUS_LABEL = { needs_input:"нужен ответ", failed:"упало", running:"работает", mr:"MR открыт",
+                       review:"в ревью / закоммичено", merged:"влито", done:"готово", idle:"простаивает" };
+const LEGEND = ["needs_input","failed","running","mr","review","merged","idle"];
+function statusMark(st){ const m=el("span","mark m-"+st, MARK[st]||"•"); m.title=STATUS_LABEL[st]||st; return m; }
+// loudest signal first: does this group hold anything that needs the human?
+function groupAlert(g){
+  const any=(s)=> g.tasks.some(t=>t.status===s)||g.ops.some(o=>o.status===s);
+  return any("needs_input")?"needs_input":(any("failed")?"failed":null);
+}
 let STATE = null, SEL = null;
 const collapsed = new Set();
 let tabs = [], active = -1, seq = 0;   // middle = multiple tabs (chats/diffs)
@@ -23,29 +34,76 @@ async function load(){
     setStatus("обновлено " + new Date().toLocaleTimeString());
   }catch(e){ setStatus("ошибка движка: "+e, true); }
 }
+function allKeys(){
+  const ks=[];
+  for (const [pn,p] of Object.entries(STATE.projects)){
+    ks.push("proj:"+pn);
+    for (const g of p.groups) ks.push("group:"+pn+"/"+g.key);
+  }
+  return ks;
+}
+const MORE_LIMIT = 8;            // long lists collapse to this with a "ещё N…" expander (Conductor)
+const shownAll = new Set();
+function folderIcon(open){
+  const s=el("span","ficon");
+  s.innerHTML = open
+    ? '<svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M3.5 7.5a1.5 1.5 0 0 1 1.5-1.5h3.1l1.8 1.8H19a1.5 1.5 0 0 1 1.5 1.5"/><path d="M3.6 9.2h17.2l-1.5 8a1.2 1.2 0 0 1-1.2 1H5.3a1.2 1.2 0 0 1-1.2-1.4z"/></svg>'
+    : '<svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M3.5 7.5a1.5 1.5 0 0 1 1.5-1.5h3.1l1.8 1.8H19a1.5 1.5 0 0 1 1.5 1.5v8a1.5 1.5 0 0 1-1.5 1.5H5a1.5 1.5 0 0 1-1.5-1.5z"/></svg>';
+  return s;
+}
 function renderTree(){
   const tree=$("tree"); tree.innerHTML="";
+  // quiet toolbar (collapse / expand all) — like Conductor's section-header icons
+  const tools=el("div","tree-tools");
+  tools.append(el("span","tt-label","проекты"), el("span","gap"),
+               btn("свернуть", ()=>{ allKeys().forEach(k=>collapsed.add(k)); renderTree(); }, "mini"),
+               btn("развернуть", ()=>{ collapsed.clear(); renderTree(); }, "mini"));
+  tree.appendChild(tools);
   for (const [pn,p] of Object.entries(STATE.projects)){
     const pk="proj:"+pn, pc=collapsed.has(pk);
-    const ph=el("div","proj"); ph.append(el("span","caret", pc?"▸":"▾"), document.createTextNode(pn), el("span","cnt", String(p.groups.length)));
+    const taskCount=p.groups.reduce((n,g)=>n+g.tasks.length,0);
+    const ph=el("div","proj");
+    ph.append(folderIcon(!pc), el("span","p-name", pn), el("span","cnt", String(taskCount)));
     ph.onclick=()=>{ pc?collapsed.delete(pk):collapsed.add(pk); renderTree(); };
     tree.appendChild(ph);
     if (pc) continue;
     for (const g of p.groups){
-      const gk="group:"+pn+"/"+g.key, gc=collapsed.has(gk), tot=g.tasks.length+g.ops.length;
-      const gh=el("div","group"); gh.append(el("span","caret", gc?"▸":"▾"), document.createTextNode(g.loose?"(без группы)":(g.summary||g.key)), el("span","cnt", String(tot)));
+      const gk="group:"+pn+"/"+g.key, gc=collapsed.has(gk);
+      const gh=el("div","group"+(gc?" collapsed":""));
+      gh.append(el("span","caret"), el("span","g-name", g.loose?"(без группы)":(g.summary||g.key)));
+      const alert=groupAlert(g);
+      if (alert) { const a=el("span","g-alert mark m-"+alert, MARK[alert]); a.title=STATUS_LABEL[alert]; gh.append(a); }
+      gh.append(el("span","cnt", String(g.tasks.length+g.ops.length)));
       gh.onclick=()=>{ gc?collapsed.delete(gk):collapsed.add(gk); renderTree(); };
       tree.appendChild(gh);
       if (gc) continue;
-      for (const t of g.tasks){
+      const items=el("div","items");
+      const all=shownAll.has(gk), list=all?g.tasks:g.tasks.slice(0,MORE_LIMIT);
+      for (const t of list){
         const row=el("div","task"+(SEL&&SEL.tid===t.tid?" sel":""));
-        row.append(dot(t.status), document.createTextNode(t.title));
+        const lbl=el("span","label", t.title); lbl.title=t.title;
+        row.append(statusMark(t.status), lbl);
         row.onclick=()=>{ SEL={p:pn,g:g.key,tid:t.tid}; renderTree(); renderFacts(t); renderLauncher(t); };
-        tree.appendChild(row);
+        items.appendChild(row);
       }
-      for (const o of g.ops){ const row=el("div","ops"); row.append(dot(o.status), document.createTextNode("ops: "+o.kind)); tree.appendChild(row); }
+      if (!all && g.tasks.length>MORE_LIMIT){
+        const more=el("div","more","ещё "+(g.tasks.length-MORE_LIMIT)+"…");
+        more.onclick=()=>{ shownAll.add(gk); renderTree(); };
+        items.appendChild(more);
+      }
+      for (const o of g.ops){
+        const row=el("div","ops");
+        const lbl=el("span","label","ops: "+o.kind); lbl.title="ops: "+o.kind;
+        row.append(statusMark(o.status), lbl);
+        items.appendChild(row);
+      }
+      tree.appendChild(items);
     }
   }
+  // legend — subtle key, out of the per-row density
+  const lg=el("div","legend");
+  for (const st of LEGEND){ const it=el("span","lg-item"); it.append(el("span","mark m-"+st, MARK[st]), el("span",null,STATUS_LABEL[st])); lg.appendChild(it); }
+  tree.appendChild(lg);
 }
 
 // ---- middle: launcher + tabbar + tabbody (persistent so terminals survive) ----
