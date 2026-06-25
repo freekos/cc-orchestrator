@@ -101,6 +101,9 @@ h2 { margin:0; font-size:17px; font-weight:650; }
 .modal { width:78%; max-width:900px; height:70%; background:var(--panel); border:1px solid var(--border); border-radius:10px; display:flex; flex-direction:column; }
 .mhead { display:flex; justify-content:space-between; align-items:center; padding:10px 14px; border-bottom:1px solid var(--border); font-weight:600; }
 .mbody { flex:1; overflow:auto; margin:0; padding:12px 14px; font:12px/1.5 Menlo,monospace; white-space:pre-wrap; color:var(--text); }
+.mem-foot { display:flex; gap:8px; padding:10px 14px; border-top:1px solid var(--border); flex-wrap:wrap; }
+.mem-inp { flex:1; min-width:160px; background:var(--panel2); color:var(--text); border:1px solid var(--border); border-radius:7px; padding:7px 10px; font:inherit; }
+.mem-inp:focus { outline:none; border-color:var(--accent); }
 #center { display:flex; flex-direction:column; padding:0; }
 /* middle-pane header: task title row + actions row */
 #launcher { display:flex; flex-direction:column; gap:9px; padding:12px 16px; border-bottom:1px solid var(--border); }
