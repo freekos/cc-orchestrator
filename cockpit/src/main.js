@@ -302,6 +302,14 @@ function handleChatEvent(tab, line){
     if(e2.type==="content_block_start" && e2.content_block && e2.content_block.type==="tool_use"){ tab.msgs.splice(tab.msgs.length-1,0,{role:"tool",text:e2.content_block.name||"tool"}); tab.render(); return; }
     return;
   }
+  if(ev.type==="assistant" && ev.message){   // whole assistant message (stream-json always emits this)
+    const txt=(ev.message.content||[]).filter(b=>b&&b.type==="text").map(b=>b.text).join("");
+    if(txt && a && a.role==="assistant" && !a.text){ a.text=txt; tab.render(); }   // fallback: only if deltas didn't stream (no double)
+    return;
+  }
+  if(ev.type==="result" && ev.is_error && a && a.role==="assistant" && !a.text){      // surface API/turn errors
+    a.text="✗ движок вернул ошибку"+(ev.subtype?" ("+ev.subtype+")":""); tab.render(); return;
+  }
   if(ev.type==="item.completed" && ev.item){                                            // codex
     if(ev.item.type==="agent_message" && a && a.role==="assistant"){ a.text=ev.item.text||a.text; tab.render(); }
     else if(ev.item.type==="command_execution"||ev.item.type==="file_change"){ tab.msgs.splice(tab.msgs.length-1,0,{role:"tool",text:ev.item.type.replace("_"," ")}); tab.render(); }
@@ -446,7 +454,13 @@ async function openChatTab(t, eng, opts){
   inp.onkeydown=(e)=>{ if(e.key==="Enter"&&!e.shiftKey){ e.preventDefault(); tab.send(); } };
   inp.oninput=()=>{ inp.style.height="auto"; inp.style.height=Math.min(160, inp.scrollHeight)+"px"; };
   const un=await listen("chat-event",(e)=>{ if(e.payload && e.payload.id===id) handleChatEvent(tab, e.payload.line); });
-  const ud=await listen("chat-done",(e)=>{ if(e.payload && e.payload.id===id){ const last=tab.msgs[tab.msgs.length-1]; if(last&&last.busy) last.busy=false; tab.busy=false; tab.render(); harvestMemory(tab); } });
+  const ud=await listen("chat-done",(e)=>{ if(e.payload && e.payload.id===id){
+    const last=tab.msgs[tab.msgs.length-1]; if(last&&last.busy) last.busy=false; tab.busy=false;
+    if(last && last.role==="assistant" && !last.text){   // nothing came back → show why (exit code + stderr) instead of an empty bubble
+      last.text = e.payload.code===0 ? "_(пустой ответ движка)_"
+        : "✗ движок вышел с кодом "+e.payload.code+(e.payload.err?":\n```\n"+e.payload.err.trim()+"\n```":"");
+    }
+    tab.render(); harvestMemory(tab); } });
   tab.unlisten=()=>{un();ud();};
   tabs.push(tab); tab.render(); showTab(tab);     // chat opens ready; the agent only runs when you send
 }
