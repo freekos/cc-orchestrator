@@ -147,6 +147,7 @@ function renderTree(){
   // quiet toolbar (collapse / expand all) — like Conductor's section-header icons
   const tools=el("div","tree-tools");
   tools.append(el("span","tt-label","проекты"), el("span","gap"),
+               btn("поиск", ()=>openSearch(), "mini"),
                btn("свернуть", ()=>{ allKeys().forEach(k=>collapsed.add(k)); renderTree(); }, "mini"),
                btn("развернуть", ()=>{ collapsed.clear(); renderTree(); }, "mini"),
                btn("?", (e)=>toggleKey(e.currentTarget), "mini key"));
@@ -621,6 +622,81 @@ function openNewTask(presetProject){
   box.append(hd, body, foot); ov.append(box); document.body.append(ov);
   promptInp.focus();
 }
+// ---- global task search (Cmd+P) ----
+// fuzzy subsequence: every query char must appear in order; bonuses for word-start + contiguous runs
+function fuzzyScore(q, text){
+  if(!q) return {score:0, pos:[]};
+  const Q=q.toLowerCase(), T=(text||"").toLowerCase();
+  let ti=0, score=0, pos=[], prev=-2;
+  for(const c of Q){
+    let f=-1;
+    for(let k=ti;k<T.length;k++){ if(T[k]===c){ f=k; break; } }
+    if(f<0) return null;
+    const boundary = f===0 || /[\s\-\/\[\]_.()]/.test(T[f-1]);
+    score += (f===prev+1) ? 8 : 1;     // contiguous run
+    if(boundary) score += 12;          // start of a word
+    pos.push(f); prev=f; ti=f+1;
+  }
+  return {score, pos};
+}
+function taskHaystack(x){   // everything worth matching, title first
+  return [x.t.title, x.pn, x.gkey||"", x.t.branch||"", (x.t.repos||[]).map(r=>r.repo).join(" ")].join("  ");
+}
+function searchTasks(q){
+  const all=allTasksFlat();
+  if(!q.trim()) return all.sort((a,b)=>(b.t.activity||0)-(a.t.activity||0)).slice(0,14).map(x=>({x,pos:[]}));
+  const out=[];
+  for(const x of all){
+    const combined=fuzzyScore(q, taskHaystack(x));
+    if(!combined) continue;
+    const titleM=fuzzyScore(q, x.t.title||"");
+    out.push({x, score: combined.score + (titleM ? titleM.score+25 : 0), pos: titleM?titleM.pos:[]});  // title weighs more
+  }
+  out.sort((a,b)=> b.score-a.score || (b.x.t.activity||0)-(a.x.t.activity||0));   // recency breaks ties
+  return out.slice(0,14);
+}
+function hlTitle(title, pos){
+  const set=new Set(pos), span=el("span","pal-title");
+  for(let i=0;i<title.length;i++){
+    if(set.has(i)) span.append(el("b","hl", title[i]));
+    else span.appendChild(document.createTextNode(title[i]));
+  }
+  return span;
+}
+function openSearch(){
+  const existing=$("palette"); if(existing){ existing.querySelector(".pal-input").focus(); return; }
+  const ov=el("div","overlay pal-ov"); ov.id="palette";
+  const box=el("div","palette-box");
+  const inp=el("input","pal-input"); inp.placeholder="Поиск задач по всем проектам…  (название · проект · эпик · ветка · репо)";
+  const list=el("div","pal-list");
+  box.append(inp, list); ov.append(box); document.body.append(ov);
+  let results=[], sel=0;
+  const markSel=()=>{ [...list.children].forEach((c,i)=>c.classList.toggle("sel", i===sel)); const cur=list.children[sel]; if(cur&&cur.scrollIntoView) cur.scrollIntoView({block:"nearest"}); };
+  const render=()=>{
+    list.innerHTML="";
+    results.forEach((r,i)=>{
+      const row=el("div","pal-row"+(i===sel?" sel":""));
+      row.append(statusMark(r.x.t.status), el("span","hr-proj", r.x.pn));
+      row.append(r.pos.length ? hlTitle(r.x.t.title, r.pos) : el("span","pal-title", r.x.t.title));
+      if(r.x.t.branch) row.append(el("span","pal-meta", r.x.t.branch));
+      const w=shortTime(r.x.t.activity); if(w) row.append(el("span","hr-when", w));
+      row.onclick=()=>pick(i); row.onmouseenter=()=>{ sel=i; markSel(); };
+      list.appendChild(row);
+    });
+    if(!results.length) list.append(el("div","pal-empty","ничего не найдено"));
+  };
+  const refresh=()=>{ results=searchTasks(inp.value); sel=0; render(); };
+  const pick=(i)=>{ const r=results[i]; if(!r) return; ov.remove(); selectTask(r.x.t, r.x.pn, r.x.gkey); };
+  inp.oninput=refresh;
+  inp.onkeydown=(e)=>{
+    if(e.key==="ArrowDown"){ e.preventDefault(); sel=Math.min(results.length-1, sel+1); markSel(); }
+    else if(e.key==="ArrowUp"){ e.preventDefault(); sel=Math.max(0, sel-1); markSel(); }
+    else if(e.key==="Enter"){ e.preventDefault(); pick(sel); }
+    else if(e.key==="Escape"){ e.preventDefault(); ov.remove(); }
+  };
+  ov.onclick=(e)=>{ if(e.target===ov) ov.remove(); };
+  refresh(); inp.focus();
+}
 // flatten every task across projects/groups, keeping its project + group for selectTask
 function allTasksFlat(){
   const out=[];
@@ -695,9 +771,11 @@ function setupResizers(){
 }
 window.addEventListener("DOMContentLoaded", ()=>{ setupCenter(); setupResizers(); $("refresh").onclick=load;
   const brand=document.querySelector(".brand"); if(brand){ brand.style.cursor="pointer"; brand.title="На обзор"; brand.onclick=goHome; }
-  document.addEventListener("keydown",(e)=>{   // Cmd/Ctrl+T → new task under a project
-    if((e.metaKey||e.ctrlKey) && (e.key==="t"||e.key==="T") && !e.shiftKey){
+  document.addEventListener("keydown",(e)=>{
+    if((e.metaKey||e.ctrlKey) && (e.key==="t"||e.key==="T") && !e.shiftKey){   // Cmd/Ctrl+T → new task
       e.preventDefault(); if(!$("enginemenu")&&!$("sessmenu")) openNewTask(SEL?SEL.p:undefined);
+    } else if((e.metaKey||e.ctrlKey) && (e.key==="p"||e.key==="P")){            // Cmd/Ctrl+P → search tasks
+      e.preventDefault(); openSearch();
     }
   });
   load(); setInterval(load, 5000); });
