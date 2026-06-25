@@ -629,6 +629,33 @@ def test_mr_layer_gitlab_intact():
         cc.run = saved
 
 
+def test_create_mr():
+    # create_mr dispatches: GitHub -> `gh pr create` (no label v1), GitLab -> `glab mr create` (full).
+    saved, calls = cc.run, []
+
+    def fake(cmd, cwd=None, check=True, **kw):
+        calls.append(cmd)
+        if cmd[:3] == ["git", "remote", "get-url"]:
+            return _R("https://github.com/o/r.git\n") if cwd == "/gh" else _R("https://gitlab.com/g/r.git\n")
+        if cmd[:3] == ["gh", "pr", "create"]:
+            return _R("https://github.com/o/r/pull/5\n")
+        if cmd[:3] == ["glab", "mr", "create"]:
+            return _R("https://gitlab.com/g/r/-/merge_requests/5\n")
+        return _R("")
+    cc.run = fake
+    try:
+        url, err = cc.create_mr("o/r", "br", "main", "T", "B", "mylabel", "me", "rev", "/gh")
+        assert url == "https://github.com/o/r/pull/5" and err == "", (url, err)
+        ghc = [c for c in calls if c[:3] == ["gh", "pr", "create"]][0]
+        assert "--label" not in ghc and "--head" in ghc and "--base" in ghc   # GitHub v1: no label
+        url2, _ = cc.create_mr("g/r", "br", "main", "T", "B", "mylabel", "me", "rev", "/gl")
+        assert url2 == "https://gitlab.com/g/r/-/merge_requests/5"
+        glc = [c for c in calls if c[:3] == ["glab", "mr", "create"]][0]
+        assert "--label" in glc and "--reviewer" in glc and "--assignee" in glc   # GitLab: full
+    finally:
+        cc.run = saved
+
+
 if __name__ == "__main__":
     n = 0
     for k, v in list(globals().items()):

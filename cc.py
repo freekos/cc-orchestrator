@@ -1473,6 +1473,26 @@ def mr_url(out, remote, branch, cwd):
     m = re.search(r"https?://\S+/-/merge_requests/\d+", text) or re.search(r"https?://\S+/pull/\d+", text)
     return m.group(0) if m else ""
 
+def create_mr(remote, branch, target, title, body, label, assignee, reviewer, cwd):
+    """Create an MR/PR (branch must already be pushed). GitHub via `gh pr create`, GitLab via
+    `glab mr create`. Returns (url, err) — url='' on failure. GitHub v1 omits label/assignee/reviewer
+    (label must pre-exist; assignee/reviewer must be collaborators — a failed create is worse than a
+    bare PR; those land in a follow-up with a collaborator check)."""
+    if repo_host(cwd) == "github":
+        cmd = ["gh", "pr", "create", "--repo", remote, "--head", branch, "--base", target,
+               "--title", title, "--body", (body or "")[:60000]]
+    else:
+        cmd = ["glab", "mr", "create", "-R", remote, "--source-branch", branch, "--target-branch", target,
+               "--title", title, "--description", (body or "")[:8000], "--label", label, "--yes"]
+        if assignee:
+            cmd += ["--assignee", assignee]
+        if reviewer:
+            cmd += ["--reviewer", reviewer]
+    out = run(cmd, cwd=cwd, check=False)
+    url = mr_url(out, remote, branch, cwd)
+    err = "" if url else (((out.stderr or out.stdout or "").strip().splitlines() or [""])[-1])[:180]
+    return url, err
+
 
 def claude_text(cwd, prompt, timeout=120):
     """Generate text via headless claude in cwd (loads that dir's CLAUDE.md). None on failure."""
@@ -1647,23 +1667,13 @@ def cmd_task_mr(args):
             ai_title, mr_desc = gen_mr_text(wt, cmp_ref, t["title"], fb_desc)
             mr_title = tag + ai_title
         mr_desc += "\n\n_MR by cc — epic %s_" % t["epic"]
-        glab_cmd = ["glab", "mr", "create", "-R", ri["remote"],
-                    "--source-branch", branch, "--target-branch", target,
-                    "--title", mr_title, "--description", mr_desc[:8000],
-                    "--label", t["epic"], "--yes"]
-        if assignee:
-            glab_cmd += ["--assignee", assignee]
-        if lead:
-            glab_cmd += ["--reviewer", lead]
-        print("[%s] glab mr create -> %s (reviewer %s, assignee %s) ..." % (r, target, lead or "-", assignee or "-"))
-        out = run(glab_cmd, cwd=wt, check=False)
-        url = mr_url(out, ri["remote"], branch, wt)
+        print("[%s] создаю MR -> %s (reviewer %s, assignee %s) ..." % (r, target, lead or "-", assignee or "-"))
+        url, err = create_mr(ri["remote"], branch, target, mr_title, mr_desc, t["epic"], assignee, lead, wt)
         if url:
             t["mrs"][r] = url
             print("[%s] MR -> %s" % (r, url))
         else:
-            err = (out.stderr or out.stdout or "").strip().splitlines()
-            print("[%s] ⚠️ MR НЕ создан: %s" % (r, (err[-1][:180] if err else "glab mr create не вернул URL")))
+            print("[%s] ⚠️ MR НЕ создан: %s" % (r, err or "create не вернул URL"))
     if any_real:
         t["status"] = "mr"
         save_state(s)
@@ -1767,26 +1777,17 @@ def cmd_epic_mr(args):
             continue
         lead = ri.get("reviewer", "")
         assignee = proj.get("default_assignee") or glab_user()
-        glab_cmd = ["glab", "mr", "create", "-R", ri["remote"],
-                    "--source-branch", key, "--target-branch", db,
-                    "--title", "[%s] %s" % (args.key, e.get("summary", "") or "epic integration"),
-                    "--description", "Epic %s integration -> %s\n\n_MR by cc_" % (args.key, db),
-                    "--label", args.key, "--yes"]
-        if assignee:
-            glab_cmd += ["--assignee", assignee]
-        if lead:
-            glab_cmd += ["--reviewer", lead]
+        mr_title = "[%s] %s" % (args.key, e.get("summary", "") or "epic integration")
+        mr_body = "Epic %s integration -> %s\n\n_MR by cc_" % (args.key, db)
         if args.dry_run:
             print("[%s] DRY-RUN epic MR: %s -> %s  (%d commit(s) ahead, reviewer %s)" % (r, key, db, ahead, lead or "-"))
-            print("    would: git push -u origin %s" % key)
-            print("    would: " + " ".join(glab_cmd))
             made += 1
             continue
         push_epic_branch(rp, key)
-        out = run(glab_cmd, cwd=rp, check=False)
-        url = mr_url(out, ri["remote"], key, rp)
+        url, err = create_mr(ri["remote"], key, db, mr_title, mr_body, args.key, assignee, lead, rp)
         e.setdefault("mrs", {})[r] = url
-        print("[%s] epic MR -> %s  (%d commit(s))" % (r, url, ahead))
+        print(("[%s] epic MR -> %s  (%d commit(s))" % (r, url, ahead)) if url
+              else ("[%s] ⚠️ epic MR НЕ создан: %s" % (r, err or "create не вернул URL")))
         made += 1
         audit("epic.mr", epic=args.key, repo=r, base=db, url=url)
     if made and not args.dry_run:
