@@ -251,23 +251,83 @@ async function closeTab(i){
   active = tabs.length? Math.min(i, tabs.length-1) : -1;
   if(active>=0) showTab(active); else renderTabbar();
 }
-async function openChatTab(t, backend){
-  if(!t.dir){ setStatus("у задачи нет worktree-папки", true); return; }
-  const pane=el("div","tab-pane"); $("tabbody").append(pane);
-  const term=new window.Terminal({ fontSize:12.5, fontFamily:"Menlo, monospace", cursorBlink:true, theme:{ background:"#0e0e10", foreground:"#e6e6ea", cursor:"#7c8cff" } });
-  const fit=new window.FitAddon.FitAddon(); term.loadAddon(fit); term.open(pane); fit.fit();
-  const ptyId="chat-"+(++seq);
-  const un=await listen("pty-output",(e)=>{ if(e.payload.id===ptyId) term.write(new Uint8Array(e.payload.data)); });
-  const ux=await listen("pty-exit",(e)=>{ if(e.payload===ptyId) term.write("\r\n[сессия завершена]\r\n"); });
-  const tab={ type:"chat", engine:backend, title:t.title, el:pane, term, fit, ptyId, unlisten:()=>{un();ux();} };
-  tabs.push(tab); showTab(tabs.length-1);
+// ---- minimal, CSP-safe markdown -> HTML (headings, code, lists, bold/italic, inline code) ----
+function esc(s){ return (s||"").replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;"); }
+function mdRender(src){
+  const blocks=[];
+  src=(src||"").replace(/```(\w*)\n?([\s\S]*?)```/g,(m,lang,code)=>{ blocks.push('<pre class="md-pre"><code>'+esc(code.replace(/\n$/,""))+"</code></pre>"); return " "+(blocks.length-1)+" "; });
+  const inline=(s)=> esc(s).replace(/`([^`]+)`/g,'<code class="md-ic">$1</code>').replace(/\*\*([^*]+)\*\*/g,"<b>$1</b>").replace(/(^|[^*])\*([^*\s][^*]*)\*/g,"$1<i>$2</i>");
+  let html="", list=null; const flush=()=>{ if(list){ html+="</"+list+">"; list=null; } };
+  for(const ln of (src.split("\n"))){
+    const ph=ln.match(/^ (\d+) $/); if(ph){ flush(); html+=blocks[+ph[1]]; continue; }
+    let m;
+    if(m=ln.match(/^(#{1,4})\s+(.*)/)){ flush(); const h=Math.min(4,m[1].length); html+="<h"+h+' class="md-h">'+inline(m[2])+"</h"+h+">"; }
+    else if(m=ln.match(/^\s*[-*+]\s+(.*)/)){ if(list!=="ul"){ flush(); list="ul"; html+="<ul>"; } html+="<li>"+inline(m[1])+"</li>"; }
+    else if(m=ln.match(/^\s*\d+\.\s+(.*)/)){ if(list!=="ol"){ flush(); list="ol"; html+="<ol>"; } html+="<li>"+inline(m[1])+"</li>"; }
+    else if(ln.trim()===""){ flush(); }
+    else { flush(); html+="<p>"+inline(ln)+"</p>"; }
+  }
+  flush(); return html;
+}
+// parse one stream line (Claude stream-json OR Codex jsonl) -> mutate the tab's last assistant msg
+function handleChatEvent(tab, line){
+  let ev; try{ ev=JSON.parse(line); }catch(_){ return; }
+  const a=tab.msgs[tab.msgs.length-1];
+  if(ev.type==="system" && ev.subtype==="init" && ev.session_id){ tab.session=ev.session_id; return; }
+  if(ev.type==="thread.started" && ev.thread_id){ tab.session=ev.thread_id; return; }   // codex
+  if(ev.type==="stream_event" && ev.event){
+    const e2=ev.event;
+    if(e2.type==="content_block_delta" && e2.delta && e2.delta.type==="text_delta"){ if(a&&a.role==="assistant"){ a.text+=e2.delta.text; tab.render(); } return; }
+    if(e2.type==="content_block_start" && e2.content_block && e2.content_block.type==="tool_use"){ tab.msgs.splice(tab.msgs.length-1,0,{role:"tool",text:e2.content_block.name||"tool"}); tab.render(); return; }
+    return;
+  }
+  if(ev.type==="item.completed" && ev.item){                                            // codex
+    if(ev.item.type==="agent_message" && a && a.role==="assistant"){ a.text=ev.item.text||a.text; tab.render(); }
+    else if(ev.item.type==="command_execution"||ev.item.type==="file_change"){ tab.msgs.splice(tab.msgs.length-1,0,{role:"tool",text:ev.item.type.replace("_"," ")}); tab.render(); }
+    return;
+  }
+}
+async function chatTurn(tab, prompt, display){
+  if(tab.busy) return;
+  tab.busy=true;
+  if(display!==false) tab.msgs.push({role:"user", text: typeof display==="string"?display:prompt});
+  tab.msgs.push({role:"assistant", text:"", busy:true});
+  tab.render();
+  const a=tab.msgs[tab.msgs.length-1];
   try{
-    await invoke("pty_spawn",{ id:ptyId, cwd:t.dir, program:backend });
-    await invoke("pty_resize",{ id:ptyId, rows:term.rows, cols:term.cols });
-    term.onData(d=>invoke("pty_write",{ id:ptyId, data:Array.from(new TextEncoder().encode(d)) }));
-    term.onResize(({cols,rows})=>invoke("pty_resize",{ id:ptyId, rows, cols }));
-    term.focus(); setStatus(backend+" запущен в "+t.dir);
-  }catch(e){ setStatus("не запустил "+backend+": "+e, true); }
+    const cmd=tab.session ? "chat_followup" : "chat_spawn";
+    await invoke(cmd, { id:tab.id, cwd:tab.dir, engine:tab.engine, prompt, session: tab.session||"" });
+  }catch(e){ a.text="✗ не запустил движок: "+e; a.busy=false; tab.busy=false; tab.render(); }
+}
+async function openChatTab(t, engine){
+  if(!t.dir){ setStatus("у задачи нет worktree-папки", true); return; }
+  const id="chat-"+(++seq);
+  const pane=el("div","tab-pane chat");
+  const list=el("div","chat-msgs");
+  const composer=el("div","chat-composer");
+  const inp=el("textarea","chat-inp"); inp.placeholder="Сообщение агенту…  (Enter — отправить, Shift+Enter — перенос)"; inp.rows=1;
+  composer.append(inp, btn("▶", ()=>tab.send(), "primary send"));
+  pane.append(list, composer); $("tabbody").append(pane);
+  const tab={ type:"chat", engine, title:t.title, el:pane, id, taskId:t.tid, dir:t.dir, msgs:[], session:null, busy:false };
+  tab.render=()=>{ list.innerHTML=""; for(const m of tab.msgs){
+      const d=el("div","msg "+m.role);
+      if(m.role==="assistant"){ d.innerHTML = m.text ? mdRender(m.text) : (m.busy?'<span class="typing">…</span>':""); }
+      else if(m.role==="tool"){ d.textContent="▸ "+m.text; }
+      else { d.textContent=m.text; }
+      list.appendChild(d);
+    } list.scrollTop=list.scrollHeight; };
+  tab.send=async()=>{ const v=inp.value.trim(); if(!v||tab.busy) return; inp.value=""; inp.style.height="auto"; await chatTurn(tab, v); };
+  inp.onkeydown=(e)=>{ if(e.key==="Enter"&&!e.shiftKey){ e.preventDefault(); tab.send(); } };
+  inp.oninput=()=>{ inp.style.height="auto"; inp.style.height=Math.min(160, inp.scrollHeight)+"px"; };
+  const un=await listen("chat-event",(e)=>{ if(e.payload && e.payload.id===id) handleChatEvent(tab, e.payload.line); });
+  const ud=await listen("chat-done",(e)=>{ if(e.payload && e.payload.id===id){ const last=tab.msgs[tab.msgs.length-1]; if(last&&last.busy) last.busy=false; tab.busy=false; tab.render(); } });
+  tab.unlisten=()=>{un();ud();};
+  tabs.push(tab); showTab(tabs.length-1);
+  // first turn: inject the task's shared memory + kick off (memory shown compactly, not as a wall of text)
+  let mem=""; try{ mem=((await invoke("run_cc",{args:["task","memory",t.tid]}))||"").trim(); }catch(_){}
+  const hasMem = mem && /\S/.test(mem.replace(/^#.*|^##.*/gm,"").trim());
+  const prompt=(hasMem?"Память задачи (общий контекст всех чатов):\n"+mem+"\n\n":"")+"Задача: "+t.title+"\n\nРазберись и начни работу. Когда примешь решение или сменишь направление — кратко зафиксируй.";
+  chatTurn(tab, prompt, "▶ старт: "+t.title+(hasMem?"  · с памятью задачи":""));
 }
 async function openDiffTab(t){
   const pane=el("div","tab-pane"); const pre=el("pre","diffpre","загрузка diff…"); pane.append(pre); $("tabbody").append(pane);

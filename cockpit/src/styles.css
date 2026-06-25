@@ -129,3 +129,23 @@ h2 { margin:0; font-size:17px; font-weight:650; }
 #tabbody { flex:1; position:relative; overflow:hidden; }
 .tab-pane { height:100%; padding:6px; }
 .diffpre { height:100%; overflow:auto; margin:0; font:12px/1.5 Menlo,monospace; white-space:pre; color:var(--text); }
+/* ---- markdown chat (headless engine, rendered conversation) ---- */
+.tab-pane.chat { display:flex; flex-direction:column; padding:0; }
+.chat-msgs { flex:1; overflow-y:auto; padding:18px 22px; display:flex; flex-direction:column; gap:14px; }
+.msg { max-width:760px; }
+.msg.user { align-self:flex-end; background:var(--panel2); border:1px solid var(--border); border-radius:12px 12px 4px 12px; padding:8px 13px; color:var(--text); white-space:pre-wrap; }
+.msg.tool { align-self:flex-start; color:var(--dim); font-size:12px; font-family:Menlo,monospace; opacity:.8; }
+.msg.assistant { align-self:stretch; color:var(--text); line-height:1.6; }
+.msg.assistant .md-h { font-weight:650; margin:14px 0 6px; line-height:1.3; }
+.msg.assistant h1.md-h { font-size:19px; } .msg.assistant h2.md-h { font-size:16px; } .msg.assistant h3.md-h, .msg.assistant h4.md-h { font-size:14px; }
+.msg.assistant p { margin:7px 0; }
+.msg.assistant ul, .msg.assistant ol { margin:7px 0; padding-left:22px; }
+.msg.assistant li { margin:3px 0; }
+.md-ic { background:var(--panel2); border:1px solid var(--border); border-radius:4px; padding:1px 5px; font:12px Menlo,monospace; }
+.md-pre { background:#0b0b0d; border:1px solid var(--border); border-radius:8px; padding:11px 13px; overflow-x:auto; margin:9px 0; }
+.md-pre code { font:12.5px/1.55 Menlo,monospace; color:#d8d8e0; }
+.typing { color:var(--dim); }
+.chat-composer { display:flex; align-items:flex-end; gap:8px; padding:12px 16px; border-top:1px solid var(--border); }
+.chat-inp { flex:1; resize:none; background:var(--panel2); color:var(--text); border:1px solid var(--border); border-radius:10px; padding:10px 12px; font:inherit; line-height:1.4; max-height:160px; }
+.chat-inp:focus { outline:none; border-color:var(--accent); }
+.btn.send { padding:9px 16px; align-self:stretch; }
