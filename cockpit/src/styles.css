@@ -47,3 +47,13 @@ h2 { margin:0; font-size:17px; font-weight:650; }
 .modal { width:78%; max-width:900px; height:70%; background:var(--panel); border:1px solid var(--border); border-radius:10px; display:flex; flex-direction:column; }
 .mhead { display:flex; justify-content:space-between; align-items:center; padding:10px 14px; border-bottom:1px solid var(--border); font-weight:600; }
 .mbody { flex:1; overflow:auto; margin:0; padding:12px 14px; font:12px/1.5 Menlo,monospace; white-space:pre-wrap; color:var(--text); }
+#center { display:flex; flex-direction:column; padding:0; }
+#launcher { display:flex; align-items:center; gap:8px; padding:10px 16px; border-bottom:1px solid var(--border); flex-wrap:wrap; }
+#launcher .gap { flex:1; }
+#tabbar { display:flex; gap:4px; padding:6px 10px 0; overflow-x:auto; border-bottom:1px solid var(--border); }
+.tab { display:flex; align-items:center; gap:6px; padding:6px 10px; background:var(--panel2); border:1px solid var(--border); border-bottom:none; border-radius:7px 7px 0 0; cursor:pointer; white-space:nowrap; color:var(--dim); }
+.tab.active { background:var(--bg); color:var(--text); }
+.tab .x { color:var(--dim); font-size:10px; } .tab .x:hover { color:#f87171; }
+#tabbody { flex:1; position:relative; overflow:hidden; }
+.tab-pane { height:100%; padding:6px; }
+.diffpre { height:100%; overflow:auto; margin:0; font:12px/1.5 Menlo,monospace; white-space:pre; color:var(--text); }
