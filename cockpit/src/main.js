@@ -602,37 +602,38 @@ function renderFacts(t){
   const cc=el("div"); cc.id="chatctx"; f.appendChild(cc); updateChatContext();   // "в этом чате" — skills/files/tools of the active chat
   f.appendChild(el("div","sec","ЗАДАЧА"));
   const trow=el("div","row2 acts");
-  trow.append(btn("Создать MR", ()=>openMrModal(t, loose), "primary"),
-              btn("Diff", ()=>openDiffTab(t), "ghost"));
-  if(t.dir) trow.append(btn("Открыть в Cursor", ()=>openInCursor(t.dir), "ghost"));
+  const tip=(b,s)=>{ b.title=s; return b; };
+  trow.append(
+    tip(btn("Создать MR", ()=>openMrModal(t, loose), "primary"), "Создать MR по изменённым репозиториям (с подтверждением и выбором Draft)"),
+    tip(btn("Diff", ()=>openDiffTab(t), "ghost"), "Изменения задачи (git diff) по всем репозиториям"));
+  if(t.dir) trow.append(tip(btn("Открыть в Cursor", ()=>openInCursor(t.dir), "ghost"), "Открыть папку задачи в Cursor"));
+  // memory folded into the action row: it's read-only and auto-filled from the chats, so it's just a view
+  const memBtn=tip(btn("🧠 Память", ()=>openMemory(t), "ghost"),
+                   "Память задачи: решения, направление, находки — копятся из чатов автоматически. Только просмотр.");
+  if(!t.has_memory) memBtn.classList.add("muted");
+  trow.append(memBtn);
   f.appendChild(trow);
   // combine toggle: pull this task's changes INTO the group's combined branch (or take them back out)
   if(!loose){ const crow=el("div","row2 acts");
-    if(t.combined) crow.append(btn("⊖ Вынуть из группы", ()=>runAction(["group","combine",SEL.g,"--remove",t.tid],"вынуть "+t.tid+" из combined "+SEL.g,false), "ghost"));
-    else crow.append(btn("⊕ Влить в группу", ()=>runAction(["group","combine",SEL.g,"--add",t.tid],"влить "+t.tid+" в combined "+SEL.g,false)));
+    if(t.combined) crow.append(tip(btn("⊖ Вынуть из группы", ()=>runAction(["group","combine",SEL.g,"--remove",t.tid],"вынуть "+t.tid+" из combined "+SEL.g,false), "ghost"), "Убрать изменения задачи из общей ветки группы"));
+    else crow.append(tip(btn("⊕ Влить в группу", ()=>runAction(["group","combine",SEL.g,"--add",t.tid],"влить "+t.tid+" в combined "+SEL.g,false), "ghost"), "Добавить изменения задачи в общую ветку группы — чтобы тестировать несколько задач вместе"));
     f.appendChild(crow); }
-  // shared task memory — the knowledge every chat of this task should see
-  f.appendChild(el("div","sec","ПАМЯТЬ ЗАДАЧИ"));
-  const mrow=el("div","row2 acts");
-  mrow.append(btn(t.has_memory?"🧠 Открыть":"🧠 Завести", ()=>openMemory(t)));
-  f.appendChild(mrow);
-  if(!t.has_memory) f.appendChild(el("div","row2 dim","ещё не заведена — решения/направление/находки"));
-  f.appendChild(el("div","sec","репозитории → target"));
+  f.appendChild(el("div","sec","репозитории → ветка-цель"));
   for(const r of t.repos){ const row=el("div","row2"); row.append(el("span","k", r.repo+" → "+r.base)); if(r.mr){ const a=el("a","lnk"," MR ↗"); a.onclick=()=>openExt(r.mr); row.append(a); } f.appendChild(row); }
   const mrs=t.repos.filter(r=>r.mr);
   f.appendChild(el("div","row2 dim","MR: "+mrs.length+"/"+t.repos.length+(t.merged?"   ✅ влито":"")+(t.combined?"   ⊕ в combined":"")));
   f.appendChild(el("div","sec","ГРУППА "+(SEL?SEL.g:"")));
   // combined-branch state: which tasks are merged into the group's integration branch
   if(g && !loose){ const cn=(g.combined||[]).length;
-    f.appendChild(el("div","row2 dim", cn? ("Объединено: "+cn+" задач → "+g.combined_branch) : "Объединено: пусто (combined-ветки нет)"));
-    f.appendChild(btn("↻ Пересобрать combined", ()=>runAction(["group","combine",SEL.g],"пересобрать combined "+SEL.g,false), "ghost")); }
+    f.appendChild(el("div","row2 dim", cn? ("Объединено: "+cn+" задач → "+g.combined_branch) : "Объединено: пусто (общей ветки нет)"));
+    f.appendChild(tip(btn("↻ Пересобрать общую ветку", ()=>runAction(["group","combine",SEL.g],"пересобрать combined "+SEL.g,false), "ghost"), "Заново собрать общую (combined) ветку группы из влитых задач")); }
   const grow=el("div","row2 acts");
-  grow.append(btn("Test", ()=>runAction(["group","ops",SEL.g,"--kind","test"],"ops test "+SEL.g,false), "ghost"),
-              btn("Stage", ()=>runAction(["group","ops",SEL.g,"--kind","stage"],"ops stage "+SEL.g,false), "ghost"));
+  grow.append(tip(btn("Test", ()=>runAction(["group","ops",SEL.g,"--kind","test"],"ops test "+SEL.g,false), "ghost"), "Прогнать тесты по группе"),
+              tip(btn("Stage", ()=>runAction(["group","ops",SEL.g,"--kind","stage"],"ops stage "+SEL.g,false), "ghost"), "Задеплоить группу на stage"));
   f.appendChild(grow);
   if(!loose){ const g2=el("div","row2 acts");
-    g2.append(btn("Влить задачи", ()=>runAction(["group","merge",SEL.g],"group merge "+SEL.g,false), "ghost"),
-              btn("Release: MR→master", ()=>runAction(["group","mr",SEL.g],"group mr "+SEL.g,true), "warn"));
+    g2.append(tip(btn("Влить все задачи", ()=>runAction(["group","merge",SEL.g],"group merge "+SEL.g,false), "ghost"), "Слить MR всех задач группы в их целевые ветки"),
+              tip(btn("Релиз: MR в master", ()=>runAction(["group","mr",SEL.g],"group mr "+SEL.g,true), "warn"), "Создать релизный MR эпика в master (прод!)"));
     f.appendChild(g2); }
 }
 // "В ЭТОМ ЧАТЕ" (Claude-Cowork-style): skills + context files + tools used by the ACTIVE chat's session
