@@ -1,2 +1,5 @@
 __pycache__/
 *.pyc
+
+# cc task worktrees (cc creates these under cctui/ when managing this repo in cc)
+cctui/
