@@ -94,7 +94,9 @@ struct ChatLine { id: String, line: String }
 struct ChatDone { id: String, code: i32 }
 
 // Build the headless+streaming argv per engine; resume the given session when one is supplied.
-fn chat_argv(engine: &str, prompt: &str, session: &str) -> (String, Vec<String>) {
+// `dirs` are extra repos the agent may read/edit beyond cwd (--add-dir) — used so a RESUMED chat
+// (pinned to its session's repo cwd) can still touch the task's sibling repos.
+fn chat_argv(engine: &str, prompt: &str, session: &str, dirs: &[String]) -> (String, Vec<String>) {
     if engine == "codex" {
         let mut a: Vec<String> = vec!["exec".into()];
         if !session.is_empty() { a.push("resume".into()); a.push(session.into()); }
@@ -107,14 +109,15 @@ fn chat_argv(engine: &str, prompt: &str, session: &str) -> (String, Vec<String>)
             "--output-format".into(), "stream-json".into(), "--verbose".into(),
             "--permission-mode".into(), "bypassPermissions".into(),
         ];
+        for d in dirs { if !d.is_empty() { a.push("--add-dir".into()); a.push(d.clone()); } }
         if !session.is_empty() { a.push("--resume".into()); a.push(session.into()); }
         ("claude".into(), a)
     }
 }
 
-fn chat_run(app: AppHandle, id: String, cwd: String, engine: String, prompt: String, session: String) -> Result<(), String> {
+fn chat_run(app: AppHandle, id: String, cwd: String, engine: String, prompt: String, session: String, dirs: Vec<String>) -> Result<(), String> {
     use std::process::{Command, Stdio};
-    let (bin, args) = chat_argv(&engine, &prompt, &session);
+    let (bin, args) = chat_argv(&engine, &prompt, &session, &dirs);
     let mut child = Command::new(&bin).args(&args).current_dir(&cwd)
         .stdout(Stdio::piped()).stderr(Stdio::null()).stdin(Stdio::null())
         .spawn().map_err(|e| format!("не запустил {}: {}", bin, e))?;
@@ -135,13 +138,13 @@ fn chat_run(app: AppHandle, id: String, cwd: String, engine: String, prompt: Str
 }
 
 #[tauri::command]
-fn chat_spawn(app: AppHandle, id: String, cwd: String, engine: String, prompt: String, session: String) -> Result<(), String> {
-    chat_run(app, id, cwd, engine, prompt, session)
+fn chat_spawn(app: AppHandle, id: String, cwd: String, engine: String, prompt: String, session: String, dirs: Vec<String>) -> Result<(), String> {
+    chat_run(app, id, cwd, engine, prompt, session, dirs)
 }
 
 #[tauri::command]
-fn chat_followup(app: AppHandle, id: String, cwd: String, engine: String, prompt: String, session: String) -> Result<(), String> {
-    chat_run(app, id, cwd, engine, prompt, session)
+fn chat_followup(app: AppHandle, id: String, cwd: String, engine: String, prompt: String, session: String, dirs: Vec<String>) -> Result<(), String> {
+    chat_run(app, id, cwd, engine, prompt, session, dirs)
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
