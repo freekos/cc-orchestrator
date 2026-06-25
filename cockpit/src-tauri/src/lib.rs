@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::io::{Read, Write};
+use std::io::{BufRead, Read, Write};
 use std::sync::Mutex;
 use portable_pty::{native_pty_system, CommandBuilder, MasterPty, PtySize};
 use tauri::{AppHandle, Emitter, State};
@@ -87,12 +87,69 @@ fn pty_kill(state: State<Ptys>, id: String) {
     state.masters.lock().unwrap().remove(&id); // dropping master closes the pty -> child gets SIGHUP
 }
 
+// --- headless chat: drive claude/codex in print/stream mode, stream JSON lines to the UI ---
+#[derive(Clone, serde::Serialize)]
+struct ChatLine { id: String, line: String }
+#[derive(Clone, serde::Serialize)]
+struct ChatDone { id: String, code: i32 }
+
+// Build the headless+streaming argv per engine; resume the given session when one is supplied.
+fn chat_argv(engine: &str, prompt: &str, session: &str) -> (String, Vec<String>) {
+    if engine == "codex" {
+        let mut a: Vec<String> = vec!["exec".into()];
+        if !session.is_empty() { a.push("resume".into()); a.push(session.into()); }
+        a.push("--json".into());
+        a.push(prompt.into());
+        ("codex".into(), a)
+    } else {
+        let mut a: Vec<String> = vec![
+            "-p".into(), prompt.into(),
+            "--output-format".into(), "stream-json".into(), "--verbose".into(),
+            "--permission-mode".into(), "bypassPermissions".into(),
+        ];
+        if !session.is_empty() { a.push("--resume".into()); a.push(session.into()); }
+        ("claude".into(), a)
+    }
+}
+
+fn chat_run(app: AppHandle, id: String, cwd: String, engine: String, prompt: String, session: String) -> Result<(), String> {
+    use std::process::{Command, Stdio};
+    let (bin, args) = chat_argv(&engine, &prompt, &session);
+    let mut child = Command::new(&bin).args(&args).current_dir(&cwd)
+        .stdout(Stdio::piped()).stderr(Stdio::null()).stdin(Stdio::null())
+        .spawn().map_err(|e| format!("не запустил {}: {}", bin, e))?;
+    let stdout = child.stdout.take().ok_or("no stdout")?;
+    std::thread::spawn(move || {
+        let mut child = child;   // owned + mutable inside the thread (for wait())
+        let reader = std::io::BufReader::new(stdout);
+        for line in reader.lines() {
+            match line {
+                Ok(l) => { if !l.trim().is_empty() { let _ = app.emit("chat-event", ChatLine { id: id.clone(), line: l }); } }
+                Err(_) => break,
+            }
+        }
+        let code = child.wait().ok().and_then(|s| s.code()).unwrap_or(-1);
+        let _ = app.emit("chat-done", ChatDone { id, code });
+    });
+    Ok(())
+}
+
+#[tauri::command]
+fn chat_spawn(app: AppHandle, id: String, cwd: String, engine: String, prompt: String, session: String) -> Result<(), String> {
+    chat_run(app, id, cwd, engine, prompt, session)
+}
+
+#[tauri::command]
+fn chat_followup(app: AppHandle, id: String, cwd: String, engine: String, prompt: String, session: String) -> Result<(), String> {
+    chat_run(app, id, cwd, engine, prompt, session)
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .manage(Ptys::default())
-        .invoke_handler(tauri::generate_handler![get_state, open_external, run_cc, pty_spawn, pty_write, pty_resize, pty_kill])
+        .invoke_handler(tauri::generate_handler![get_state, open_external, run_cc, pty_spawn, pty_write, pty_resize, pty_kill, chat_spawn, chat_followup])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
