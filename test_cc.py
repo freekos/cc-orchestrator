@@ -687,6 +687,58 @@ def test_snapshot():
         cc.load_state = saved
 
 
+def test_parse_ci_handles():
+    # the agent reports WHAT CI it triggered; cc reads the fact from it (②b)
+    text = "log...\n[cc-ci] gitlab invictusfitness/frontend/invictusv2 12345\nx\n[cc-ci] github owner/repo 999\n"
+    assert cc._parse_ci_handles(text) == [
+        ("gitlab", "invictusfitness/frontend/invictusv2", "12345"),
+        ("github", "owner/repo", "999")]
+    assert cc._parse_ci_handles("") == []
+
+
+def test_ci_pipeline_status():
+    import types
+    saved = cc.run
+    try:
+        def mk(out, rc=0):
+            return lambda *a, **k: types.SimpleNamespace(returncode=rc, stdout=out)
+        cc.run = mk('{"status":"completed","conclusion":"success"}')
+        assert cc.ci_pipeline_status("github", "o/r", "1") == "success"
+        cc.run = mk('{"status":"completed","conclusion":"failure"}')
+        assert cc.ci_pipeline_status("github", "o/r", "1") == "failed"
+        cc.run = mk('{"status":"in_progress","conclusion":null}')
+        assert cc.ci_pipeline_status("github", "o/r", "1") == "running"
+        cc.run = mk('{"status":"success"}')
+        assert cc.ci_pipeline_status("gitlab", "g/p", "5") == "success"
+        cc.run = mk('{"status":"failed"}')
+        assert cc.ci_pipeline_status("gitlab", "g/p", "5") == "failed"
+        cc.run = mk('{"status":"running"}')
+        assert cc.ci_pipeline_status("gitlab", "g/p", "5") == "running"
+        cc.run = mk("", rc=1)                       # provider error -> unknown, NEVER fabricated success
+        assert cc.ci_pipeline_status("gitlab", "g/p", "5") == "unknown"
+    finally:
+        cc.run = saved
+
+
+def test_ops_status_folds_ci_fact():
+    # ②b: a 0-exit agent is NOT trusted as a successful deploy — the CI pipeline FACT decides.
+    import tempfile, os, shutil, json as _j
+    d = tempfile.mkdtemp(prefix="cc-cifact-")
+    try:
+        e0 = os.path.join(d, "e0"); open(e0, "w").write("0")
+        assert cc._snap_ops_status({"pid": None, "exit": e0}) == "done"          # no CI handle -> done (unverified)
+        cf = os.path.join(d, "f.ci"); open(cf, "w").write(_j.dumps({"rc": 0, "checked": True, "pipelines": [{"status": "failed"}]}))
+        assert cc._snap_ops_status({"pid": None, "exit": e0, "ci": cf}) == "failed"   # KEY: deploy pipeline failed
+        cg = os.path.join(d, "g.ci"); open(cg, "w").write(_j.dumps({"rc": 0, "checked": True, "pipelines": [{"status": "success"}]}))
+        assert cc._snap_ops_status({"pid": None, "exit": e0, "ci": cg}) == "done"     # verified green
+        cu = os.path.join(d, "u.ci"); open(cu, "w").write(_j.dumps({"rc": 0, "checked": True, "pipelines": [{"status": "unknown"}]}))
+        assert cc._snap_ops_status({"pid": None, "exit": e0, "ci": cu}) == "done"     # inconclusive -> no false red
+        e1 = os.path.join(d, "e1"); open(e1, "w").write("1")
+        assert cc._snap_ops_status({"pid": None, "exit": e1, "ci": cg}) == "failed"   # agent failed -> failed regardless
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
 if __name__ == "__main__":
     n = 0
     for k, v in list(globals().items()):

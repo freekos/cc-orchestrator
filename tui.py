@@ -124,15 +124,21 @@ def _ops_exit(o):
 
 def _ops_status(o):
     """Status from FACTS, not the agent's narration: running while alive; then the agent's REAL exit
-    code (0 -> done, nonzero or crashed -> failed). [cc-needs-input] -> needs_input. A run can NEVER
-    show ✓ just because the agent SAID so — only exit 0 does."""
+    code (0 -> done, nonzero or crashed -> failed); and for a deploy, the CI pipeline FACT (②b) — a
+    0-exit agent still shows ❌ if the pipeline it triggered FAILED. [cc-needs-input] -> needs_input.
+    A run can NEVER show ✓ just because the agent SAID so."""
     if o.get("pid") and cc.pid_alive(o["pid"]):
         return "running"
     if cc.task_needs_input({"log": o.get("log")}):
         return "needs_input"
     if "exit" not in o:
         return "done"                  # legacy ops record (pre-facts layer) — don't false-alarm
-    return "done" if _ops_exit(o) == 0 else "failed"
+    if _ops_exit(o) != 0:
+        return "failed"
+    ci = cc._ci_facts(o)               # agent exited 0 — but the deploy's truth is its CI pipeline
+    if ci and ci.get("checked") and any(p.get("status") == "failed" for p in ci.get("pipelines", [])):
+        return "failed"
+    return "done"
 
 
 OPS_GLYPH = {"running": "🔵", "needs_input": "❓", "done": "✅", "failed": "❌"}
