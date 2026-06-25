@@ -884,6 +884,85 @@ def cmd_task_setup(args):
     else:
         die("не смог записать CLAUDE.md (нет dir/worktree у задачи?)")
 
+def combined_branch(gkey):
+    """Local integration branch holding the group's currently-combined tasks."""
+    return gkey + "-combined"
+
+def rebuild_combined(s, gkey):
+    """Rebuild the group's combined branch per repo DETERMINISTICALLY: fresh from origin/<default>,
+    then merge each currently-combined task's branch (git rerere on, so a resolved conflict replays).
+    The branch content is a pure function of (base, included set) — so add/remove a task = just change
+    the set and rebuild, NEVER revert-in-place (avoids the revert-merge trap). Returns
+    {repo: {branch, merged:[tids], conflict: tid|None, error?}}."""
+    g = s["epics"][gkey]
+    proj = s["projects"][g["project"]]
+    included = [tid for tid in g.get("combined", []) if tid in s["tasks"]]
+    cb = combined_branch(gkey)
+    repos = []
+    for tid in included:
+        for r in s["tasks"][tid].get("repos", []):
+            if r not in repos:
+                repos.append(r)
+    out = {}
+    for r in repos:
+        ri = proj["repos"].get(r) or {}
+        rp = ri.get("path")
+        if not rp or not os.path.isdir(rp):
+            out[r] = {"branch": cb, "merged": [], "conflict": None, "error": "no repo path"}
+            continue
+        db = default_branch(rp)
+        run(["git", "fetch", "origin", db], cwd=rp, check=False)
+        run(["git", "config", "rerere.enabled", "true"], cwd=rp, check=False)
+        base = "origin/" + db if have_ref(rp, "origin/" + db) else db
+        run(["git", "checkout", "-B", cb, base], cwd=rp, check=False)
+        merged, conflict = [], None
+        for tid in included:
+            t = s["tasks"][tid]
+            if r not in t.get("repos", []) or not have_ref(rp, t.get("branch", "")):
+                continue
+            m = run(["git", "merge", "--no-edit", t["branch"]], cwd=rp, check=False)
+            if m.returncode == 0:
+                merged.append(tid)
+            else:
+                run(["git", "merge", "--abort"], cwd=rp, check=False)
+                conflict = tid
+                break
+        out[r] = {"branch": cb, "merged": merged, "conflict": conflict}
+    return out
+
+def cmd_group_combine(args):
+    """Combine tasks INTO a group: the group's combined branch = base + the included task branches
+    (rebuild-from-base, so add/remove is clean + deterministic). `--add <tid>` / `--remove <tid>`
+    change the set; a bare call just rebuilds (e.g. after the base moved). Conflicts are reported per
+    repo — resolve in the task branch, then re-run."""
+    s = load_state()
+    g = s["epics"].get(args.group) or die("unknown group '%s'" % args.group)
+    combined = list(g.get("combined", []))
+    if args.add:
+        t = s["tasks"].get(args.add) or die("unknown task '%s'" % args.add)
+        if t.get("epic") != args.group:
+            die("задача %s не в группе %s — сначала перенеси (cc task regroup)" % (args.add, args.group))
+        if args.add not in combined:
+            combined.append(args.add)
+    if args.remove:
+        combined = [x for x in combined if x != args.remove]
+    g["combined"] = combined
+    save_state(s)
+    audit("group.combine", epic=args.group, **{"included": ",".join(combined) or "(none)"})
+    if not combined:
+        print("группа %s: объединять нечего (combined пуст)" % args.group)
+        return
+    res = rebuild_combined(s, args.group)
+    print("группа %s — combined-ветка '%s':" % (args.group, combined_branch(args.group)))
+    for r, info in res.items():
+        if info.get("error"):
+            print("  [%s] %s" % (r, info["error"]))
+        elif info["conflict"]:
+            print("  [%s] ⚠️ КОНФЛИКТ на задаче %s (влито %d до неё) — разреши в её ветке и повтори"
+                  % (r, info["conflict"], len(info["merged"])))
+        else:
+            print("  [%s] ✓ влито %d: %s" % (r, len(info["merged"]), ", ".join(info["merged"]) or "—"))
+
 def cmd_task_regroup(args):
     """Move a task to another GROUP (epic) within the SAME project, recomputing its MR targets. The
     branch and worktrees are untouched — only group membership + per-repo base change (single-membership:
@@ -2976,6 +3055,10 @@ def build_parser():
     a.add_argument("--default-branch", dest="default_branch"); a.set_defaults(fn=cmd_repo_set)
     a = rp_.add_parser("ls"); a.add_argument("project"); a.set_defaults(fn=cmd_repo_ls)
     a = rp_.add_parser("members"); a.add_argument("project"); a.add_argument("repo"); a.set_defaults(fn=cmd_repo_members)
+
+    gp = sub.add_parser("group").add_subparsers(dest="cmd", required=True)
+    a = gp.add_parser("combine"); a.add_argument("group"); a.add_argument("--add"); a.add_argument("--remove")
+    a.set_defaults(fn=cmd_group_combine)
 
     ep = sub.add_parser("epic").add_subparsers(dest="cmd", required=True)
     a = ep.add_parser("add"); a.add_argument("project"); a.add_argument("key")

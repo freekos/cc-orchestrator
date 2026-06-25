@@ -108,6 +108,41 @@ def test_cmd_task_add_end_to_end_manual():
         shutil.rmtree(d, ignore_errors=True)
 
 
+def test_group_combine_rebuild_from_base():
+    # the #1 feature: combine tasks INTO a group's branch, and REMOVE one cleanly (rebuild-from-base,
+    # not revert) — removed task's commits vanish, others stay. Real git.
+    import json, types
+    d = pathlib.Path(tempfile.mkdtemp(prefix="cc-combine-"))
+    saved = (cc.STATE_FILE, cc._BACKUP_DIR)
+    try:
+        web = _make_repo(d, "web", "main")
+        # two task branches off main, each adds a distinct file (no conflict)
+        _g(["checkout", "-b", "t1"], web); (web / "a.txt").write_text("A\n"); _g(["add", "-A"], web); _g(["commit", "-m", "a"], web)
+        _g(["checkout", "main"], web)
+        _g(["checkout", "-b", "t2"], web); (web / "b.txt").write_text("B\n"); _g(["add", "-A"], web); _g(["commit", "-m", "b"], web)
+        _g(["checkout", "main"], web)
+        state = {"projects": {"P": {"path": str(d), "repos": {"web": {"path": str(web), "default_branch": "main", "remote": ""}}}},
+                 "epics": {"G": {"project": "P", "combined": []}},
+                 "tasks": {"t1": {"epic": "G", "branch": "t1", "repos": ["web"]},
+                           "t2": {"epic": "G", "branch": "t2", "repos": ["web"]}}}
+        cc.STATE_FILE = d / "state.json"; cc._BACKUP_DIR = d / "bk"
+        cc.STATE_FILE.write_text(json.dumps(state))
+
+        cc.cmd_group_combine(types.SimpleNamespace(group="G", add="t1", remove=None))
+        cc.cmd_group_combine(types.SimpleNamespace(group="G", add="t2", remove=None))
+        assert (web / "a.txt").exists() and (web / "b.txt").exists(), "both tasks combined"
+        assert "G-combined" in subprocess.run(["git", "branch", "--show-current"], cwd=web, capture_output=True, text=True).stdout
+
+        # remove t1 -> rebuild -> a.txt gone, b.txt stays (clean removal, the proof)
+        cc.cmd_group_combine(types.SimpleNamespace(group="G", add=None, remove="t1"))
+        assert not (web / "a.txt").exists(), "removed task's changes must vanish (rebuild-from-base)"
+        assert (web / "b.txt").exists(), "other task's changes must remain"
+        assert json.loads(cc.STATE_FILE.read_text())["epics"]["G"]["combined"] == ["t2"]
+    finally:
+        cc.STATE_FILE, cc._BACKUP_DIR = saved
+        shutil.rmtree(d, ignore_errors=True)
+
+
 if __name__ == "__main__":
     n = 0
     for k, v in list(globals().items()):
