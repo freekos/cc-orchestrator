@@ -487,22 +487,47 @@ function modal(title){
   const body=el("pre","mbody"); box.append(hd, body); ov.append(box); document.body.append(ov);
   return { ov, body };
 }
+// read-only view — memory is GENERATED from the chat (the agent emits cc-memory markers, the cockpit
+// harvests them), not hand-edited. See harvestMemory.
 async function openMemory(t){
   const ov=el("div","overlay"); const box=el("div","modal");
   const hd=el("div","mhead"); hd.append(el("span",null,"🧠 Память задачи · "+t.title), btn("✕",()=>ov.remove(),"ghost"));
   const body=el("pre","mbody");
-  const foot=el("div","mem-foot");
-  const inp=el("input","mem-inp"); inp.placeholder="запись в лог / новое направление…";
-  const refresh=async()=>{ body.textContent="загрузка…"; try{ body.textContent=((await invoke("run_cc",{args:["task","memory",t.tid]}))||"").trim()||"(пусто)"; }catch(e){ body.textContent="✗ "+e; } };
-  const act=async(flag, confirmMsg)=>{ const v=inp.value.trim(); if(!v){ inp.focus(); return; } if(confirmMsg&&!confirm(confirmMsg)) return;
-    try{ await invoke("run_cc",{args:["task","memory",t.tid,flag,v]}); inp.value=""; await refresh(); load(); }catch(e){ body.textContent="✗ "+e; } };
-  inp.onkeydown=(e)=>{ if(e.key==="Enter") act("--log"); };
-  foot.append(inp,
-    btn("+ В лог", ()=>act("--log"), "ghost"),
-    btn("Задать «Текущее»", ()=>act("--current"), "ghost"),
-    btn("🔄 Сменить направление", ()=>act("--pivot","Записать разворот? Текущее уйдёт в лог как заброшенное, направление очистится."), "warn"));
+  const foot=el("div","mem-foot"); foot.append(el("span","dim","Память пополняется из чата автоматически — здесь только просмотр."));
   box.append(hd, body, foot); ov.append(box); document.body.append(ov);
-  refresh();
+  body.textContent="загрузка…";
+  try{ body.textContent=((await invoke("run_cc",{args:["task","memory",t.tid]}))||"").trim()||"(пусто — ещё ничего не зафиксировано из чата)"; }
+  catch(e){ body.textContent="✗ "+e; }
+}
+async function openInCursor(dir){ try{ await invoke("open_editor",{path:dir}); }catch(e){ setStatus("не открыл Cursor: "+e, true); } }
+// MR confirmation modal: show exactly WHERE each repo's MR goes + a Draft toggle before creating
+function openMrModal(t, loose){
+  const ov=el("div","overlay"); const box=el("div","modal form");
+  const hd=el("div","mhead"); hd.append(el("span",null,"Создать MR · "+t.title), btn("✕",()=>ov.remove(),"ghost"));
+  const body=el("div","nt-body");
+  body.append(el("div","mr-cap", loose ? "⚠ Задача без эпика — MR пойдёт в master/main." : "MR по каждому изменённому репозиторию:"));
+  const list=el("div","mr-targets");
+  const repos=(t.repos||[]);
+  repos.forEach(r=>{ const row=el("div","mr-trow");
+    row.append(el("span","mr-repo", r.repo), el("span","mr-arrow","→"), el("span","mr-branch", r.base||"?"));
+    if(r.mr) row.append(el("span","mr-has","уже есть MR ↗"));
+    list.append(row); });
+  if(!repos.length) list.append(el("div","dim","нет репозиториев"));
+  body.append(list);
+  const draftRow=el("label","mr-draft");
+  const cb=document.createElement("input"); cb.type="checkbox"; cb.className="mr-cb";
+  draftRow.append(cb, el("span",null,"Создать как Draft (WIP) — не готов к ревью"));
+  body.append(draftRow);
+  const foot=el("div","mem-foot"); const status=el("span","nt-status","");
+  const create=async()=>{
+    status.textContent="создаю MR…"; mk.disabled=true;
+    const args=["task","mr",t.tid]; if(cb.checked) args.push("--draft");
+    try{ const out=(await invoke("run_cc",{args}))||""; ov.remove(); const m=modal("MR — результат"); m.body.textContent=out.trim()||"(готово)"; load(); }
+    catch(e){ status.textContent=""; mk.disabled=false; body.append(el("pre","nt-err","✗ "+e)); }
+  };
+  const mk=btn("Создать MR", create, loose?"warn":"primary");
+  foot.append(status, mk);
+  box.append(hd, body, foot); ov.append(box); document.body.append(ov);
 }
 async function runAction(args, label, prod){
   if (!confirm((prod?"⚠ ПРОД-bound — пойдёт в master!\n\n":"")+"Выполнить:\n"+label+" ?")) return;
@@ -516,10 +541,9 @@ function renderFacts(t){
   const g=curGroup(), loose=g&&g.loose;
   f.appendChild(el("div","sec","ЗАДАЧА"));
   const trow=el("div","row2 acts");
-  trow.append(btn("Создать MR", ()=>runAction(["task","mr",t.tid],"task mr "+t.tid, loose)),
-              btn("Влить", ()=>runAction(["task","merge",t.tid],"task merge "+t.tid, loose), "ghost"));
-  trow.append(btn("Diff", ()=>openDiffTab(t), "ghost"));
-  if(t.dir) trow.append(btn("Папка", ()=>openExt(t.dir), "ghost"));
+  trow.append(btn("Создать MR", ()=>openMrModal(t, loose), "primary"),
+              btn("Diff", ()=>openDiffTab(t), "ghost"));
+  if(t.dir) trow.append(btn("Открыть в Cursor", ()=>openInCursor(t.dir), "ghost"));
   f.appendChild(trow);
   // combine toggle: pull this task's changes INTO the group's combined branch (or take them back out)
   if(!loose){ const crow=el("div","row2 acts");

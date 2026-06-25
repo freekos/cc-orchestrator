@@ -28,6 +28,14 @@ fn open_external(target: String) -> Result<(), String> {
     std::process::Command::new("open").arg(&target).spawn().map(|_| ()).map_err(|e| e.to_string())
 }
 
+// Open a folder in Cursor. Prefer the `cursor` CLI; fall back to `open -a Cursor` if it's not on PATH.
+#[tauri::command]
+fn open_editor(path: String) -> Result<(), String> {
+    if std::process::Command::new("cursor").arg(&path).spawn().is_ok() { return Ok(()); }
+    std::process::Command::new("open").args(["-a", "Cursor", &path]).spawn()
+        .map(|_| ()).map_err(|e| format!("не открыл Cursor: {}", e))
+}
+
 // Run an arbitrary cc engine command (action buttons: task mr/merge, epic ops/mr/merge).
 #[tauri::command]
 fn run_cc(args: Vec<String>) -> Result<String, String> {
@@ -162,7 +170,7 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .manage(Ptys::default())
-        .invoke_handler(tauri::generate_handler![get_state, open_external, run_cc, pty_spawn, pty_write, pty_resize, pty_kill, chat_spawn, chat_followup])
+        .invoke_handler(tauri::generate_handler![get_state, open_external, open_editor, run_cc, pty_spawn, pty_write, pty_resize, pty_kill, chat_spawn, chat_followup])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
