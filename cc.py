@@ -2284,6 +2284,20 @@ def _ops_worktrees(s, ekey):
             return combined
     return _group_worktrees(s, ekey)
 
+def _running_ops_overlap(s, repos):
+    """In-flight ops whose repos intersect `repos` — the collision set. Starting a second deploy/test
+    that touches the same repo while one is mid-flight races on branches/CI; cc refuses unless forced.
+    Repos come from the op's stored `repos` (fallback: derive from its worktrees)."""
+    want = set(repos or [])
+    out = []
+    for oid, o in (s.get("ops") or {}).items():
+        if _snap_ops_status(o) != "running":
+            continue
+        orepos = set(o.get("repos") or [r for r, _, _ in _ops_worktrees(s, o.get("epic", ""))])
+        if want & orepos:
+            out.append((oid, o, sorted(want & orepos)))
+    return out
+
 def render_ops_runbook(s, ekey, kind):
     """The ops agent's CLAUDE.md — generic per-kind rules + the group's repo/worktree map. The agent
     studies the repos itself; cc never bakes in per-project commands."""
@@ -2404,6 +2418,16 @@ def cmd_epic_ops(args):
     wts = _ops_worktrees(s, args.key)   # combined worktrees when tasks are combined, else task worktrees
     if not wts:
         die("в группе %s нет worktrees (создай/проведи задачи сначала)" % args.key)
+    this_repos = [r for r, _, _ in wts]
+    # collision-awareness: refuse to start an ops that overlaps a repo an in-flight ops already holds
+    # (two deploys/tests on the same repo at once race on branches/CI). --force to override.
+    clash = _running_ops_overlap(s, this_repos)
+    if clash and not getattr(args, "force", False):
+        lines = "\n".join("  - [%s] %s (pid %s) — пересечение: %s"
+                          % (o.get("kind", "?"), oid2, o.get("pid", "?"), ", ".join(rs))
+                          for oid2, o, rs in clash)
+        die("уже идёт ops на тех же репозиториях — два прогона столкнутся:\n%s\n"
+            "Дождись завершения (или --force, если осознанно)." % lines)
     opsdir = Path(proj["path"]) / "cctui" / args.key / ("_ops-" + kind)
     opsdir.mkdir(parents=True, exist_ok=True)
     (opsdir / "CLAUDE.md").write_text(render_ops_runbook(s, args.key, kind))
@@ -2419,6 +2443,7 @@ def cmd_epic_ops(args):
     adds = [wt for _, wt, _ in wts]
     s.setdefault("ops", {})[oid] = {"epic": args.key, "kind": kind, "dir": str(opsdir),
                                     "log": str(log), "exit": str(exit_file), "ci": str(ci_file),
+                                    "repos": this_repos,   # for collision-awareness across ops
                                     "status": "running", "claude_session": {}}
     save_state(s)
     audit("ops.start", epic=args.key, kind=kind)
@@ -3213,7 +3238,8 @@ def build_parser():
         a = grp.add_parser("sync"); a.add_argument("key"); a.set_defaults(fn=cmd_epic_sync)
         a = grp.add_parser("open"); a.add_argument("key"); a.set_defaults(fn=cmd_epic_open)
         a = grp.add_parser("ops"); a.add_argument("key"); a.add_argument("--kind", default="test")
-        a.add_argument("--manual", action="store_true"); a.set_defaults(fn=cmd_epic_ops)
+        a.add_argument("--manual", action="store_true"); a.add_argument("--force", action="store_true")
+        a.set_defaults(fn=cmd_epic_ops)
         a = grp.add_parser("done"); a.add_argument("key"); a.set_defaults(fn=cmd_epic_done)
         a = grp.add_parser("archive"); a.add_argument("key"); a.set_defaults(fn=cmd_epic_archive)
         a = grp.add_parser("unarchive"); a.add_argument("key"); a.set_defaults(fn=cmd_epic_unarchive)

@@ -739,6 +739,19 @@ def test_ops_status_folds_ci_fact():
         shutil.rmtree(d, ignore_errors=True)
 
 
+def test_running_ops_overlap():
+    # collision-awareness: only IN-FLIGHT ops count, and only when repos intersect
+    import os
+    s = {"ops": {
+        "op_a": {"epic": "G1", "kind": "stage", "pid": os.getpid(), "repos": ["web", "api"]},   # alive -> running
+        "op_b": {"epic": "G2", "kind": "test", "pid": None, "exit": "/nope", "repos": ["web"]},  # crashed -> not running
+    }}
+    hit = cc._running_ops_overlap(s, ["web"])
+    assert [oid for oid, _, _ in hit] == ["op_a"], hit               # the running one, not the dead one
+    assert cc._running_ops_overlap(s, ["api"])[0][2] == ["api"]      # reports the overlapping repos
+    assert cc._running_ops_overlap(s, ["mobile"]) == []             # no shared repo -> no collision
+
+
 if __name__ == "__main__":
     n = 0
     for k, v in list(globals().items()):

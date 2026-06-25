@@ -404,185 +404,6 @@ def open_in_terminal(cwd, cmd):
 
 
 
-class DiffScreen(ModalScreen):
-    CSS = """
-    DiffScreen { align: center middle; }
-    #diffbox { width: 92%; height: 90%; border: thick $accent; background: $surface; }
-    #diffcontent { padding: 0 1; }
-    """
-    BINDINGS = [Binding("escape", "close", "Close"), Binding("q", "close", "Close")]
-
-    def __init__(self, tid):
-        super().__init__()
-        self.tid = tid
-
-    def compose(self) -> ComposeResult:
-        with VerticalScroll(id="diffbox"):
-            yield Static(id="diffcontent")
-        yield Footer()
-
-    def on_mount(self):
-        from rich.text import Text
-        s = cc.load_state(); t = s["tasks"].get(self.tid)
-        txt = Text()
-        if not t:
-            self.query_one("#diffcontent", Static).update("task gone"); return
-        self.title = "diff: %s" % t["title"]
-        any_change = False
-        for r in t["repos"]:
-            wt = t["worktrees"][r]
-            if not os.path.isdir(wt):
-                continue
-            cc.git(["add", "-A", "--intent-to-add", "."], cwd=wt, check=False)
-            diff = cc.git(["diff"], cwd=wt, check=False).stdout
-            txt.append("\n\u2550\u2550 %s \u2550\u2550\n" % r, style="bold yellow")
-            if not diff.strip():
-                txt.append("(no changes)\n", style="dim"); continue
-            any_change = True
-            for line in diff.splitlines():
-                if line.startswith("+++") or line.startswith("---") or line.startswith("diff "):
-                    txt.append(line + "\n", style="bold white")
-                elif line.startswith("+"):
-                    txt.append(line + "\n", style="green")
-                elif line.startswith("-"):
-                    txt.append(line + "\n", style="red")
-                elif line.startswith("@@"):
-                    txt.append(line + "\n", style="cyan")
-                else:
-                    txt.append(line + "\n")
-        if not any_change:
-            txt.append("\n(no changes across repos yet)\n", style="dim")
-        self.query_one("#diffcontent", Static).update(txt)
-
-    def action_close(self):
-        self.dismiss(None)
-
-
-class ChatScreen(ModalScreen):
-    CSS = """
-    ChatScreen { align: center middle; }
-    #chatbox { width: 92%; height: 90%; border: thick $accent; background: $surface; }
-    #chatcontent { padding: 0 1; }
-    """
-    BINDINGS = [Binding("escape", "close", "Close"), Binding("q", "close", "Close"),
-                Binding("i", "reply", "Reply (new tab)"), Binding("o", "open_links", "Открыть ссылки")]
-
-    def action_open_links(self):
-        urls = []
-        if self._file and self._file.exists():
-            urls = re.findall(r"https?://[^\s)\]\"']+", self._file.read_text(errors="replace"))
-        urls = list(dict.fromkeys(urls))
-        if not urls:
-            self.app.notify("ссылок в переписке нет"); return
-        for u in urls:
-            subprocess.Popen(["open", u])
-        self.app.notify("открыл %d ссылок" % len(urls))
-
-    def __init__(self, tid):
-        super().__init__()
-        self.tid = tid
-        self._t = None
-        self._file = None
-
-    def compose(self) -> ComposeResult:
-        with VerticalScroll(id="chatbox"):
-            yield Static(id="chatcontent")
-        yield Footer()
-
-    def on_mount(self):
-        try:
-            box = self.query_one("#chatbox", VerticalScroll)
-            box.border_title = "CHAT (read-only)  ·  i = ответить агенту  ·  esc = закрыть"
-        except Exception:
-            pass
-        self._resolve()
-        self.reload()
-        self.set_interval(2.0, self.reload)
-
-    def _resolve(self):
-        s = cc.load_state()
-        self._t = s["tasks"].get(self.tid)
-        if not self._t:
-            self._file = None
-            return
-        pw = self._t.get("dir") or self._t["worktrees"][self._t["primary"]]
-        sid = self._t.get("claude_session", {}).get(self._t["primary"]) or cc.resolve_session(pw)
-        self._file = (cc.CLAUDE_PROJECTS / pw.replace("/", "-") / (sid + ".jsonl")) if sid else None
-
-    def reload(self):
-        from rich.text import Text
-        txt = Text()
-        if not self._t:
-            self.query_one("#chatcontent", Static).update("task gone")
-            return
-        txt.append(" 👁  ПРОСМОТР (read-only) — печатать здесь нельзя.  ", style="bold black on yellow")
-        txt.append("нажми ", style="dim")
-        txt.append("i", style="bold cyan")
-        txt.append(" чтобы ответить агенту (новая вкладка)\n", style="dim")
-        txt.append("─" * 60 + "\n", style="dim")
-        if not self._file or not self._file.exists():
-            txt.append("агент ещё не начал или транскрипт пуст.\n\n", style="dim")
-            txt.append("нажми  i  — впрыгнуть в чат и ответить (новая вкладка)", style="cyan")
-            self.query_one("#chatcontent", Static).update(txt)
-            return
-        msgs = []
-        for ln in self._file.read_text(errors="replace").splitlines():
-            try:
-                o = json.loads(ln)
-            except Exception:
-                continue
-            ty = o.get("type")
-            if ty == "user":
-                c = o.get("message", {}).get("content")
-                if isinstance(c, str):
-                    body = c.split("\n\n[cc]")[0].strip()
-                    if body:
-                        msgs.append(("you", body))
-            elif ty == "assistant":
-                for b in (o.get("message", {}).get("content") or []):
-                    if not isinstance(b, dict):
-                        continue
-                    if b.get("type") == "text" and b.get("text", "").strip():
-                        msgs.append(("agent", b["text"].strip()))
-                    elif b.get("type") == "tool_use":
-                        inp = b.get("input") or {}
-                        hint = ""
-                        for k in ("file_path", "command", "path", "pattern", "description", "prompt"):
-                            if k in inp:
-                                hint = str(inp[k]); break
-                        msgs.append(("tool", "%s %s" % (b.get("name", ""), hint[:70])))
-        for who, body in msgs[-40:]:
-            if who == "you":
-                txt.append("\n► ты: ", style="bold cyan"); txt.append(body[:1500] + "\n")
-            elif who == "agent":
-                txt.append("\n● агент: ", style="bold green"); txt.append(body[:2500] + "\n")
-            else:
-                txt.append("   ⚙ %s\n" % body, style="yellow")
-        if not msgs:
-            txt.append("(пусто)", style="dim")
-        self.query_one("#chatcontent", Static).update(txt)
-        try:
-            self.query_one("#chatbox", VerticalScroll).scroll_end(animate=False)
-        except Exception:
-            pass
-
-    def action_close(self):
-        self.dismiss(None)
-
-    def action_reply(self):
-        t = self._t
-        if not t:
-            return
-        pw = t.get("dir") or t["worktrees"][t["primary"]]
-        if not os.path.isdir(pw):
-            self.app.notify("worktree missing", severity="error"); return
-        sid = t.get("claude_session", {}).get(t["primary"]) or cc.resolve_session(pw)
-        chat = ("claude --resume %s --permission-mode auto" % sid) if sid else "claude --permission-mode auto"
-        self.app._open_chat_tab("cc:%s" % self.tid, pw, chat)
-        self.dismiss(None)
-        self.app.notify("чат %s открыт в новой вкладке" % self.tid)
-
-
 class AddProjectScreen(ModalScreen):
     CSS = """
     AddProjectScreen { align: center middle; }
@@ -942,10 +763,6 @@ class ProjectJiraScreen(ModalScreen):
             self.app.notify("Jira сохранена для %s" % self.project)
         self.dismiss(True)
 
-    def action_open_token(self):
-        subprocess.Popen(["open", "https://id.atlassian.com/manage-profile/security/api-tokens"])
-        self.app.notify("открыл страницу создания токена в браузере")
-
     def action_close(self):
         self.dismiss(None)
 
@@ -1149,111 +966,6 @@ class GroupPanelScreen(ModalScreen):
         self.dismiss(None)
 
 
-class EpicTargetsScreen(ModalScreen):
-    """Set per-repo integration branches (targets) for an epic — repo -> branch."""
-    CSS = """
-    EpicTargetsScreen { align: center middle; }
-    #tbox { width: 94; max-width: 95%; height: auto; max-height: 90%;
-            border: thick $accent; background: $surface; padding: 1 2; }
-    #tbox > Label { margin-bottom: 1; }
-    #tbody { height: auto; max-height: 22; overflow-y: auto; margin-bottom: 1; }
-    .trow { height: 3; }
-    .trow Label { width: 24; content-align: left middle; }
-    .trow Input { width: 1fr; }
-    #trbtn { height: auto; align-horizontal: right; }
-    #trbtn Button { margin: 0 0 0 2; min-width: 14; }
-    """
-    BINDINGS = [Binding("escape", "cancel", "Cancel")]
-
-    def __init__(self, epic):
-        super().__init__()
-        self.epic = epic
-        self.project = cc.load_state()["epics"][epic]["project"]
-
-    def compose(self):
-        s = cc.load_state()
-        targets = s["epics"][self.epic].get("targets") or {}
-        with Vertical(id="tbox"):
-            yield Label("[b]Интеграционные ветки[/b] эпика %s — repo → ветка (пусто = не в скоупе эпика)" % self.epic)
-            yield Label("[dim]задачи будут базироваться на этих ветках и MR-иться в них; пусто → дефолтная ветка репо[/dim]")
-            with VerticalScroll(id="tbody"):
-                for r in s["projects"][self.project]["repos"]:
-                    with Horizontal(classes="trow"):
-                        yield Label(r)
-                        yield Input(value=targets.get(r, ""), placeholder="напр. loyalty/integration", id="tgt__" + r)
-            with Horizontal(id="trbtn"):
-                yield Button("Cancel", id="cancel")
-                yield Button("Save", variant="success", id="ok")
-
-    def on_button_pressed(self, event):
-        if event.button.id == "cancel":
-            self.dismiss(None); return
-        s = cc.load_state()
-        pairs = {}
-        for r in s["projects"][self.project]["repos"]:
-            v = self.query_one("#tgt__" + r, Input).value.strip()
-            if v:
-                pairs[r] = v
-        self.dismiss({"targets": pairs})
-
-    def action_cancel(self):
-        self.dismiss(None)
-
-
-class ProjectTargetScreen(ModalScreen):
-    """Set per-repo MR target branch for a project's EPIC-LESS (loose) tasks — repo -> branch
-    (empty = the repo's default branch). What you see here is authoritative."""
-    CSS = """
-    ProjectTargetScreen { align: center middle; }
-    #tbox { width: 94; max-width: 95%; height: auto; max-height: 90%;
-            border: thick $accent; background: $surface; padding: 1 2; }
-    #tbox > Label { margin-bottom: 1; }
-    #tbody { height: auto; max-height: 22; overflow-y: auto; margin-bottom: 1; }
-    .trow { height: 3; }
-    .trow Label { width: 24; content-align: left middle; }
-    .trow Input { width: 1fr; }
-    #trbtn { height: auto; align-horizontal: right; }
-    #trbtn Button { margin: 0 0 0 2; min-width: 14; }
-    """
-    BINDINGS = [Binding("escape", "cancel", "Cancel")]
-
-    def __init__(self, project):
-        super().__init__()
-        self.project = project
-
-    def compose(self):
-        s = cc.load_state()
-        lk = cc.loose_epic_key(self.project)
-        targets = (s["epics"].get(lk, {}) or {}).get("targets") or {}
-        with Vertical(id="tbox"):
-            yield Label("[b]Куда льют MR задачи БЕЗ эпика[/b] — проект %s · repo → ветка" % self.project)
-            yield Label("[dim]пусто = дефолтная ветка репо; задаёшь ветку — новые задачи копятся в неё[/dim]")
-            with VerticalScroll(id="tbody"):
-                for r, ri in s["projects"][self.project]["repos"].items():
-                    with Horizontal(classes="trow"):
-                        yield Label(r)
-                        yield Input(value=targets.get(r, ""),
-                                    placeholder="default: %s" % ri.get("default_branch", "?"),
-                                    id="tgt__" + r)
-            with Horizontal(id="trbtn"):
-                yield Button("Cancel", id="cancel")
-                yield Button("Save", variant="success", id="ok")
-
-    def on_button_pressed(self, event):
-        if event.button.id == "cancel":
-            self.dismiss(None); return
-        s = cc.load_state()
-        pairs = {}
-        for r in s["projects"][self.project]["repos"]:
-            v = self.query_one("#tgt__" + r, Input).value.strip()
-            if v:
-                pairs[r] = v
-        self.dismiss({"targets": pairs})
-
-    def action_cancel(self):
-        self.dismiss(None)
-
-
 class CCApp(App):
     CSS = """
     Tree { width: 44%; border-right: solid $accent; }
@@ -1358,14 +1070,6 @@ class CCApp(App):
             self.call_from_thread(self.build_tree)
         except Exception:
             pass
-
-    def action_open_url_idx(self, idx):
-        try:
-            url = self._detail_urls[int(idx)]
-            subprocess.Popen(["open", url])
-            self.notify("открыл %s" % url)
-        except Exception:
-            self.notify("ссылка недоступна", severity="error")
 
     def kick_sync(self):
         self._bg("mrsync", self._sync_mrs)
@@ -1958,49 +1662,6 @@ class CCApp(App):
             self.notify("select a project node first", severity="error"); return
         self.push_screen(ReviewersScreen(proj))
 
-    def action_targets(self):
-        data = self.current()
-        if data and data.get("type") == "project":   # project node -> MR target for epic-less tasks
-            proj = data["id"]
-            self.push_screen(ProjectTargetScreen(proj), lambda res: self._project_target_set(proj, res))
-            return
-        ekey = self._current_epic()
-        if not ekey:
-            self.notify("выбери проект (MR-таргет задач без эпика) или эпик (его интеграционные ветки)",
-                        severity="error"); return
-        self.push_screen(EpicTargetsScreen(ekey), lambda res: self._targets_set(ekey, res))
-
-    def _project_target_set(self, project, res):
-        if res is None:
-            return
-        pairs = res["targets"]
-        # the screen is authoritative: clear, then set whatever is filled in
-        subprocess.run([sys.executable, ENGINE, "project", "target", project, "--clear"], capture_output=True)
-        if pairs:
-            subprocess.run([sys.executable, ENGINE, "project", "target", project]
-                           + ["%s=%s" % (r, b) for r, b in pairs.items()], capture_output=True)
-            self.notify("MR-таргет задач без эпика для %s сохранён (%s)"
-                        % (project, ", ".join("%s→%s" % (r, b) for r, b in pairs.items())))
-        else:
-            self.notify("MR-таргет задач без эпика для %s сброшен на дефолтные ветки" % project)
-
-    def _targets_set(self, ekey, res):
-        if not res:
-            return
-        pairs = res["targets"]
-        args = [sys.executable, ENGINE, "epic", "set", ekey]
-        if pairs:
-            args += ["--repos", ",".join(pairs)]
-            for r, b in pairs.items():
-                args += ["--target", "%s=%s" % (r, b)]
-        subprocess.run(args, capture_output=True)
-        self.build_tree()
-        ntasks = sum(1 for t in self.state()["tasks"].values() if t.get("epic") == ekey)
-        if ntasks:
-            self.notify("targets сохранены. %d задач(а) на старой базе — пересоздай (x→abort + заново активируй стаб)" % ntasks)
-        else:
-            self.notify("targets для %s сохранены" % ekey)
-
     def action_deploys(self):
         proj = self._current_project()
         if not proj:
@@ -2153,19 +1814,6 @@ class CCApp(App):
                 s["tasks"][tid]["seen_at"] = now
         cc.mutate(_set)
 
-    def action_view_chat(self):
-        data = self.current()
-        if data and data.get("type") == "ops":
-            o = (self.state().get("ops") or {}).get(data["id"])
-            if o and o.get("log"):
-                self.push_screen(OutputScreen("ops log: %s" % o.get("kind", ""), ["cat", o["log"]]))
-            return
-        tid = self._cur_task()
-        if not tid:
-            return
-        self._mark_seen(tid)
-        self.push_screen(ChatScreen(tid))
-
     def _open_chat_tab(self, name, cwd, cmd):
         """Open the chat in a NEW cmux tab (native trackpad scroll + Cmd-W to close)."""
         cm = _cmux_path()
@@ -2270,31 +1918,8 @@ class CCApp(App):
         else:
             self.notify("cursor CLI или папка задачи отсутствует", severity="error")
 
-    def action_diff(self):
-        tid = self._cur_task()
-        if not tid:
-            return
-        self.push_screen(DiffScreen(tid))
-
-    def action_mr(self):
-        self._mr(True)
-
     def action_mr_real(self):
         self._mr(False)
-
-    def action_mrs(self):
-        data = self.current()
-        if data and data["type"] == "epic":
-            ekey = data["id"]
-            self.push_screen(OutputScreen("Epic MR links: %s" % ekey,
-                             [sys.executable, "-u", ENGINE, "epic", "mrs", ekey]),
-                             lambda _: self._after_epic_sync(ekey))
-        elif data and data["type"] == "task":
-            self.push_screen(OutputScreen("MR links: %s" % data["id"],
-                             [sys.executable, "-u", ENGINE, "task", "mrs", data["id"]]),
-                             lambda _: self.build_tree())
-        else:
-            self.notify("выбери задачу или эпик")
 
     def action_cleanup(self):
         data = self.current()
