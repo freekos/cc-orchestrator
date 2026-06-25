@@ -579,46 +579,37 @@ function openNewTask(presetProject){
   const ov=el("div","overlay"); const box=el("div","modal form");
   const hd=el("div","mhead"); hd.append(el("span",null,"Новая задача"), btn("✕",()=>ov.remove(),"ghost"));
   const body=el("div","nt-body");
-  const opt=(v,t)=>{ const o=document.createElement("option"); o.value=v; o.textContent=t; return o; };
   const field=(label,ctrl)=>{ const f=el("div","nt-field"); f.append(el("label","nt-label",label), ctrl); return f; };
-  const projSel=document.createElement("select"); projSel.className="mem-inp";
-  projNames.forEach(p=>projSel.append(opt(p,p)));
-  projSel.value = (presetProject && STATE.projects[presetProject]) ? presetProject : projNames[0];
-  const epicSel=document.createElement("select"); epicSel.className="mem-inp";
-  const reposInp=el("input","mem-inp"); reposInp.placeholder="репозитории через запятую (пусто = все репо проекта)";
-  const fillForProject=()=>{
-    const p=STATE.projects[projSel.value]||{};
-    epicSel.innerHTML=""; epicSel.append(opt("","— под проект (без эпика) —"));
-    (p.groups||[]).filter(g=>!g.loose).forEach(g=>epicSel.append(opt(g.key, g.summary||g.key)));
-    reposInp.value=(p.repos||[]).join(",");
-  };
-  projSel.onchange=fillForProject; fillForProject();
-  const promptInp=el("textarea","mem-inp"); promptInp.rows=4; promptInp.placeholder="Что нужно сделать? (описание/направление — обязательно)";
-  const titleInp=el("input","mem-inp"); titleInp.placeholder="Название (необязательно — сгенерируется из описания)";
-  body.append(field("Проект", projSel), field("Эпик / группа", epicSel), field("Репозитории", reposInp),
-              field("Описание задачи", promptInp), field("Название", titleInp));
-  const foot=el("div","mem-foot");
-  const status=el("span","nt-status","");
-  const create=async()=>{
-    const desc=promptInp.value.trim(); if(!desc){ promptInp.focus(); status.textContent="нужно описание"; return; }
-    const firstArg=epicSel.value || projSel.value;
-    const title=titleInp.value.trim();
-    const repos=reposInp.value.trim();
-    const args=["task","add",firstArg]; if(title) args.push(title);
-    args.push("--prompt",desc); if(repos) args.push("--repos",repos);
-    args.push("--manual","--no-jira");
-    status.textContent="создаю задачу + worktree…"; mkBtn.disabled=true;
+  // the prompt IS the task — big, first, autofocused. No title/repos: cc names it and provisions all
+  // the project's repos automatically (mono = one, multi = all). The agent starts in the background.
+  const promptInp=el("textarea","mem-inp nt-prompt"); promptInp.rows=5;
+  promptInp.placeholder="Опиши задачу — что нужно сделать. Агент запустится сразу и начнёт работу.";
+  // one "куда" selector: each project, with its epics nested (value = project name OR epic key)
+  const where=document.createElement("select"); where.className="mem-inp";
+  for(const pn of projNames){
+    const og=document.createElement("optgroup"); og.label=pn;
+    const o0=document.createElement("option"); o0.value=pn; o0.textContent="под проект "+pn; og.append(o0);
+    for(const g of (STATE.projects[pn].groups||[]).filter(g=>!g.loose)){
+      const o=document.createElement("option"); o.value=g.key; o.textContent="↳ "+(g.summary||g.key); og.append(o);
+    }
+    where.append(og);
+  }
+  if(presetProject && STATE.projects[presetProject]) where.value=presetProject;
+  body.append(field("Задача", promptInp), field("Куда добавить", where));
+  const foot=el("div","mem-foot"); const status=el("span","nt-status","");
+  const run=async()=>{
+    const desc=promptInp.value.trim(); if(!desc){ promptInp.focus(); status.textContent="опиши задачу"; return; }
+    status.textContent="запускаю в фоне…"; runBtn.disabled=true;
     try{
-      await invoke("run_cc",{args});
+      await invoke("run_cc",{args:["task","add", where.value, "--prompt", desc]});   // no --manual → bg agent; no --repos → all project repos
       ov.remove(); await load();
-      if(title){ const hit=allTasksFlat().filter(x=>x.t.title===title).sort((a,b)=>(b.t.activity||0)-(a.t.activity||0))[0];
-                 if(hit) selectTask(hit.t, hit.pn, hit.gkey); }
-    }catch(e){ status.textContent=""; mkBtn.disabled=false;
-      body.append(el("pre","nt-err","✗ "+e)); }
+      const fresh=allTasksFlat().sort((a,b)=>(b.t.activity||0)-(a.t.activity||0))[0];   // newest = the task we just created
+      if(fresh) selectTask(fresh.t, fresh.pn, fresh.gkey);
+    }catch(e){ status.textContent=""; runBtn.disabled=false; body.append(el("pre","nt-err","✗ "+e)); }
   };
-  const mkBtn=btn("Создать", create, "primary");
-  foot.append(status, mkBtn);
-  promptInp.onkeydown=(e)=>{ if((e.metaKey||e.ctrlKey)&&e.key==="Enter"){ e.preventDefault(); create(); } };
+  const runBtn=btn("▶ Запустить", run, "primary");
+  foot.append(status, runBtn);
+  promptInp.onkeydown=(e)=>{ if((e.metaKey||e.ctrlKey)&&e.key==="Enter"){ e.preventDefault(); run(); } };
   box.append(hd, body, foot); ov.append(box); document.body.append(ov);
   promptInp.focus();
 }
