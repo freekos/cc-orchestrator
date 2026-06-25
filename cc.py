@@ -1300,15 +1300,17 @@ def cmd_task_memory(args):
 def cmd_task_diff(args):
     s = load_state()
     t = s["tasks"].get(args.task) or die("unknown task '%s'" % args.task)
+    # Emit the FULL unified diff per repo behind a stable marker the cockpit splits on
+    # (intent-to-add makes new files appear in `git diff`). The marker line is unique enough
+    # not to collide with diff content.
     for r in t["repos"]:
         wt = t["worktrees"][r]
-        print("\n===== %s  (%s) =====" % (r, wt))
-        st = _changed(wt)
-        print(st if st else "(no changes)")
+        print("===== CCDIFF %s =====" % r)
+        if not os.path.isdir(wt):
+            print("(worktree отсутствует)"); continue
         git(["add", "-A", "--intent-to-add", "."], cwd=wt, check=False)
-        diff = git(["diff", "--stat"], cwd=wt, check=False).stdout.strip()
-        if diff:
-            print("--- diffstat ---\n" + diff)
+        diff = git(["diff"], cwd=wt, check=False).stdout
+        print(diff if diff.strip() else "(нет изменений)")
 
 # --------- chat history: recover & resume the task's old cc TUI claude conversations ---------
 # Source of truth is claude's own transcript store (~/.claude/projects/<enc(cwd)>/<sid>.jsonl).
