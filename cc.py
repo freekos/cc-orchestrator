@@ -1310,6 +1310,104 @@ def cmd_task_diff(args):
         if diff:
             print("--- diffstat ---\n" + diff)
 
+# --------- chat history: recover & resume the task's old cc TUI claude conversations ---------
+# Source of truth is claude's own transcript store (~/.claude/projects/<enc(cwd)>/<sid>.jsonl).
+# cc never stored a rich session map — it discovers sessions by encoding the worktree path
+# (resolve_session). We scan ALL of a task's worktrees because `primary` often mislabels which
+# repo the chat actually ran in.
+# cc's own headless one-shots (MR summary / commit message) — identified by their prompt template,
+# NOT by turn count (a short real chat is still a real chat).
+_SERVICE_PROMPTS = ("summarize this branch", "write one git commit message")
+
+def _session_files_for_task(t):
+    """All claude transcript files for a task across every worktree. -> [(repo, Path)] newest-first."""
+    seen, out = set(), []
+    for repo, wt in (t.get("worktrees", {}) or {}).items():
+        d = CLAUDE_PROJECTS / re.sub(r"[^A-Za-z0-9-]", "-", str(wt))
+        if not d.exists():
+            continue
+        for f in d.glob("*.jsonl"):
+            if f in seen:
+                continue
+            seen.add(f); out.append((repo, f))
+    out.sort(key=lambda rf: rf[1].stat().st_mtime, reverse=True)
+    return out
+
+def _read_jsonl_msgs(path):
+    """Parse a claude transcript into [(role, text)] for user/assistant turns. Joins text blocks,
+    skips tool/meta events, tolerant of torn lines."""
+    msgs = []
+    try:
+        with open(path) as fh:
+            for ln in fh:
+                ln = ln.strip()
+                if not ln:
+                    continue
+                try:
+                    o = json.loads(ln)
+                except Exception:
+                    continue
+                if o.get("type") not in ("user", "assistant"):
+                    continue
+                c = (o.get("message", {}) or {}).get("content")
+                if isinstance(c, str):
+                    text = c.strip()
+                elif isinstance(c, list):
+                    text = " ".join(b.get("text", "") for b in c
+                                    if isinstance(b, dict) and b.get("type") == "text").strip()
+                else:
+                    text = ""
+                role = o["type"]
+                if role == "user":   # drop cc's injected worktree/context preamble — keep the human's text
+                    text = re.split(r"\n+\[cc\] You may create", text)[0].strip()
+                if not text:
+                    continue
+                if msgs and msgs[-1][0] == role:   # merge consecutive same-role blocks (streamed in pieces)
+                    msgs[-1] = (role, msgs[-1][1] + "\n\n" + text)
+                else:
+                    msgs.append((role, text))
+    except OSError:
+        pass
+    return msgs
+
+def cmd_task_sessions(args):
+    """List the recoverable claude chat sessions for a task (its old cc TUI conversations). Service
+    one-shots (MR summaries etc.) are marked kind=service, never hidden. --json for the cockpit."""
+    s = load_state()
+    t = s["tasks"].get(args.task) or die("unknown task '%s'" % args.task)
+    persisted = set((t.get("claude_session") or {}).values())
+    items = []
+    for repo, f in _session_files_for_task(t):
+        msgs = _read_jsonl_msgs(f)
+        if not msgs:            # empty/degenerate transcript — nothing to show or resume
+            continue
+        first_user = next((tx for r, tx in msgs if r == "user"), "")
+        kind = "service" if first_user.lower().lstrip().startswith(_SERVICE_PROMPTS) else "chat"
+        items.append({"sid": f.stem, "repo": repo, "dir": (t.get("worktrees", {}) or {}).get(repo, ""),
+                      "mtime": int(f.stat().st_mtime), "turns": len(msgs), "preview": first_user[:120],
+                      "kind": kind, "current": f.stem in persisted})
+    if getattr(args, "json", False):
+        print(json.dumps(items, ensure_ascii=False)); return
+    if not items:
+        print("(нет прошлых сессий для задачи %s)" % args.task); return
+    for it in items:
+        ts = time.strftime("%d.%m %H:%M", time.localtime(it["mtime"]))
+        flag = "  ⟂служебная" if it["kind"] == "service" else ""
+        print("%s  %s  [%s]  %d turns%s\n    %s" % (it["sid"][:8], ts, it["repo"], it["turns"], flag, it["preview"]))
+
+def cmd_task_history(args):
+    """Print one chat session's transcript for re-rendering. sid is globally unique -> locate
+    <sid>.jsonl across all project dirs. --json => [{role,text}]."""
+    # accept a full sid or a unique prefix (the `sessions` listing shows a short prefix)
+    hit = next(iter(CLAUDE_PROJECTS.glob("*/%s*.jsonl" % args.session)), None) if CLAUDE_PROJECTS.exists() else None
+    if not hit:
+        die("session '%s' не найдена в ~/.claude/projects" % args.session)
+    msgs = [{"role": r, "text": tx} for r, tx in _read_jsonl_msgs(hit)]
+    if getattr(args, "json", False):
+        print(json.dumps(msgs, ensure_ascii=False)); return
+    for m in msgs:
+        print("### %s\n%s\n" % ("Я" if m["role"] == "user" else "Агент", m["text"]))
+
 def cmd_task_open(args):
     s = load_state()
     t = s["tasks"].get(args.task) or die("unknown task '%s'" % args.task)
@@ -3328,6 +3426,10 @@ def build_parser():
     a = tk.add_parser("memory"); a.add_argument("task")
     a.add_argument("--log"); a.add_argument("--pivot"); a.add_argument("--current")
     a.set_defaults(fn=cmd_task_memory)   # shared task memory: read / --log / --pivot / --current
+    a = tk.add_parser("sessions"); a.add_argument("task"); a.add_argument("--json", action="store_true")
+    a.set_defaults(fn=cmd_task_sessions)   # recoverable old chat sessions for the task
+    a = tk.add_parser("history"); a.add_argument("session"); a.add_argument("--json", action="store_true")
+    a.set_defaults(fn=cmd_task_history)    # one session's transcript (for re-render + resume)
     a = tk.add_parser("open"); a.add_argument("task"); a.set_defaults(fn=cmd_task_open)
     a = tk.add_parser("done"); a.add_argument("task"); a.add_argument("--force", action="store_true"); a.set_defaults(fn=cmd_task_done)
     a = tk.add_parser("mr"); a.add_argument("task"); a.add_argument("--dry-run", action="store_true")
@@ -3635,7 +3737,8 @@ _READONLY = {cmd_task_diff, cmd_task_ls, cmd_repo_ls, cmd_repo_members,
              cmd_jira_search, cmd_jira_get, cmd_jira_comment, cmd_jira_done,
              cmd_jira_attachments, cmd_jira_pull,
              cmd_jira_transitions, cmd_jira_move, cmd_jira_rollup, cmd_doctor, cmd_log,
-             cmd_task_setup, cmd_snapshot, cmd_task_memory}  # no cc-state writes; network/file off the lock
+             cmd_task_setup, cmd_snapshot, cmd_task_memory,
+             cmd_task_sessions, cmd_task_history}  # no cc-state writes; network/file off the lock
 
 _SELF_LOCKED = {cmd_epic_mrs, cmd_task_mrs, cmd_repo_add, cmd_project_new, cmd_recover,
                 cmd_task_merge, cmd_epic_merge}   # do git/network lock-free, then save under a brief mutate() themselves

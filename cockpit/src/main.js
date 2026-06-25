@@ -218,10 +218,22 @@ function showTaskChats(t){          // bring this task's tabs to the front; open
   if(!mine.length){ ensureChat(t); return; }
   showTab((lastTab[t.tid] && mine.includes(lastTab[t.tid])) ? lastTab[t.tid] : mine[0]);
 }
-function ensureChat(t){
+async function ensureChat(t){
   if(taskTabs(t.tid).length || opening.has(t.tid)) return;
   opening.add(t.tid);
-  openChatTab(t, engine).finally(()=>opening.delete(t.tid));
+  try{
+    let opts={};
+    try{   // resume the task's most recent REAL chat (old cc TUI conversation), if any
+      const sess=JSON.parse((await invoke("run_cc",{args:["task","sessions",t.tid,"--json"]}))||"[]").filter(x=>x.kind==="chat");
+      if(sess.length){
+        const s0=sess[0];
+        const hist=JSON.parse((await invoke("run_cc",{args:["task","history",s0.sid,"--json"]}))||"[]");
+        opts={sid:s0.sid, dir:s0.dir, history:hist, preview:s0.preview};
+      }
+    }catch(_){}
+    if(taskTabs(t.tid).length) return;   // a "+" opened one while we were fetching
+    await openChatTab(t, engine, opts);
+  } finally { opening.delete(t.tid); }
 }
 function renderTabbar(){
   const bar=$("tabbar"); bar.innerHTML="";
@@ -239,6 +251,9 @@ function renderTabbar(){
   const add=el("div","tab tab-add","+"); add.title="Новый чат";   // browser-style "+" on the right
   add.onclick=()=>{ const tt=findTask(); if(tt) openChatTab(tt, engine); };
   bar.appendChild(add);
+  const hist=el("div","tab tab-hist","⟲"); hist.title="Прошлые чаты задачи (cc TUI)";
+  hist.onclick=()=>{ const tt=findTask(); if(tt) openSessionPicker(tt, hist); };
+  bar.appendChild(hist);
 }
 function showTab(tb){
   if(!tb) return;
@@ -345,8 +360,36 @@ function engineMenu(anchor, tab, sync){
   const close=(ev)=>{ if(!m.contains(ev.target)&&ev.target!==anchor){ m.remove(); document.removeEventListener("mousedown",close); } };
   setTimeout(()=>document.addEventListener("mousedown",close),0);
 }
-async function openChatTab(t, eng){
-  if(!t.dir){ setStatus("у задачи нет worktree-папки", true); return; }
+// past chat sessions of the task (recovered from claude's store via `cc task sessions`) — click to resume
+async function openSessionPicker(t, anchor){
+  const old=$("sessmenu"); if(old){ old.remove(); return; }
+  const m=el("div"); m.id="sessmenu"; m.appendChild(el("div","sm-head","Прошлые чаты задачи"));
+  let items=[];
+  try{ items=JSON.parse((await invoke("run_cc",{args:["task","sessions",t.tid,"--json"]}))||"[]"); }catch(e){}
+  if(!items.length) m.appendChild(el("div","sm-empty","нет прошлых сессий"));
+  for(const sn of items){
+    const it=el("div","sm-item"+(sn.kind==="service"?" service":""));
+    const d=new Date(sn.mtime*1000), ts=("0"+d.getDate()).slice(-2)+"."+("0"+(d.getMonth()+1)).slice(-2);
+    it.append(el("span","sm-meta", ts+" · "+sn.repo+" · "+sn.turns+"t"+(sn.kind==="service"?" · служебн.":"")),
+              el("span","sm-prev", (sn.preview||"").replace(/\s+/g," ").slice(0,72)));
+    it.onclick=async()=>{ m.remove();
+      let hist=[]; try{ hist=JSON.parse((await invoke("run_cc",{args:["task","history",sn.sid,"--json"]}))||"[]"); }catch(_){}
+      openChatTab(t, "claude", {sid:sn.sid, dir:sn.dir, history:hist, preview:sn.preview});
+    };
+    m.appendChild(it);
+  }
+  document.body.appendChild(m);
+  const r=anchor.getBoundingClientRect();
+  m.style.left=Math.max(8, Math.min(r.right-m.offsetWidth, window.innerWidth-m.offsetWidth-8))+"px";
+  m.style.top=(r.bottom+6)+"px";
+  const close=(ev)=>{ if(!m.contains(ev.target)&&ev.target!==anchor){ m.remove(); document.removeEventListener("mousedown",close); } };
+  setTimeout(()=>document.addEventListener("mousedown",close),0);
+}
+async function openChatTab(t, eng, opts){
+  opts = opts || {};
+  if(opts.sid){ const ex=taskTabs(t.tid).find(x=>x.session===opts.sid); if(ex){ showTab(ex); return; } }  // one tab per resumed session
+  if(!t.dir && !opts.dir){ setStatus("у задачи нет worktree-папки", true); return; }
+  const resumed = !!opts.sid;
   const id="chat-"+(++seq);
   const num=taskTabs(t.tid).filter(x=>x.type==="chat").length + 1;   // short browser-tab name: "Чат 1", "Чат 2"…
   const pane=el("div","tab-pane chat");
@@ -359,8 +402,13 @@ async function openChatTab(t, eng){
   bar.append(el("span","cb-gap"), esel, send);
   composer.append(inp, bar);
   pane.append(list, composer); $("tabbody").append(pane);
-  const tab={ type:"chat", engine:eng||engine, title:"Чат "+num, el:pane, id, taskId:t.tid, dir:t.dir,
-              msgs:[], session:null, sessionEngine:null, busy:false, injectedMem:false, carry:false };
+  const tab={ type:"chat",
+              engine: resumed ? "claude" : (eng||engine),   // old cc TUI sessions are claude
+              title: resumed ? ("↩ "+((opts.preview||"чат").split("\n")[0].slice(0,20))) : ("Чат "+num),
+              el:pane, id, taskId:t.tid, dir: opts.dir || t.dir,
+              msgs: resumed ? (opts.history||[]).map(m=>({role:m.role, text:m.text})) : [],
+              session: opts.sid || null, sessionEngine: resumed ? "claude" : null,
+              busy:false, injectedMem: resumed, carry:false };
   const syncEsel=()=>{ esel.innerHTML=""; esel.append(
       el("span","e-glyph e-"+tab.engine, ENGINE_GLYPH[tab.engine]||"✦"),
       el("span","es-name", tab.engine==="codex"?"Codex":"Claude"), el("span","caret-dn","⌄")); };

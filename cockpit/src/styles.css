@@ -157,3 +157,14 @@ h2 { margin:0; font-size:17px; font-weight:650; }
 .em-item { display:flex; align-items:center; gap:8px; padding:7px 10px; border-radius:7px; cursor:pointer; color:var(--text); font-size:13px; }
 .em-item:hover { background:var(--panel2); }
 .em-item.on { background:rgba(124,140,255,.16); }
+/* history "⟲" tab button + past-sessions picker */
+.tab-hist { flex:0 0 auto; justify-content:center; max-width:none; width:28px; padding:7px 0; color:var(--dim); font-size:13px; line-height:1; }
+.tab-hist:hover { color:var(--text); background:rgba(255,255,255,.05); }
+#sessmenu { position:fixed; z-index:60; background:var(--panel); border:1px solid var(--border); border-radius:10px; padding:5px; box-shadow:0 10px 30px rgba(0,0,0,.5); min-width:300px; max-width:440px; max-height:60vh; overflow-y:auto; }
+.sm-head { padding:6px 10px 8px; color:var(--dim); font-size:11px; text-transform:uppercase; letter-spacing:.05em; }
+.sm-empty { padding:8px 10px; color:var(--dim); font-size:12.5px; }
+.sm-item { display:flex; flex-direction:column; gap:2px; padding:8px 10px; border-radius:7px; cursor:pointer; }
+.sm-item:hover { background:var(--panel2); }
+.sm-item.service { opacity:.55; }
+.sm-meta { color:var(--dim); font-size:11px; }
+.sm-prev { color:var(--text); font-size:12.5px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
