@@ -3240,6 +3240,7 @@ def cmd_snapshot(args):
                     "tid": tid, "title": t.get("title", tid), "status": _snap_task_status(t),
                     "branch": t.get("branch", ""), "merged": bool(t.get("merged")),
                     "needs_input": t.get("needs_input") or None,
+                    "dir": t.get("dir") or "",
                     "repos": [{"repo": r, "base": (t.get("base") or {}).get(r, "?"),
                                "mr": (t.get("mrs") or {}).get(r)} for r in t.get("repos", [])],
                 })
