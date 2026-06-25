@@ -127,18 +127,27 @@ function renderFacts(t){
               btn("Влить", ()=>runAction(["task","merge",t.tid],"task merge "+t.tid, loose), "ghost"));
   if(t.dir) trow.append(btn("Папка", ()=>openExt(t.dir), "ghost"));
   f.appendChild(trow);
+  // combine toggle: pull this task's changes INTO the group's combined branch (or take them back out)
+  if(!loose){ const crow=el("div","row2 acts");
+    if(t.combined) crow.append(btn("⊖ Вынуть из группы", ()=>runAction(["group","combine",SEL.g,"--remove",t.tid],"вынуть "+t.tid+" из combined "+SEL.g,false), "ghost"));
+    else crow.append(btn("⊕ Влить в группу", ()=>runAction(["group","combine",SEL.g,"--add",t.tid],"влить "+t.tid+" в combined "+SEL.g,false)));
+    f.appendChild(crow); }
   f.appendChild(el("div","sec","репозитории → target"));
   for(const r of t.repos){ const row=el("div","row2"); row.append(el("span","k", r.repo+" → "+r.base)); if(r.mr){ const a=el("a","lnk"," MR ↗"); a.onclick=()=>openExt(r.mr); row.append(a); } f.appendChild(row); }
   const mrs=t.repos.filter(r=>r.mr);
-  f.appendChild(el("div","row2 dim","MR: "+mrs.length+"/"+t.repos.length+(t.merged?"   ✅ влито":"")));
+  f.appendChild(el("div","row2 dim","MR: "+mrs.length+"/"+t.repos.length+(t.merged?"   ✅ влито":"")+(t.combined?"   ⊕ в combined":"")));
   f.appendChild(el("div","sec","ГРУППА "+(SEL?SEL.g:"")));
+  // combined-branch state: which tasks are merged into the group's integration branch
+  if(g && !loose){ const cn=(g.combined||[]).length;
+    f.appendChild(el("div","row2 dim", cn? ("Объединено: "+cn+" задач → "+g.combined_branch) : "Объединено: пусто (combined-ветки нет)"));
+    f.appendChild(btn("↻ Пересобрать combined", ()=>runAction(["group","combine",SEL.g],"пересобрать combined "+SEL.g,false), "ghost")); }
   const grow=el("div","row2 acts");
-  grow.append(btn("Test", ()=>runAction(["epic","ops",SEL.g,"--kind","test"],"ops test "+SEL.g,false), "ghost"),
-              btn("Stage", ()=>runAction(["epic","ops",SEL.g,"--kind","stage"],"ops stage "+SEL.g,false), "ghost"));
+  grow.append(btn("Test", ()=>runAction(["group","ops",SEL.g,"--kind","test"],"ops test "+SEL.g,false), "ghost"),
+              btn("Stage", ()=>runAction(["group","ops",SEL.g,"--kind","stage"],"ops stage "+SEL.g,false), "ghost"));
   f.appendChild(grow);
   if(!loose){ const g2=el("div","row2 acts");
-    g2.append(btn("Влить задачи", ()=>runAction(["epic","merge",SEL.g],"epic merge "+SEL.g,false), "ghost"),
-              btn("Release: MR→master", ()=>runAction(["epic","mr",SEL.g],"epic mr "+SEL.g,true), "warn"));
+    g2.append(btn("Влить задачи", ()=>runAction(["group","merge",SEL.g],"group merge "+SEL.g,false), "ghost"),
+              btn("Release: MR→master", ()=>runAction(["group","mr",SEL.g],"group mr "+SEL.g,true), "warn"));
     f.appendChild(g2); }
 }
 function setupCenter(){

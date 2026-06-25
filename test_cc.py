@@ -660,9 +660,12 @@ def test_snapshot():
     # the GUI data contract: projects -> groups -> tasks/ops with status + per-repo MR facts.
     import json, io, contextlib
     s = {"projects": {"P": {"kind": "single", "repos": {"web": {}}}},
-         "epics": {"E1": {"project": "P", "summary": "e1"}, "P__loose": {"project": "P", "loose": True}},
+         "epics": {"E1": {"project": "P", "summary": "e1", "combined": ["t1"]},
+                   "P__loose": {"project": "P", "loose": True}},
          "tasks": {"t1": {"epic": "E1", "title": "T1", "status": "mr", "branch": "b",
-                          "repos": ["web"], "base": {"web": "main"}, "mrs": {"web": "u"}}}}
+                          "repos": ["web"], "base": {"web": "main"}, "mrs": {"web": "u"}},
+                   "t2": {"epic": "E1", "title": "T2", "status": "wip", "branch": "b2",
+                          "repos": ["web"], "base": {"web": "main"}}}}
     saved = cc.load_state
     cc.load_state = lambda: s
     try:
@@ -672,9 +675,14 @@ def test_snapshot():
         d = json.loads(buf.getvalue())
         groups = d["projects"]["P"]["groups"]
         e1 = [x for x in groups if x["key"] == "E1"][0]
-        assert e1["tasks"][0]["status"] == "mr" and e1["tasks"][0]["repos"][0]["mr"] == "u"
+        t1 = [t for t in e1["tasks"] if t["tid"] == "t1"][0]
+        t2 = [t for t in e1["tasks"] if t["tid"] == "t2"][0]
+        assert t1["status"] == "mr" and t1["repos"][0]["mr"] == "u"
         assert not any(x["key"] == "P__loose" for x in groups)   # empty loose group hidden
         assert d["projects"]["P"]["repos"] == ["web"]
+        # combine contract: per-task `combined` flag + per-group combined set + branch name
+        assert t1["combined"] is True and t2["combined"] is False
+        assert e1["combined"] == ["t1"] and e1["combined_branch"] == "E1-combined"
     finally:
         cc.load_state = saved
 

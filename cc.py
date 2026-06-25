@@ -3056,30 +3056,34 @@ def build_parser():
     a = rp_.add_parser("ls"); a.add_argument("project"); a.set_defaults(fn=cmd_repo_ls)
     a = rp_.add_parser("members"); a.add_argument("project"); a.add_argument("repo"); a.set_defaults(fn=cmd_repo_members)
 
-    gp = sub.add_parser("group").add_subparsers(dest="cmd", required=True)
-    a = gp.add_parser("combine"); a.add_argument("group"); a.add_argument("--add"); a.add_argument("--remove")
-    a.set_defaults(fn=cmd_group_combine)
+    # `group` is the canonical surface (tasks combine INTO a group); `epic` is a back-compat alias.
+    # Both register the SAME subcommands → identical behaviour, internal state key stays "epic"
+    # (zero migration). New code/users should say `cc group …`.
+    def _add_group_cmds(grp):
+        a = grp.add_parser("add"); a.add_argument("project"); a.add_argument("key")
+        a.add_argument("--summary"); a.add_argument("--target", action="append"); a.add_argument("--repos")
+        a.set_defaults(fn=cmd_epic_add)
+        a = grp.add_parser("ls"); a.add_argument("project", nargs="?"); a.set_defaults(fn=cmd_epic_ls)
+        a = grp.add_parser("mr"); a.add_argument("key"); a.add_argument("--dry-run", action="store_true"); a.set_defaults(fn=cmd_epic_mr)
+        a = grp.add_parser("mrs"); a.add_argument("key"); a.set_defaults(fn=cmd_epic_mrs)
+        a = grp.add_parser("plan"); a.add_argument("key"); a.set_defaults(fn=cmd_epic_plan)
+        a = grp.add_parser("merge"); a.add_argument("key"); a.add_argument("--dry-run", action="store_true"); a.add_argument("--squash", action="store_true"); a.set_defaults(fn=cmd_epic_merge)
+        a = grp.add_parser("combine"); a.add_argument("group"); a.add_argument("--add"); a.add_argument("--remove")
+        a.set_defaults(fn=cmd_group_combine)
+        a = grp.add_parser("set"); a.add_argument("key"); a.add_argument("--summary"); a.add_argument("--repos"); a.add_argument("--target", action="append"); a.set_defaults(fn=cmd_epic_set)
+        a = grp.add_parser("note"); a.add_argument("key"); a.add_argument("text"); a.set_defaults(fn=cmd_epic_note)
+        a = grp.add_parser("memory"); a.add_argument("key"); a.set_defaults(fn=cmd_epic_memory)
+        a = grp.add_parser("sync"); a.add_argument("key"); a.set_defaults(fn=cmd_epic_sync)
+        a = grp.add_parser("open"); a.add_argument("key"); a.set_defaults(fn=cmd_epic_open)
+        a = grp.add_parser("ops"); a.add_argument("key"); a.add_argument("--kind", default="test")
+        a.add_argument("--manual", action="store_true"); a.set_defaults(fn=cmd_epic_ops)
+        a = grp.add_parser("done"); a.add_argument("key"); a.set_defaults(fn=cmd_epic_done)
+        a = grp.add_parser("archive"); a.add_argument("key"); a.set_defaults(fn=cmd_epic_archive)
+        a = grp.add_parser("unarchive"); a.add_argument("key"); a.set_defaults(fn=cmd_epic_unarchive)
+        a = grp.add_parser("rm"); a.add_argument("key"); a.add_argument("--force", action="store_true"); a.set_defaults(fn=cmd_epic_rm)
 
-    ep = sub.add_parser("epic").add_subparsers(dest="cmd", required=True)
-    a = ep.add_parser("add"); a.add_argument("project"); a.add_argument("key")
-    a.add_argument("--summary"); a.add_argument("--target", action="append"); a.add_argument("--repos")
-    a.set_defaults(fn=cmd_epic_add)
-    a = ep.add_parser("ls"); a.add_argument("project", nargs="?"); a.set_defaults(fn=cmd_epic_ls)
-    a = ep.add_parser("mr"); a.add_argument("key"); a.add_argument("--dry-run", action="store_true"); a.set_defaults(fn=cmd_epic_mr)
-    a = ep.add_parser("mrs"); a.add_argument("key"); a.set_defaults(fn=cmd_epic_mrs)
-    a = ep.add_parser("plan"); a.add_argument("key"); a.set_defaults(fn=cmd_epic_plan)
-    a = ep.add_parser("merge"); a.add_argument("key"); a.add_argument("--dry-run", action="store_true"); a.add_argument("--squash", action="store_true"); a.set_defaults(fn=cmd_epic_merge)
-    a = ep.add_parser("set"); a.add_argument("key"); a.add_argument("--summary"); a.add_argument("--repos"); a.add_argument("--target", action="append"); a.set_defaults(fn=cmd_epic_set)
-    a = ep.add_parser("note"); a.add_argument("key"); a.add_argument("text"); a.set_defaults(fn=cmd_epic_note)
-    a = ep.add_parser("memory"); a.add_argument("key"); a.set_defaults(fn=cmd_epic_memory)
-    a = ep.add_parser("sync"); a.add_argument("key"); a.set_defaults(fn=cmd_epic_sync)
-    a = ep.add_parser("open"); a.add_argument("key"); a.set_defaults(fn=cmd_epic_open)
-    a = ep.add_parser("ops"); a.add_argument("key"); a.add_argument("--kind", default="test")
-    a.add_argument("--manual", action="store_true"); a.set_defaults(fn=cmd_epic_ops)
-    a = ep.add_parser("done"); a.add_argument("key"); a.set_defaults(fn=cmd_epic_done)
-    a = ep.add_parser("archive"); a.add_argument("key"); a.set_defaults(fn=cmd_epic_archive)
-    a = ep.add_parser("unarchive"); a.add_argument("key"); a.set_defaults(fn=cmd_epic_unarchive)
-    a = ep.add_parser("rm"); a.add_argument("key"); a.add_argument("--force", action="store_true"); a.set_defaults(fn=cmd_epic_rm)
+    _add_group_cmds(sub.add_parser("group").add_subparsers(dest="cmd", required=True))
+    _add_group_cmds(sub.add_parser("epic").add_subparsers(dest="cmd", required=True))  # legacy alias
 
     tk = sub.add_parser("task").add_subparsers(dest="cmd", required=True)
     a = tk.add_parser("add"); a.add_argument("epic"); a.add_argument("title", nargs="?", default="")
@@ -3315,6 +3319,7 @@ def cmd_snapshot(args):
         groups = []
         for k in keys:
             e = s["epics"][k]
+            combset = set(e.get("combined") or [])
             tasks = []
             for tid, t in s["tasks"].items():
                 if t.get("epic") != k:
@@ -3322,6 +3327,7 @@ def cmd_snapshot(args):
                 tasks.append({
                     "tid": tid, "title": t.get("title", tid), "status": _snap_task_status(t),
                     "branch": t.get("branch", ""), "merged": bool(t.get("merged")),
+                    "combined": tid in combset,            # included in the group's combined branch
                     "needs_input": t.get("needs_input") or None,
                     "dir": t.get("dir") or "",
                     "repos": [{"repo": r, "base": (t.get("base") or {}).get(r, "?"),
@@ -3331,8 +3337,10 @@ def cmd_snapshot(args):
                    for oid, o in (s.get("ops") or {}).items() if o.get("epic") == k]
             if e.get("loose") and not tasks and not ops:
                 continue                                   # hide an empty loose container
+            combined = [tid for tid in (e.get("combined") or []) if tid in s["tasks"]]
             groups.append({"key": k, "summary": e.get("summary", ""), "loose": bool(e.get("loose")),
-                           "tasks": tasks, "ops": ops})
+                           "tasks": tasks, "ops": ops,
+                           "combined": combined, "combined_branch": combined_branch(k)})
         out["projects"][pn] = {"kind": p.get("kind", "—"),
                                "repos": list((p.get("repos") or {}).keys()), "groups": groups}
     print(json.dumps(out, ensure_ascii=False, indent=2))
