@@ -3488,11 +3488,44 @@ def _snap_ops_status(o):
             return "failed"                      # KEY: 0-exit agent, but the deploy pipeline FAILED
     return "done"                                # exit 0 (+ CI green, or no CI handle = unverified)
 
+def _audit_activity():
+    """{task_id: latest audit ts} from the append-only audit log — 'when did I last act on this task'."""
+    out = {}
+    if not AUDIT_FILE.exists():
+        return out
+    try:
+        with open(AUDIT_FILE, encoding="utf-8") as f:
+            for line in f:
+                try:
+                    r = json.loads(line)
+                except Exception:
+                    continue
+                tid, ts = r.get("task"), r.get("ts")
+                if tid and isinstance(ts, (int, float)) and ts > out.get(tid, 0):
+                    out[tid] = ts
+    except Exception:
+        pass
+    return out
+
+def _task_activity(tid, t, act_map):
+    """Best 'last interaction' signal for a task: latest cc action (audit) OR worktree edit (mtime).
+    Drives the task-first sidebar — recently-touched standalone tasks float to the top of a project."""
+    act = act_map.get(tid, 0)
+    for wt in (t.get("worktrees") or {}).values():
+        try:
+            m = os.path.getmtime(wt)
+            if m > act:
+                act = m
+        except OSError:
+            pass
+    return int(act)
+
 def cmd_snapshot(args):
     """Full board as JSON for the GUI cockpit: projects -> groups (epics incl. loose) -> tasks/ops
     with computed status + per-repo MR facts. Read-only — the cockpit polls this. The data CONTRACT
     between the engine and the app."""
     s = load_state()
+    act_map = _audit_activity()
     out = {"projects": {}}
     for pn, p in s["projects"].items():
         keys = [k for k, e in s["epics"].items() if e.get("project") == pn and not e.get("archived")]
@@ -3509,6 +3542,7 @@ def cmd_snapshot(args):
                     "tid": tid, "title": t.get("title", tid), "status": _snap_task_status(t),
                     "branch": t.get("branch", ""), "merged": bool(t.get("merged")),
                     "combined": tid in combset,            # included in the group's combined branch
+                    "activity": _task_activity(tid, t, act_map),   # last interaction (sort key)
                     "needs_input": t.get("needs_input") or None,
                     "dir": t.get("dir") or "",
                     "repos": [{"repo": r, "base": (t.get("base") or {}).get(r, "?"),

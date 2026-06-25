@@ -35,6 +35,8 @@ html,body { margin:0; height:100%; background:var(--bg); color:var(--text); font
 @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.4} }
 /* tasks under a faint indent rail */
 .items { margin:1px 8px 4px 22px; border-left:1px solid var(--border); padding-left:3px; }
+/* standalone tasks sit at the project's own level (no group rail) */
+.items.loose { margin-left:10px; border-left:none; padding-left:0; }
 .task,.ops { display:flex; align-items:center; gap:9px; min-width:0; padding:6px 10px; border-radius:7px; cursor:pointer; transition:background .1s; }
 .task:hover,.ops:hover { background:rgba(255,255,255,.035); }
 .task .label,.ops .label { flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-size:13.5px; }
