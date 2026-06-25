@@ -91,7 +91,7 @@ fn pty_kill(state: State<Ptys>, id: String) {
 #[derive(Clone, serde::Serialize)]
 struct ChatLine { id: String, line: String }
 #[derive(Clone, serde::Serialize)]
-struct ChatDone { id: String, code: i32 }
+struct ChatDone { id: String, code: i32, err: String }
 
 // Build the headless+streaming argv per engine; resume the given session when one is supplied.
 // `dirs` are extra repos the agent may read/edit beyond cwd (--add-dir) — used so a RESUMED chat
@@ -107,6 +107,7 @@ fn chat_argv(engine: &str, prompt: &str, session: &str, dirs: &[String]) -> (Str
         let mut a: Vec<String> = vec![
             "-p".into(), prompt.into(),
             "--output-format".into(), "stream-json".into(), "--verbose".into(),
+            "--include-partial-messages".into(),   // emit token deltas (else stream-json sends whole msgs only)
             "--permission-mode".into(), "bypassPermissions".into(),
         ];
         for d in dirs { if !d.is_empty() { a.push("--add-dir".into()); a.push(d.clone()); } }
@@ -119,9 +120,16 @@ fn chat_run(app: AppHandle, id: String, cwd: String, engine: String, prompt: Str
     use std::process::{Command, Stdio};
     let (bin, args) = chat_argv(&engine, &prompt, &session, &dirs);
     let mut child = Command::new(&bin).args(&args).current_dir(&cwd)
-        .stdout(Stdio::piped()).stderr(Stdio::null()).stdin(Stdio::null())
+        .stdout(Stdio::piped()).stderr(Stdio::piped()).stdin(Stdio::null())   // keep stderr — it's the only clue when the engine fails
         .spawn().map_err(|e| format!("не запустил {}: {}", bin, e))?;
     let stdout = child.stdout.take().ok_or("no stdout")?;
+    let stderr = child.stderr.take();
+    // drain stderr concurrently into a buffer (avoid pipe-buffer deadlock) — surfaced on a bad exit
+    let err_buf = std::sync::Arc::new(Mutex::new(String::new()));
+    let eb = err_buf.clone();
+    let err_handle = std::thread::spawn(move || {
+        if let Some(mut se) = stderr { let mut s = String::new(); let _ = se.read_to_string(&mut s); *eb.lock().unwrap() = s; }
+    });
     std::thread::spawn(move || {
         let mut child = child;   // owned + mutable inside the thread (for wait())
         let reader = std::io::BufReader::new(stdout);
@@ -132,7 +140,9 @@ fn chat_run(app: AppHandle, id: String, cwd: String, engine: String, prompt: Str
             }
         }
         let code = child.wait().ok().and_then(|s| s.code()).unwrap_or(-1);
-        let _ = app.emit("chat-done", ChatDone { id, code });
+        let _ = err_handle.join();
+        let err: String = err_buf.lock().unwrap().chars().take(1200).collect();
+        let _ = app.emit("chat-done", ChatDone { id, code, err });
     });
     Ok(())
 }
