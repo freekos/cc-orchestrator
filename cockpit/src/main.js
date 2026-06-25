@@ -562,11 +562,64 @@ function centerMode(home){
   if(h) h.style.display = home ? "block" : "none";
   if(b) b.style.display = home ? "none" : "";
   if(home){ const bar=$("tabbar"); if(bar) bar.style.display="none"; }
+  $("app").classList.toggle("no-task", !!home);   // hide the facts pane while nothing is selected
 }
 function goHome(){            // clicking the cc logo deselects → back to the overview
   SEL=null; hideCard();
   centerMode(true); renderHome(); renderTree();
   const f=$("facts"); f.innerHTML=""; f.append(el("div","empty","выбери задачу — здесь появятся MR, ветки и действия"));
+}
+// Cmd+T → create a task under a project (epic-less) or under an epic. Defaults: --manual (no auto
+// background agent — you drive it in the cockpit chat) + --no-jira (quick local task; link Jira later).
+function openNewTask(presetProject){
+  if(!STATE || !STATE.projects) return;
+  const projNames=Object.keys(STATE.projects);
+  if(!projNames.length){ setStatus("нет проектов", true); return; }
+  const ov=el("div","overlay"); const box=el("div","modal form");
+  const hd=el("div","mhead"); hd.append(el("span",null,"Новая задача"), btn("✕",()=>ov.remove(),"ghost"));
+  const body=el("div","nt-body");
+  const opt=(v,t)=>{ const o=document.createElement("option"); o.value=v; o.textContent=t; return o; };
+  const field=(label,ctrl)=>{ const f=el("div","nt-field"); f.append(el("label","nt-label",label), ctrl); return f; };
+  const projSel=document.createElement("select"); projSel.className="mem-inp";
+  projNames.forEach(p=>projSel.append(opt(p,p)));
+  projSel.value = (presetProject && STATE.projects[presetProject]) ? presetProject : projNames[0];
+  const epicSel=document.createElement("select"); epicSel.className="mem-inp";
+  const reposInp=el("input","mem-inp"); reposInp.placeholder="репозитории через запятую (пусто = все репо проекта)";
+  const fillForProject=()=>{
+    const p=STATE.projects[projSel.value]||{};
+    epicSel.innerHTML=""; epicSel.append(opt("","— под проект (без эпика) —"));
+    (p.groups||[]).filter(g=>!g.loose).forEach(g=>epicSel.append(opt(g.key, g.summary||g.key)));
+    reposInp.value=(p.repos||[]).join(",");
+  };
+  projSel.onchange=fillForProject; fillForProject();
+  const promptInp=el("textarea","mem-inp"); promptInp.rows=4; promptInp.placeholder="Что нужно сделать? (описание/направление — обязательно)";
+  const titleInp=el("input","mem-inp"); titleInp.placeholder="Название (необязательно — сгенерируется из описания)";
+  body.append(field("Проект", projSel), field("Эпик / группа", epicSel), field("Репозитории", reposInp),
+              field("Описание задачи", promptInp), field("Название", titleInp));
+  const foot=el("div","mem-foot");
+  const status=el("span","nt-status","");
+  const create=async()=>{
+    const desc=promptInp.value.trim(); if(!desc){ promptInp.focus(); status.textContent="нужно описание"; return; }
+    const firstArg=epicSel.value || projSel.value;
+    const title=titleInp.value.trim();
+    const repos=reposInp.value.trim();
+    const args=["task","add",firstArg]; if(title) args.push(title);
+    args.push("--prompt",desc); if(repos) args.push("--repos",repos);
+    args.push("--manual","--no-jira");
+    status.textContent="создаю задачу + worktree…"; mkBtn.disabled=true;
+    try{
+      await invoke("run_cc",{args});
+      ov.remove(); await load();
+      if(title){ const hit=allTasksFlat().filter(x=>x.t.title===title).sort((a,b)=>(b.t.activity||0)-(a.t.activity||0))[0];
+                 if(hit) selectTask(hit.t, hit.pn, hit.gkey); }
+    }catch(e){ status.textContent=""; mkBtn.disabled=false;
+      body.append(el("pre","nt-err","✗ "+e)); }
+  };
+  const mkBtn=btn("Создать", create, "primary");
+  foot.append(status, mkBtn);
+  promptInp.onkeydown=(e)=>{ if((e.metaKey||e.ctrlKey)&&e.key==="Enter"){ e.preventDefault(); create(); } };
+  box.append(hd, body, foot); ov.append(box); document.body.append(ov);
+  promptInp.focus();
 }
 // flatten every task across projects/groups, keeping its project + group for selectTask
 function allTasksFlat(){
@@ -642,4 +695,9 @@ function setupResizers(){
 }
 window.addEventListener("DOMContentLoaded", ()=>{ setupCenter(); setupResizers(); $("refresh").onclick=load;
   const brand=document.querySelector(".brand"); if(brand){ brand.style.cursor="pointer"; brand.title="На обзор"; brand.onclick=goHome; }
+  document.addEventListener("keydown",(e)=>{   // Cmd/Ctrl+T → new task under a project
+    if((e.metaKey||e.ctrlKey) && (e.key==="t"||e.key==="T") && !e.shiftKey){
+      e.preventDefault(); if(!$("enginemenu")&&!$("sessmenu")) openNewTask(SEL?SEL.p:undefined);
+    }
+  });
   load(); setInterval(load, 5000); });
