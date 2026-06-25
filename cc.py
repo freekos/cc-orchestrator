@@ -1756,17 +1756,21 @@ def mr_url(out, remote, branch, cwd):
     m = re.search(r"https?://\S+/-/merge_requests/\d+", text) or re.search(r"https?://\S+/pull/\d+", text)
     return m.group(0) if m else ""
 
-def create_mr(remote, branch, target, title, body, label, assignee, reviewer, cwd):
+def create_mr(remote, branch, target, title, body, label, assignee, reviewer, cwd, draft=False):
     """Create an MR/PR (branch must already be pushed). GitHub via `gh pr create`, GitLab via
     `glab mr create`. Returns (url, err) — url='' on failure. GitHub v1 omits label/assignee/reviewer
     (label must pre-exist; assignee/reviewer must be collaborators — a failed create is worse than a
-    bare PR; those land in a follow-up with a collaborator check)."""
+    bare PR; those land in a follow-up with a collaborator check). draft=True opens it as a draft/WIP."""
     if repo_host(cwd) == "github":
         cmd = ["gh", "pr", "create", "--repo", remote, "--head", branch, "--base", target,
                "--title", title, "--body", (body or "")[:60000]]
+        if draft:
+            cmd.append("--draft")
     else:
         cmd = ["glab", "mr", "create", "-R", remote, "--source-branch", branch, "--target-branch", target,
                "--title", title, "--description", (body or "")[:8000], "--label", label, "--yes"]
+        if draft:
+            cmd.append("--draft")
         if assignee:
             cmd += ["--assignee", assignee]
         if reviewer:
@@ -1951,7 +1955,8 @@ def cmd_task_mr(args):
             mr_title = tag + ai_title
         mr_desc += "\n\n_MR by cc — epic %s_" % t["epic"]
         print("[%s] создаю MR -> %s (reviewer %s, assignee %s) ..." % (r, target, lead or "-", assignee or "-"))
-        url, err = create_mr(ri["remote"], branch, target, mr_title, mr_desc, t["epic"], assignee, lead, wt)
+        url, err = create_mr(ri["remote"], branch, target, mr_title, mr_desc, t["epic"], assignee, lead, wt,
+                             draft=getattr(args, "draft", False))
         if url:
             t["mrs"][r] = url
             print("[%s] MR -> %s" % (r, url))
@@ -3433,6 +3438,7 @@ def build_parser():
     a = tk.add_parser("open"); a.add_argument("task"); a.set_defaults(fn=cmd_task_open)
     a = tk.add_parser("done"); a.add_argument("task"); a.add_argument("--force", action="store_true"); a.set_defaults(fn=cmd_task_done)
     a = tk.add_parser("mr"); a.add_argument("task"); a.add_argument("--dry-run", action="store_true")
+    a.add_argument("--draft", action="store_true", help="open the MR/PR as a draft (WIP)")
     a.add_argument("--no-ai", action="store_true", help="static commit/MR text (skip claude generation)"); a.set_defaults(fn=cmd_task_mr)
     a = tk.add_parser("mrs"); a.add_argument("task"); a.set_defaults(fn=cmd_task_mrs)
     a = tk.add_parser("merge"); a.add_argument("task"); a.add_argument("--dry-run", action="store_true"); a.add_argument("--squash", action="store_true"); a.set_defaults(fn=cmd_task_merge)
