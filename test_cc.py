@@ -568,6 +568,67 @@ def test_cmd_epic_ops_manual():
         shutil.rmtree(d, ignore_errors=True)
 
 
+class _R:
+    def __init__(self, stdout="", returncode=0, stderr=""):
+        self.stdout, self.returncode, self.stderr = stdout, returncode, stderr
+
+
+def test_github_mr_layer():
+    # MR ops dispatch to `gh` when the repo's origin is GitHub, and parse PR JSON correctly.
+    saved, calls = cc.run, []
+
+    def fake(cmd, cwd=None, check=True, **kw):
+        calls.append(cmd)
+        if cmd[:3] == ["git", "remote", "get-url"]:
+            return _R("https://github.com/freekos/cc-orchestrator.git\n")
+        if cmd[:3] == ["gh", "pr", "list"]:
+            if "number,url,baseRefName,state" in cmd:
+                return _R('{"number":42,"url":"https://github.com/o/r/pull/42","baseRefName":"main","state":"OPEN"}')
+            if "url,state" in cmd:
+                return _R('{"url":"https://github.com/o/r/pull/42","state":"MERGED"}')
+            if "url" in cmd:
+                return _R('{"url":"https://github.com/o/r/pull/42"}')
+        if cmd[:3] == ["gh", "pr", "merge"]:
+            return _R("merged", 0)
+        return _R("")
+    cc.run = fake
+    try:
+        assert cc.repo_host("/x") == "github"
+        assert cc.find_mr("o/r", "br", "/x") == "https://github.com/o/r/pull/42"
+        url, st = cc.mr_info("o/r", "br", "/x")
+        assert url == "https://github.com/o/r/pull/42" and st == "merged"   # GH state -> glab vocab
+        om = cc.open_mr("o/r", "br", "/x")
+        assert om["iid"] == 42 and om["target_branch"] == "main" and om["state"] == "opened"
+        ok, _ = cc.merge_mr("o/r", 42, "/x", squash=True)
+        assert ok and any(c[:3] == ["gh", "pr", "merge"] and "--squash" in c for c in calls)
+        assert cc.mr_url(_R("done https://github.com/o/r/pull/99"), "o/r", "br", "/x") == "https://github.com/o/r/pull/99"
+    finally:
+        cc.run = saved
+
+
+def test_mr_layer_gitlab_intact():
+    # regression: GitLab repos still go through `glab` exactly as before.
+    saved = cc.run
+
+    def fake(cmd, cwd=None, check=True, **kw):
+        if cmd[:3] == ["git", "remote", "get-url"]:
+            return _R("https://gitlab.com/grp/repo.git\n")
+        if cmd[:2] == ["glab", "api"]:
+            return _R('[{"iid":7,"web_url":"https://gitlab.com/grp/repo/-/merge_requests/7","target_branch":"dev","state":"opened"}]')
+        if cmd[:3] == ["glab", "mr", "merge"]:
+            return _R("merged", 0)
+        return _R("")
+    cc.run = fake
+    try:
+        assert cc.repo_host("/x") == "gitlab"
+        om = cc.open_mr("grp/repo", "br", "/x")
+        assert om["iid"] == 7 and om["target_branch"] == "dev"
+        ok, _ = cc.merge_mr("grp/repo", 7, "/x")
+        assert ok
+    finally:
+        cc.run = saved
+
+
 if __name__ == "__main__":
     n = 0
     for k, v in list(globals().items()):

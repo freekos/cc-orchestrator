@@ -296,6 +296,13 @@ def default_branch(repo_path):
 def have_ref(repo_path, ref):
     return run(["git", "rev-parse", "--verify", ref], cwd=repo_path, check=False).returncode == 0
 
+def repo_host(cwd):
+    """github / gitlab, read from the repo's origin URL. Drives whether MR ops use `gh` (GitHub)
+    or `glab` (GitLab) — so cc can manage GitHub repos (incl. its own) and GitLab ones alike."""
+    r = run(["git", "remote", "get-url", "origin"], cwd=cwd, check=False)
+    url = (r.stdout or "") if r else ""
+    return "github" if ("github.com" in url or url.startswith("git@github")) else "gitlab"
+
 def _ahead_count(rp, branch, base):
     """How many commits `branch` has that `base` (master/main) doesn't — i.e. real changes to bring
     in. 0 means the epic branch is identical to master (no tasks merged into it yet) -> no MR."""
@@ -1367,8 +1374,25 @@ def cmd_task_done(args):
     save_state(s)
     print("task %s готово и убрано с доски (Jira->Done; remote MR/ветка не тронуты)." % args.task)
 
+_GH_STATE = {"OPEN": "opened", "MERGED": "merged", "CLOSED": "closed"}   # gh PR state -> glab MR vocab
+
+def _gh_pr(remote, branch, cwd, state, fields):
+    """First PR for `branch` (head) in `state` (open/merged/all) as a dict of `fields`, or None."""
+    r = run(["gh", "pr", "list", "--repo", remote, "--head", branch, "--state", state,
+             "--json", fields, "--jq", ".[0]"], cwd=cwd, check=False)
+    out = (r.stdout or "").strip()
+    if not out:
+        return None
+    try:
+        return json.loads(out)
+    except Exception:
+        return None
+
 def find_mr(remote, branch, cwd):
-    """Web URL of the MR for this branch (or None) — looks up existing via glab mr list."""
+    """Web URL of the MR/PR for this branch (or None)."""
+    if repo_host(cwd) == "github":
+        d = _gh_pr(remote, branch, cwd, "all", "url")
+        return (d or {}).get("url") or None
     lst = run(["glab", "mr", "list", "-R", remote, "--source-branch", branch], cwd=cwd, check=False)
     text = (lst.stdout or "") + (lst.stderr or "")
     m = re.search(r"https?://\S+/-/merge_requests/\d+", text)
@@ -1386,6 +1410,11 @@ def mr_info(remote, branch, cwd):
     branch AND is ambiguous when >1 MR shares the branch (it makes you pick an IID). So we go through
     the API by source_branch only: first ask for an OPEN one, then fall back to the most-recently
     updated MR of ANY state — which still resolves merged MRs after their branch is gone."""
+    if repo_host(cwd) == "github":
+        d = _gh_pr(remote, branch, cwd, "open", "url,state") or _gh_pr(remote, branch, cwd, "all", "url,state")
+        if d:
+            return (d.get("url"), _GH_STATE.get(d.get("state", ""), (d.get("state") or "?").lower()))
+        return (None, None)
     enc = remote.replace("/", "%2F")
 
     def _query(extra):
@@ -1406,8 +1435,14 @@ def mr_info(remote, branch, cwd):
     return (None, None)
 
 def open_mr(remote, branch, cwd):
-    """The single OPEN MR whose source is `branch`, or None. Returns the raw dict (iid/web_url/
-    target_branch/...). Used by merge commands — we only ever auto-merge an OPEN MR."""
+    """The single OPEN MR/PR whose source is `branch`, or None. Returns a dict (iid/web_url/
+    target_branch/state). Used by merge commands — we only ever auto-merge an OPEN one."""
+    if repo_host(cwd) == "github":
+        d = _gh_pr(remote, branch, cwd, "open", "number,url,baseRefName,state")
+        if not d:
+            return None
+        return {"iid": d.get("number"), "web_url": d.get("url"),
+                "target_branch": d.get("baseRefName"), "state": "opened"}
     enc = remote.replace("/", "%2F")
     out = run(["glab", "api",
                "projects/%s/merge_requests?source_branch=%s&state=opened&per_page=1" % (enc, branch)],
@@ -1419,20 +1454,23 @@ def open_mr(remote, branch, cwd):
     return arr[0] if arr else None
 
 def merge_mr(remote, iid, cwd, squash=False):
-    """Merge MR <iid>. Returns (ok, msg). --auto-merge so a required-but-unfinished pipeline merges
-    on green instead of failing; we do NOT remove the source branch (a follow-up fix may reuse it)."""
-    cmd = ["glab", "mr", "merge", str(iid), "-R", remote, "--yes"]
-    if squash:
-        cmd.append("--squash")
+    """Merge MR/PR <iid>. Returns (ok, msg). We do NOT delete the source branch (a follow-up fix may
+    reuse it). GitHub: `gh pr merge`; GitLab: `glab mr merge --auto-merge` (merges on green)."""
+    if repo_host(cwd) == "github":
+        cmd = ["gh", "pr", "merge", str(iid), "--repo", remote, "--squash" if squash else "--merge"]
+    else:
+        cmd = ["glab", "mr", "merge", str(iid), "-R", remote, "--yes"]
+        if squash:
+            cmd.append("--squash")
     r = run(cmd, cwd=cwd, check=False)
     msg = ((r.stdout or "") + " " + (r.stderr or "")).strip().replace("\n", " ")
     return (r.returncode == 0, msg[:300])
 
 def mr_url(out, remote, branch, cwd):
-    # URL of the JUST-created MR — ONLY from the create output. Do NOT fall back to `glab mr view`
-    # here: that returns a PRE-EXISTING (often merged) MR and masks a failed create. Empty == failed.
+    # URL of the JUST-created MR/PR — ONLY from the create output. Do NOT fall back to a view command
+    # here: that returns a PRE-EXISTING (often merged) one and masks a failed create. Empty == failed.
     text = (out.stdout or "") + "\n" + (out.stderr or "")
-    m = re.search(r"https?://\S+/-/merge_requests/\d+", text)
+    m = re.search(r"https?://\S+/-/merge_requests/\d+", text) or re.search(r"https?://\S+/pull/\d+", text)
     return m.group(0) if m else ""
 
 
