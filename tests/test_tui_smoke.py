@@ -277,7 +277,18 @@ async def _confirmscreen():
     print("CONFIRMSCREEN OK")
 
 
+def test_bindings_culled():
+    # the redesign cut m/d/g/v/O/T; core keys remain. Locks the simplified surface.
+    keys = {b.key for b in tui.CCApp.BINDINGS}
+    for gone in ("m", "d", "g", "v", "O", "T"):
+        assert gone not in keys, "binding %s should be removed" % gone
+    for kept in ("o", "n", "P", "G", "L", "M", "x", "q", "a"):
+        assert kept in keys, "binding %s should remain" % kept
+
+
 if __name__ == "__main__":
+    test_bindings_culled()
+    print("ok test_bindings_culled")
     asyncio.run(_smoke())
     print("ok test_tui_smoke")
     test_parse_mr_plan()
