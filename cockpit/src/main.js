@@ -688,6 +688,95 @@ function openSearch(){
   ov.onclick=(e)=>{ if(e.target===ov) ov.remove(); };
   refresh(); inp.focus();
 }
+// ---- command palette (Cmd+P) + rebindable keymap ----
+// Commands are the single source of truth for what's runnable; the keymap (default + user overrides
+// in localStorage) maps a chord → command. The palette lists them and lets you rebind each.
+const COMMANDS=[
+  {id:"new-chat", key:"mod+t", label:"Новый чат", hint:"в текущей задаче", when:()=>!!findTask(),
+    run:()=>{ const t=findTask(); if(t) openChatTab(t, engine); else openNewTask(SEL?SEL.p:undefined); }},
+  {id:"new-task", label:"Новая задача…", run:()=>openNewTask(SEL?SEL.p:undefined)},
+  {id:"search", key:"mod+shift+f", label:"Поиск задач…", run:()=>openSearch()},
+  {id:"palette", key:"mod+p", label:"Палитра команд…", run:()=>openCommandPalette()},
+  {id:"home", label:"На обзор (домой)", run:()=>goHome()},
+  {id:"diff", label:"Открыть diff", when:()=>!!findTask(), run:()=>{ const t=findTask(); if(t) openDiffTab(t); }},
+  {id:"memory", label:"Память задачи…", when:()=>!!findTask(), run:()=>{ const t=findTask(); if(t) openMemory(t); }},
+  {id:"collapse", label:"Свернуть всё дерево", run:()=>{ allKeys().forEach(k=>collapsed.add(k)); renderTree(); }},
+  {id:"expand", label:"Развернуть всё дерево", run:()=>{ collapsed.clear(); renderTree(); }},
+  {id:"refresh", label:"Обновить", run:()=>load()},
+];
+let USERKEYS={}; try{ USERKEYS=JSON.parse(localStorage.getItem("cc_keymap")||"{}"); }catch(_){ USERKEYS={}; }
+function keyFor(id){ const c=COMMANDS.find(x=>x.id===id); return USERKEYS[id]!==undefined ? USERKEYS[id] : (c?c.key:undefined); }
+function setKey(id, chord){
+  for(const c of COMMANDS){ if(c.id!==id && keyFor(c.id)===chord) USERKEYS[c.id]=""; }   // a chord binds one command
+  USERKEYS[id]=chord; localStorage.setItem("cc_keymap", JSON.stringify(USERKEYS));
+}
+function chordOf(e){   // only mod-key combos are app shortcuts (so plain typing never triggers a command)
+  if(!(e.metaKey||e.ctrlKey)) return null;
+  const k=(e.key||"").toLowerCase();
+  if(k==="meta"||k==="control"||k==="shift"||k==="alt") return null;
+  let c="mod"; if(e.altKey) c+="+alt"; if(e.shiftKey) c+="+shift"; return c+"+"+k;
+}
+function prettyChord(ch){ return !ch ? "—" : ch.split("+").map(p=> p==="mod"?"⌘":p==="shift"?"⇧":p==="alt"?"⌥":p.toUpperCase()).join(""); }
+let capturing=false;
+function globalKeydown(e){
+  if(capturing) return;
+  const chord=chordOf(e);
+  const pal=$("cmdpal");
+  if(pal){ if(chord && chord===keyFor("palette")){ e.preventDefault(); pal.remove(); } return; }  // Cmd+P toggles palette
+  if(document.querySelector(".overlay")) return;   // another modal/search owns the keys while open
+  if(!chord) return;
+  for(const c of COMMANDS){ const k=keyFor(c.id); if(k && k===chord){ e.preventDefault(); c.run(); return; } }
+}
+function startCapture(cmd, chip, rerender){
+  if(capturing) return;
+  capturing=true; chip.textContent="нажми…"; chip.classList.add("capturing");
+  const onKey=(ev)=>{
+    ev.preventDefault(); ev.stopPropagation();
+    if(ev.key==="Escape"){ done(); return; }
+    const chord=chordOf(ev); if(!chord) return;   // wait for a real chord (ignore lone modifiers)
+    setKey(cmd.id, chord); done();
+  };
+  const done=()=>{ capturing=false; chip.classList.remove("capturing"); document.removeEventListener("keydown",onKey,true); rerender&&rerender(); };
+  document.addEventListener("keydown", onKey, true);   // capture phase → beats the global dispatcher
+}
+function openCommandPalette(){
+  const ex=$("cmdpal"); if(ex){ ex.remove(); return; }   // toggle
+  const ov=el("div","overlay pal-ov"); ov.id="cmdpal";
+  const box=el("div","palette-box");
+  const inp=el("input","pal-input"); inp.placeholder="Команда…   (клик по чипу справа — переназначить)";
+  const list=el("div","pal-list");
+  box.append(inp, list); ov.append(box); document.body.append(ov);
+  const labelOf=c=> typeof c.label==="function"?c.label():c.label;
+  let items=[], sel=0;
+  const mark=()=>{ [...list.children].forEach((c,i)=>c.classList&&c.classList.toggle("sel", i===sel)); const cur=list.children[sel]; if(cur&&cur.scrollIntoView) cur.scrollIntoView({block:"nearest"}); };
+  const render=()=>{
+    list.innerHTML="";
+    items.forEach((c,i)=>{
+      const row=el("div","pal-row cmd"+(i===sel?" sel":""));
+      row.append(el("span","cmd-label", labelOf(c)));
+      if(c.hint) row.append(el("span","cmd-hint", c.hint));
+      const chip=el("span","pal-key", prettyChord(keyFor(c.id))); chip.title="переназначить (Esc — отмена)";
+      chip.onclick=(ev)=>{ ev.stopPropagation(); startCapture(c, chip, render); };
+      row.append(chip);
+      row.onclick=()=>runCmd(i); row.onmouseenter=()=>{ if(!capturing){ sel=i; mark(); } };
+      list.appendChild(row);
+    });
+    if(!items.length) list.append(el("div","pal-empty","нет команд"));
+  };
+  const refresh=()=>{ const q=inp.value.trim().toLowerCase();
+    items=COMMANDS.filter(c=> c.id!=="palette" && (!c.when||c.when())).filter(c=> !q || labelOf(c).toLowerCase().includes(q));
+    sel=0; render(); };
+  const runCmd=(i)=>{ const c=items[i]; if(!c) return; ov.remove(); c.run(); };
+  inp.oninput=refresh;
+  inp.onkeydown=(e)=>{ if(capturing) return;
+    if(e.key==="ArrowDown"){ e.preventDefault(); sel=Math.min(items.length-1, sel+1); mark(); }
+    else if(e.key==="ArrowUp"){ e.preventDefault(); sel=Math.max(0, sel-1); mark(); }
+    else if(e.key==="Enter"){ e.preventDefault(); runCmd(sel); }
+    else if(e.key==="Escape"){ e.preventDefault(); ov.remove(); }
+  };
+  ov.onclick=(e)=>{ if(e.target===ov) ov.remove(); };
+  refresh(); inp.focus();
+}
 // flatten every task across projects/groups, keeping its project + group for selectTask
 function allTasksFlat(){
   const out=[];
@@ -762,11 +851,5 @@ function setupResizers(){
 }
 window.addEventListener("DOMContentLoaded", ()=>{ setupCenter(); setupResizers(); $("refresh").onclick=load;
   const brand=document.querySelector(".brand"); if(brand){ brand.style.cursor="pointer"; brand.title="На обзор"; brand.onclick=goHome; }
-  document.addEventListener("keydown",(e)=>{
-    if((e.metaKey||e.ctrlKey) && (e.key==="t"||e.key==="T") && !e.shiftKey){   // Cmd/Ctrl+T → new task
-      e.preventDefault(); if(!$("enginemenu")&&!$("sessmenu")) openNewTask(SEL?SEL.p:undefined);
-    } else if((e.metaKey||e.ctrlKey) && (e.key==="p"||e.key==="P")){            // Cmd/Ctrl+P → search tasks
-      e.preventDefault(); openSearch();
-    }
-  });
+  document.addEventListener("keydown", globalKeydown);   // Cmd+T new chat · Cmd+Shift+F search · Cmd+P palette (rebindable)
   load(); setInterval(load, 5000); });
