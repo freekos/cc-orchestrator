@@ -28,6 +28,15 @@ fn open_external(target: String) -> Result<(), String> {
     std::process::Command::new("open").arg(&target).spawn().map(|_| ()).map_err(|e| e.to_string())
 }
 
+// Run an arbitrary cc engine command (action buttons: task mr/merge, epic ops/mr/merge).
+#[tauri::command]
+fn run_cc(args: Vec<String>) -> Result<String, String> {
+    let engine = std::env::var("CC_ENGINE").unwrap_or_else(|_| "cc".to_string());
+    let out = std::process::Command::new(&engine).args(&args).output().map_err(|e| e.to_string())?;
+    let s = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+    if out.status.success() { Ok(s) } else { Err(if s.trim().is_empty() { "(no output)".into() } else { s }) }
+}
+
 // --- embedded terminal (chat) via PTY: runs claude/codex in the task worktree ---
 #[tauri::command]
 fn pty_spawn(app: AppHandle, state: State<Ptys>, id: String, cwd: String, program: String) -> Result<(), String> {
@@ -83,7 +92,7 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .manage(Ptys::default())
-        .invoke_handler(tauri::generate_handler![get_state, open_external, pty_spawn, pty_write, pty_resize, pty_kill])
+        .invoke_handler(tauri::generate_handler![get_state, open_external, run_cc, pty_spawn, pty_write, pty_resize, pty_kill])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

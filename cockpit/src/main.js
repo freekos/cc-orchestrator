@@ -4,18 +4,22 @@ const GLYPH = { running:"🔵", review:"🟡", mr:"🟣", merged:"✅", idle:"�
 const COLOR = { running:"#60a5fa", review:"#fbbf24", mr:"#c084fc", merged:"#a78bfa", idle:"#6b7280", done:"#34d399", failed:"#f87171", needs_input:"#fbbf24" };
 let STATE = null, SEL = null;
 const collapsed = new Set();
-let chat = null;   // { id, term, fit, unlisten }
+let chat = null;
 
 const $ = (id) => document.getElementById(id);
 function el(t, cls, txt){ const e=document.createElement(t); if(cls)e.className=cls; if(txt!=null)e.textContent=txt; return e; }
 function setStatus(t, err){ const s=$("statusbar"); s.textContent=t; s.style.color=err?"#f87171":""; }
 function dot(st){ const d=el("span","dot"); d.style.background=COLOR[st]||"#6b7280"; d.title=st; return d; }
+function btn(label, fn, cls){ const b=el("button","btn"+(cls?" "+cls:""),label); b.onclick=fn; return b; }
 async function openExt(target){ try{ await invoke("open_external",{target}); }catch(e){ setStatus("не открыл: "+e,true); } }
+function curGroup(){ const p=STATE&&SEL&&STATE.projects[SEL.p]; return p? p.groups.find(g=>g.key===SEL.g) : null; }
+function findTask(){ const g=curGroup(); return g? g.tasks.find(t=>t.tid===SEL.tid) : null; }
 
 async function load(){
   try{
     STATE = JSON.parse(await invoke("get_state"));
     renderTree();
+    const t = findTask(); if (t) renderFacts(t);   // live facts; chat terminal untouched
     setStatus("обновлено " + new Date().toLocaleTimeString());
   }catch(e){ setStatus("ошибка движка: "+e, true); }
 }
@@ -43,7 +47,6 @@ function renderTree(){
     }
   }
 }
-function btn(label, fn, cls){ const b=el("button","btn"+(cls?" "+cls:""),label); b.onclick=fn; return b; }
 
 function openTask(t){
   renderFacts(t);
@@ -55,16 +58,49 @@ function openTask(t){
   ctr.append(el("span","k","движок:"), sel, btn("▶ Запустить чат", ()=>startChat(t, sel.value)), btn("■ Стоп", stopChat, "ghost"));
   c.appendChild(ctr);
   const term=el("div"); term.id="term"; c.appendChild(term);
-  if (chat) { stopChat(); }
+  if (chat) stopChat();
 }
+
+// ---- results modal + actions ----
+function modal(title){
+  const ov=el("div","overlay"); const box=el("div","modal");
+  const hd=el("div","mhead"); hd.append(el("span",null,title), btn("✕", ()=>ov.remove(), "ghost"));
+  const body=el("pre","mbody"); box.append(hd, body); ov.append(box); document.body.append(ov);
+  return { ov, body };
+}
+async function runAction(args, label, prod){
+  if (!confirm((prod?"⚠ ПРОД-bound — пойдёт в master!\n\n":"")+"Выполнить:\n"+label+" ?")) return;
+  const m = modal("⏳ "+label+" …");
+  try{ const out = await invoke("run_cc",{args}); m.body.textContent = (out||"(готово)").trim(); }
+  catch(e){ m.body.textContent = "✗ ОШИБКА:\n"+e; m.body.style.color="#f87171"; }
+  load();
+}
+
 function renderFacts(t){
-  const f=$("facts"); f.innerHTML=""; f.appendChild(el("div","sec","ЗАДАЧА"));
-  if (t.dir){ const a=el("div","row2"); a.append(btn("Открыть папку", ()=>openExt(t.dir), "ghost")); f.appendChild(a); }
+  const f=$("facts"); f.innerHTML="";
+  const g=curGroup(), loose = g && g.loose;
+  f.appendChild(el("div","sec","ЗАДАЧА"));
+  const trow=el("div","row2 acts");
+  trow.append(btn("Создать MR", ()=>runAction(["task","mr",t.tid], "task mr "+t.tid, !loose?false:true)),
+              btn("Влить", ()=>runAction(["task","merge",t.tid], "task merge "+t.tid, loose), "ghost"));
+  if (t.dir) trow.append(btn("Папка", ()=>openExt(t.dir), "ghost"));
+  f.appendChild(trow);
   f.appendChild(el("div","sec","репозитории → target"));
   for (const r of t.repos){ const row=el("div","row2"); row.append(el("span","k", r.repo+" → "+r.base)); if(r.mr){ const a=el("a","lnk"," MR ↗"); a.onclick=()=>openExt(r.mr); row.append(a); } f.appendChild(row); }
-  f.appendChild(el("div","sec","ФАКТЫ"));
   const mrs=t.repos.filter(r=>r.mr);
-  f.appendChild(el("div","row2","MR: "+mrs.length+"/"+t.repos.length+(t.merged?"   ✅ влито":"")));
+  f.appendChild(el("div","row2 dim","MR: "+mrs.length+"/"+t.repos.length+(t.merged?"   ✅ влито":"")));
+  // group ops
+  f.appendChild(el("div","sec","ГРУППА "+(SEL?SEL.g:"")));
+  const grow=el("div","row2 acts");
+  grow.append(btn("Test", ()=>runAction(["epic","ops",SEL.g,"--kind","test"], "ops test "+SEL.g, false), "ghost"),
+              btn("Stage", ()=>runAction(["epic","ops",SEL.g,"--kind","stage"], "ops stage "+SEL.g, false), "ghost"));
+  f.appendChild(grow);
+  if (!loose){
+    const grow2=el("div","row2 acts");
+    grow2.append(btn("Влить задачи", ()=>runAction(["epic","merge",SEL.g], "epic merge "+SEL.g, false), "ghost"),
+                 btn("Release: MR→master", ()=>runAction(["epic","mr",SEL.g], "epic mr "+SEL.g, true), "warn"));
+    f.appendChild(grow2);
+  }
 }
 
 async function stopChat(){
@@ -78,8 +114,7 @@ async function startChat(t, backend){
   if (!t.dir){ setStatus("у задачи нет worktree-папки", true); return; }
   await stopChat();
   const host=$("term"); host.innerHTML="";
-  const term=new window.Terminal({ fontSize:12.5, fontFamily:"Menlo, monospace", cursorBlink:true,
-    theme:{ background:"#0e0e10", foreground:"#e6e6ea", cursor:"#7c8cff" } });
+  const term=new window.Terminal({ fontSize:12.5, fontFamily:"Menlo, monospace", cursorBlink:true, theme:{ background:"#0e0e10", foreground:"#e6e6ea", cursor:"#7c8cff" } });
   const fit=new window.FitAddon.FitAddon(); term.loadAddon(fit);
   term.open(host); fit.fit();
   const id="chat-"+Date.now();
@@ -91,8 +126,7 @@ async function startChat(t, backend){
     await invoke("pty_resize",{ id, rows:term.rows, cols:term.cols });
     term.onData(d=>invoke("pty_write",{ id, data:Array.from(new TextEncoder().encode(d)) }));
     term.onResize(({cols,rows})=>invoke("pty_resize",{ id, rows, cols }));
-    term.focus();
-    setStatus(backend+" запущен в "+t.dir);
+    term.focus(); setStatus(backend+" запущен в "+t.dir);
   }catch(e){ setStatus("не запустил "+backend+": "+e, true); }
 }
 window.addEventListener("resize", ()=>{ if(chat){ chat.fit.fit(); } });

@@ -40,3 +40,10 @@ h2 { margin:0; font-size:17px; font-weight:650; }
 .btn.ghost { background:transparent; }
 #term { height:calc(100vh - 200px); min-height:220px; border:1px solid var(--border); border-radius:8px; padding:6px; background:#0e0e10; }
 #center { display:flex; flex-direction:column; }
+.row2.acts { gap:8px; flex-wrap:wrap; border-bottom:none; padding-top:4px; }
+.btn.warn { border-color:#7a5b16; color:#fbbf24; }
+.btn.warn:hover { background:#2a2410; border-color:#fbbf24; }
+.overlay { position:fixed; inset:0; background:rgba(0,0,0,.55); display:flex; align-items:center; justify-content:center; z-index:50; }
+.modal { width:78%; max-width:900px; height:70%; background:var(--panel); border:1px solid var(--border); border-radius:10px; display:flex; flex-direction:column; }
+.mhead { display:flex; justify-content:space-between; align-items:center; padding:10px 14px; border-bottom:1px solid var(--border); font-weight:600; }
+.mbody { flex:1; overflow:auto; margin:0; padding:12px 14px; font:12px/1.5 Menlo,monospace; white-space:pre-wrap; color:var(--text); }
