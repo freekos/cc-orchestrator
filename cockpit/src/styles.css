@@ -1,7 +1,11 @@
 :root { --bg:#0e0e10; --panel:#161618; --panel2:#1b1b1e; --border:#2a2a2f; --text:#e6e6ea; --dim:#8a8a92; --accent:#7c8cff; --sel:#23233a; }
 * { box-sizing:border-box; }
 html,body { margin:0; height:100%; background:var(--bg); color:var(--text); font:13px/1.55 -apple-system,system-ui,sans-serif; -webkit-font-smoothing:antialiased; }
-#app { display:grid; grid-template-columns:286px 1fr 320px; height:calc(100vh - 26px); }
+#app { display:grid; grid-template-columns:var(--sw,286px) 5px 1fr 5px var(--fw,320px); height:calc(100vh - 26px); }
+.resizer { cursor:col-resize; background:transparent; position:relative; user-select:none; z-index:5; }
+.resizer::after { content:""; position:absolute; inset:0 2px; background:var(--border); transition:background .12s; }
+.resizer:hover::after, .resizer.dragging::after { background:var(--accent); }
+body.col-resizing { cursor:col-resize; user-select:none; }
 #sidebar,#facts { background:var(--panel); overflow:auto; }
 #sidebar { border-right:1px solid var(--border); }
 #facts { border-left:1px solid var(--border); padding:0 0 20px; }
