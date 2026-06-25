@@ -284,6 +284,23 @@ function modal(title){
   const body=el("pre","mbody"); box.append(hd, body); ov.append(box); document.body.append(ov);
   return { ov, body };
 }
+async function openMemory(t){
+  const ov=el("div","overlay"); const box=el("div","modal");
+  const hd=el("div","mhead"); hd.append(el("span",null,"🧠 Память задачи · "+t.title), btn("✕",()=>ov.remove(),"ghost"));
+  const body=el("pre","mbody");
+  const foot=el("div","mem-foot");
+  const inp=el("input","mem-inp"); inp.placeholder="запись в лог / новое направление…";
+  const refresh=async()=>{ body.textContent="загрузка…"; try{ body.textContent=((await invoke("run_cc",{args:["task","memory",t.tid]}))||"").trim()||"(пусто)"; }catch(e){ body.textContent="✗ "+e; } };
+  const act=async(flag, confirmMsg)=>{ const v=inp.value.trim(); if(!v){ inp.focus(); return; } if(confirmMsg&&!confirm(confirmMsg)) return;
+    try{ await invoke("run_cc",{args:["task","memory",t.tid,flag,v]}); inp.value=""; await refresh(); load(); }catch(e){ body.textContent="✗ "+e; } };
+  inp.onkeydown=(e)=>{ if(e.key==="Enter") act("--log"); };
+  foot.append(inp,
+    btn("+ В лог", ()=>act("--log"), "ghost"),
+    btn("Задать «Текущее»", ()=>act("--current"), "ghost"),
+    btn("🔄 Сменить направление", ()=>act("--pivot","Записать разворот? Текущее уйдёт в лог как заброшенное, направление очистится."), "warn"));
+  box.append(hd, body, foot); ov.append(box); document.body.append(ov);
+  refresh();
+}
 async function runAction(args, label, prod){
   if (!confirm((prod?"⚠ ПРОД-bound — пойдёт в master!\n\n":"")+"Выполнить:\n"+label+" ?")) return;
   const m=modal("⏳ "+label+" …");
@@ -305,6 +322,12 @@ function renderFacts(t){
     if(t.combined) crow.append(btn("⊖ Вынуть из группы", ()=>runAction(["group","combine",SEL.g,"--remove",t.tid],"вынуть "+t.tid+" из combined "+SEL.g,false), "ghost"));
     else crow.append(btn("⊕ Влить в группу", ()=>runAction(["group","combine",SEL.g,"--add",t.tid],"влить "+t.tid+" в combined "+SEL.g,false)));
     f.appendChild(crow); }
+  // shared task memory — the knowledge every chat of this task should see
+  f.appendChild(el("div","sec","ПАМЯТЬ ЗАДАЧИ"));
+  const mrow=el("div","row2 acts");
+  mrow.append(btn(t.has_memory?"🧠 Открыть":"🧠 Завести", ()=>openMemory(t)));
+  f.appendChild(mrow);
+  if(!t.has_memory) f.appendChild(el("div","row2 dim","ещё не заведена — решения/направление/находки"));
   f.appendChild(el("div","sec","репозитории → target"));
   for(const r of t.repos){ const row=el("div","row2"); row.append(el("span","k", r.repo+" → "+r.base)); if(r.mr){ const a=el("a","lnk"," MR ↗"); a.onclick=()=>openExt(r.mr); row.append(a); } f.appendChild(row); }
   const mrs=t.repos.filter(r=>r.mr);

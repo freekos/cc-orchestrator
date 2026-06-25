@@ -1232,6 +1232,71 @@ def task_status(t):
                 return "review"
     return "idle"
 
+def task_memory_path(tid):
+    """Per-task shared memory — the knowledge ALL of a task's chats see (separate from any one
+    chat's private conversation). Lives in ~/.cc/memory so it survives worktree churn."""
+    return STATE_DIR / "memory" / (slugify(tid) + ".md")
+
+def _mem_template(tid):
+    return "# Память задачи %s\n\n## Текущее\n\n## Лог\n" % tid
+
+def read_task_memory(tid):
+    p = task_memory_path(tid)
+    try:
+        return p.read_text(encoding="utf-8") if p.exists() else _mem_template(tid)
+    except OSError:
+        return _mem_template(tid)
+
+def _parse_mem(text):
+    """Split the memory markdown into (current_text, [log_lines]). Tolerant of hand edits."""
+    cur, log, section = [], [], None
+    for line in text.splitlines():
+        st = line.strip()
+        if st == "## Текущее":
+            section = "cur"; continue
+        if st == "## Лог":
+            section = "log"; continue
+        if line.startswith("# "):
+            continue
+        if section == "cur":
+            cur.append(line)
+        elif section == "log" and st:
+            log.append(line.rstrip())
+    return "\n".join(cur).strip(), log
+
+def _write_mem(tid, cur, log):
+    p = task_memory_path(tid)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text("# Память задачи %s\n\n## Текущее\n%s\n\n## Лог\n%s\n"
+                 % (tid, cur, "\n".join(log)), encoding="utf-8")
+
+def cmd_task_memory(args):
+    """Read or update a task's shared memory. Captures DECISIONS WITH STATUS, not a flat dump:
+    `--log` appends a timestamped event (decision/finding) to the append-only Лог (crash-safe, kept
+    even for dead-ends); `--pivot` records a direction change — the old `Текущее` is filed into the Лог
+    as abandoned (so future chats aren't misled) and cleared; `--current` sets the curated current
+    direction. No flags = print the memory (the cockpit injects this into every chat of the task)."""
+    s = load_state()
+    tid = args.task
+    if tid not in s["tasks"]:
+        die("unknown task '%s'" % tid)
+    cur, log = _parse_mem(read_task_memory(tid))
+    ts = time.strftime("%Y-%m-%d %H:%M")
+    op = None
+    if args.pivot:
+        if cur.strip():
+            log.append("- [%s] ⤷ заброшено: %s" % (ts, cur.strip().replace("\n", " ")))
+        log.append("- [%s] 🔄 разворот: %s" % (ts, args.pivot))
+        cur = ""; op = "pivot"
+    if args.log:
+        log.append("- [%s] %s" % (ts, args.log)); op = op or "log"
+    if args.current is not None:
+        cur = args.current; op = op or "current"
+    if op:
+        _write_mem(tid, cur, log)
+        audit("task.memory", task=tid, op=op)
+    print(read_task_memory(tid))
+
 def cmd_task_diff(args):
     s = load_state()
     t = s["tasks"].get(args.task) or die("unknown task '%s'" % args.task)
@@ -3260,6 +3325,9 @@ def build_parser():
     a = tk.add_parser("setup"); a.add_argument("task"); a.set_defaults(fn=cmd_task_setup)  # regen CLAUDE.md (fresh rules)
     a = tk.add_parser("regroup"); a.add_argument("task"); a.add_argument("group"); a.set_defaults(fn=cmd_task_regroup)
     a = tk.add_parser("diff"); a.add_argument("task"); a.set_defaults(fn=cmd_task_diff)
+    a = tk.add_parser("memory"); a.add_argument("task")
+    a.add_argument("--log"); a.add_argument("--pivot"); a.add_argument("--current")
+    a.set_defaults(fn=cmd_task_memory)   # shared task memory: read / --log / --pivot / --current
     a = tk.add_parser("open"); a.add_argument("task"); a.set_defaults(fn=cmd_task_open)
     a = tk.add_parser("done"); a.add_argument("task"); a.add_argument("--force", action="store_true"); a.set_defaults(fn=cmd_task_done)
     a = tk.add_parser("mr"); a.add_argument("task"); a.add_argument("--dry-run", action="store_true")
@@ -3543,6 +3611,7 @@ def cmd_snapshot(args):
                     "branch": t.get("branch", ""), "merged": bool(t.get("merged")),
                     "combined": tid in combset,            # included in the group's combined branch
                     "activity": _task_activity(tid, t, act_map),   # last interaction (sort key)
+                    "has_memory": task_memory_path(tid).exists(),  # shared task memory written?
                     "needs_input": t.get("needs_input") or None,
                     "dir": t.get("dir") or "",
                     "repos": [{"repo": r, "base": (t.get("base") or {}).get(r, "?"),
@@ -3566,7 +3635,7 @@ _READONLY = {cmd_task_diff, cmd_task_ls, cmd_repo_ls, cmd_repo_members,
              cmd_jira_search, cmd_jira_get, cmd_jira_comment, cmd_jira_done,
              cmd_jira_attachments, cmd_jira_pull,
              cmd_jira_transitions, cmd_jira_move, cmd_jira_rollup, cmd_doctor, cmd_log,
-             cmd_task_setup, cmd_snapshot}  # no cc-state writes; network/file off the lock
+             cmd_task_setup, cmd_snapshot, cmd_task_memory}  # no cc-state writes; network/file off the lock
 
 _SELF_LOCKED = {cmd_epic_mrs, cmd_task_mrs, cmd_repo_add, cmd_project_new, cmd_recover,
                 cmd_task_merge, cmd_epic_merge}   # do git/network lock-free, then save under a brief mutate() themselves

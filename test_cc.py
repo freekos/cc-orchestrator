@@ -754,6 +754,35 @@ def test_running_ops_overlap():
     assert cc._running_ops_overlap(s, ["mobile"]) == []             # no shared repo -> no collision
 
 
+def test_task_memory():
+    # shared task memory: decisions WITH STATUS — pivot files the old current as abandoned + clears it,
+    # the append-only log keeps history (incl. dead-ends), so future chats aren't misled.
+    import tempfile, pathlib, types, io, contextlib, shutil
+    d = pathlib.Path(tempfile.mkdtemp(prefix="cc-memtest-"))
+    saved_dir, saved_audit, saved_load = cc.STATE_DIR, cc.AUDIT_FILE, cc.load_state
+    cc.STATE_DIR = d; cc.AUDIT_FILE = d / "audit.log"; cc.load_state = lambda: {"tasks": {"t1": {}}}
+    try:
+        def run(**kw):
+            b = io.StringIO()
+            with contextlib.redirect_stdout(b):
+                cc.cmd_task_memory(types.SimpleNamespace(task="t1", log=kw.get("log"), pivot=kw.get("pivot"), current=kw.get("current")))
+            return b.getvalue()
+        run(current="фильтр через query-параметр")
+        run(log="бэк уже отдаёт audience")
+        out = run(pivot="query не работает в webview → cookie")
+        cur, log = cc._parse_mem(out)
+        assert cur == "", "current cleared on pivot"
+        assert any("заброшено" in l and "query" in l for l in log), "old current filed as abandoned"
+        assert any("разворот" in l and "cookie" in l for l in log), "pivot reason logged"
+        assert any("audience" in l for l in log), "earlier log preserved"
+        cur2, _ = cc._parse_mem(run(current="cookie-based фильтр"))
+        assert cur2 == "cookie-based фильтр", "new current set after pivot"
+        assert cc.task_memory_path("t1").exists()
+    finally:
+        cc.STATE_DIR, cc.AUDIT_FILE, cc.load_state = saved_dir, saved_audit, saved_load
+        shutil.rmtree(d, ignore_errors=True)
+
+
 if __name__ == "__main__":
     n = 0
     for k, v in list(globals().items()):
