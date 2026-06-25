@@ -888,12 +888,19 @@ def combined_branch(gkey):
     """Local integration branch holding the group's currently-combined tasks."""
     return gkey + "-combined"
 
+def combined_worktree_path(project_path, gkey, repo_name):
+    """Dedicated worktree holding a repo's combined branch — separate from the user's main checkout
+    (so combine never switches the branch you're working on) and from the per-task worktrees. This is
+    what ops (test/stage) runs against when tasks are combined."""
+    return Path(project_path) / "cctui" / gkey / "__combined__" / repo_name
+
 def rebuild_combined(s, gkey):
-    """Rebuild the group's combined branch per repo DETERMINISTICALLY: fresh from origin/<default>,
-    then merge each currently-combined task's branch (git rerere on, so a resolved conflict replays).
-    The branch content is a pure function of (base, included set) — so add/remove a task = just change
-    the set and rebuild, NEVER revert-in-place (avoids the revert-merge trap). Returns
-    {repo: {branch, merged:[tids], conflict: tid|None, error?}}."""
+    """Rebuild the group's combined branch per repo DETERMINISTICALLY in a DEDICATED worktree: fresh
+    from origin/<default>, then merge each currently-combined task branch (git rerere on, so a resolved
+    conflict replays). Pure function of (base, included set) — add/remove = change the set + rebuild,
+    never revert-in-place (avoids the revert-merge trap). Runs in its own worktree, so the user's main
+    checkout is never switched. Returns
+    {repo: {branch, worktree, merged:[tids], conflict: tid|None, error?}}."""
     g = s["epics"][gkey]
     proj = s["projects"][g["project"]]
     included = [tid for tid in g.get("combined", []) if tid in s["tasks"]]
@@ -908,27 +915,55 @@ def rebuild_combined(s, gkey):
         ri = proj["repos"].get(r) or {}
         rp = ri.get("path")
         if not rp or not os.path.isdir(rp):
-            out[r] = {"branch": cb, "merged": [], "conflict": None, "error": "no repo path"}
+            out[r] = {"branch": cb, "worktree": None, "merged": [], "conflict": None, "error": "no repo path"}
             continue
         db = default_branch(rp)
         run(["git", "fetch", "origin", db], cwd=rp, check=False)
-        run(["git", "config", "rerere.enabled", "true"], cwd=rp, check=False)
         base = "origin/" + db if have_ref(rp, "origin/" + db) else db
-        run(["git", "checkout", "-B", cb, base], cwd=rp, check=False)
+        wt = combined_worktree_path(proj["path"], gkey, r)
+        # If an older combine (or aborted run) left cb checked out in the MAIN checkout, free it —
+        # otherwise the worktree can't hold cb, and we'd keep hijacking the user's working branch.
+        cur = run(["git", "symbolic-ref", "--quiet", "--short", "HEAD"], cwd=rp, check=False)
+        if (cur.stdout or "").strip() == cb:
+            run(["git", "checkout", db], cwd=rp, check=False)
+        run(["git", "worktree", "prune"], cwd=rp, check=False)
+        if not wt.exists():
+            wt.parent.mkdir(parents=True, exist_ok=True)
+            run(["git", "worktree", "add", "-B", cb, str(wt), base], cwd=rp, check=False)
+        # rebuild-from-base INSIDE the dedicated worktree (never touches rp's checkout)
+        run(["git", "checkout", "-B", cb, base], cwd=str(wt), check=False)
+        run(["git", "config", "rerere.enabled", "true"], cwd=str(wt), check=False)
         merged, conflict = [], None
         for tid in included:
             t = s["tasks"][tid]
             if r not in t.get("repos", []) or not have_ref(rp, t.get("branch", "")):
                 continue
-            m = run(["git", "merge", "--no-edit", t["branch"]], cwd=rp, check=False)
+            m = run(["git", "merge", "--no-edit", t["branch"]], cwd=str(wt), check=False)
             if m.returncode == 0:
                 merged.append(tid)
             else:
-                run(["git", "merge", "--abort"], cwd=rp, check=False)
+                run(["git", "merge", "--abort"], cwd=str(wt), check=False)
                 conflict = tid
                 break
-        out[r] = {"branch": cb, "merged": merged, "conflict": conflict}
+        out[r] = {"branch": cb, "worktree": str(wt), "merged": merged, "conflict": conflict}
     return out
+
+def _remove_combined_worktrees(s, gkey):
+    """Tear down the group's combined worktrees + local branch (nothing combined anymore, or the group
+    is finished). Best-effort; leaves the user's main checkout alone."""
+    g = s["epics"].get(gkey) or {}
+    proj = s["projects"].get(g.get("project")) or {}
+    cb = combined_branch(gkey)
+    for r, wt in (g.get("combined_worktrees") or {}).items():
+        ri = (proj.get("repos") or {}).get(r) or {}
+        rp = ri.get("path")
+        if not rp or not os.path.isdir(rp):
+            continue
+        if wt:
+            run(["git", "worktree", "remove", "--force", wt], cwd=rp, check=False)
+        run(["git", "worktree", "prune"], cwd=rp, check=False)
+        run(["git", "branch", "-D", cb], cwd=rp, check=False)
+    g.pop("combined_worktrees", None)
 
 def cmd_group_combine(args):
     """Combine tasks INTO a group: the group's combined branch = base + the included task branches
@@ -947,12 +982,17 @@ def cmd_group_combine(args):
     if args.remove:
         combined = [x for x in combined if x != args.remove]
     g["combined"] = combined
-    save_state(s)
-    audit("group.combine", epic=args.group, **{"included": ",".join(combined) or "(none)"})
     if not combined:
+        _remove_combined_worktrees(s, args.group)   # nothing left — tear down the combined worktrees
+        save_state(s)
+        audit("group.combine", epic=args.group, **{"included": "(none)"})
         print("группа %s: объединять нечего (combined пуст)" % args.group)
         return
     res = rebuild_combined(s, args.group)
+    # remember where each repo's combined branch is checked out — ops (test/stage) runs there
+    g["combined_worktrees"] = {r: info["worktree"] for r, info in res.items() if info.get("worktree")}
+    save_state(s)
+    audit("group.combine", epic=args.group, **{"included": ",".join(combined) or "(none)"})
     print("группа %s — combined-ветка '%s':" % (args.group, combined_branch(args.group)))
     for r, info in res.items():
         if info.get("error"):
@@ -961,7 +1001,8 @@ def cmd_group_combine(args):
             print("  [%s] ⚠️ КОНФЛИКТ на задаче %s (влито %d до неё) — разреши в её ветке и повтори"
                   % (r, info["conflict"], len(info["merged"])))
         else:
-            print("  [%s] ✓ влито %d: %s" % (r, len(info["merged"]), ", ".join(info["merged"]) or "—"))
+            print("  [%s] ✓ влито %d: %s  ->  %s"
+                  % (r, len(info["merged"]), ", ".join(info["merged"]) or "—", info["worktree"]))
 
 def cmd_task_regroup(args):
     """Move a task to another GROUP (epic) within the SAME project, recomputing its MR targets. The
@@ -2029,6 +2070,7 @@ def _epic_teardown(s, proj, key):
             "project": e.get("project"), "summary": e.get("summary", ""),
             "memory": e.get("memory", ""), "mode": e.get("mode"),
             "targets": e.get("targets", {}) or {}, "done_at": time.strftime("%Y-%m-%d")}
+    _remove_combined_worktrees(s, key)   # tear down the group's combined worktrees + branch
     tasks = [t for t, v in s["tasks"].items() if v.get("epic") == key]
     for tid in tasks:
         t = s["tasks"][tid]
@@ -2085,6 +2127,7 @@ def cmd_epic_archive(args):
     s = load_state()
     e = s["epics"].get(args.key) or die("unknown epic '%s'" % args.key)
     e["archived"] = True
+    _remove_combined_worktrees(s, args.key)   # archived → drop the (stale) combined worktrees
     save_state(s)
     print("epic %s archived (под 'Архив'; `cc epic unarchive %s` чтобы вернуть)" % (args.key, args.key))
     # push the whole epic to Done in Jira: the epic issue + all its children (best effort)
@@ -2227,16 +2270,35 @@ def _group_worktrees(s, ekey):
             out.append((r, wt, t.get("branch", "?")))
     return out
 
+def _ops_worktrees(s, ekey):
+    """Where ops (test/stage) should run. When tasks are COMBINED into the group, run against the
+    group's combined worktrees (you test/deploy exactly the integrated set, one branch per repo) —
+    that's the whole point of combining for test. Otherwise fall back to the per-task worktrees."""
+    g = s["epics"].get(ekey) or {}
+    included = [t for t in (g.get("combined") or []) if t in s["tasks"]]
+    cwts = g.get("combined_worktrees") or {}
+    if included and cwts:
+        cb = combined_branch(ekey)
+        combined = [(r, wt, cb) for r, wt in cwts.items() if wt and os.path.isdir(wt)]
+        if combined:
+            return combined
+    return _group_worktrees(s, ekey)
+
 def render_ops_runbook(s, ekey, kind):
     """The ops agent's CLAUDE.md — generic per-kind rules + the group's repo/worktree map. The agent
     studies the repos itself; cc never bakes in per-project commands."""
     label, body = OPS_KINDS[kind]
-    wts = _group_worktrees(s, ekey)
+    wts = _ops_worktrees(s, ekey)
+    g = s["epics"].get(ekey) or {}
+    on_combined = bool([t for t in (g.get("combined") or []) if t in s["tasks"]] and g.get("combined_worktrees"))
     repo_map = "\n".join("- %s  (branch %s)  ->  %s" % (r, br, wt) for r, wt, br in wts) or "(нет worktrees)"
+    scope_note = (
+        "These are the group's COMBINED worktrees — each repo holds ONE branch that integrates all\n"
+        "combined tasks. Test/деплой exactly this integrated set.\n\n" if on_combined else "")
     return (
         "# cc OPS agent — %s — group %s\n\n"
         "You are a cc OPS agent. cc gives you the scope + rules; YOU figure out the project specifics.\n\n"
-        "## Group repos & worktrees (the work lives here — touch ONLY these):\n%s\n\n"
+        "## Group repos & worktrees (the work lives here — touch ONLY these):\n%s\n%s"
         "## Your job\n%s\n\n"
         "## Rules\n"
         "- Do NOT run git — cc owns branches/commits/MRs. Edit only inside the worktrees above.\n"
@@ -2247,7 +2309,7 @@ def render_ops_runbook(s, ekey, kind):
         "  `[cc-needs-input] <one-line question + your recommended default>`  (nothing after it).\n"
         "  The user sees ❓ on the board and answers when they open this chat.\n"
         "- REPORT each step you take and its result, clearly, as you go.\n"
-    ) % (label, ekey, repo_map, body)
+    ) % (label, ekey, repo_map, scope_note, body)
 
 def ops_id(ekey, kind):
     return "ops_%s_%s" % (kind, slugify(ekey))
@@ -2268,7 +2330,7 @@ def cmd_epic_ops(args):
     s = load_state()
     e = s["epics"].get(args.key) or die("unknown epic '%s'" % args.key)
     proj = s["projects"][e["project"]]
-    wts = _group_worktrees(s, args.key)
+    wts = _ops_worktrees(s, args.key)   # combined worktrees when tasks are combined, else task worktrees
     if not wts:
         die("в группе %s нет worktrees (создай/проведи задачи сначала)" % args.key)
     opsdir = Path(proj["path"]) / "cctui" / args.key / ("_ops-" + kind)

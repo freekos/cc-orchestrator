@@ -130,14 +130,29 @@ def test_group_combine_rebuild_from_base():
 
         cc.cmd_group_combine(types.SimpleNamespace(group="G", add="t1", remove=None))
         cc.cmd_group_combine(types.SimpleNamespace(group="G", add="t2", remove=None))
-        assert (web / "a.txt").exists() and (web / "b.txt").exists(), "both tasks combined"
-        assert "G-combined" in subprocess.run(["git", "branch", "--show-current"], cwd=web, capture_output=True, text=True).stdout
+        # combined work lives in a DEDICATED worktree, not the main checkout
+        cwt = pathlib.Path(cc.combined_worktree_path(str(d), "G", "web"))
+        assert (cwt / "a.txt").exists() and (cwt / "b.txt").exists(), "both tasks combined (combined worktree)"
+        assert subprocess.run(["git", "branch", "--show-current"], cwd=cwt, capture_output=True, text=True).stdout.strip() == "G-combined"
+        # side-effect fix: the user's MAIN checkout is NOT switched to the combined branch
+        assert subprocess.run(["git", "branch", "--show-current"], cwd=web, capture_output=True, text=True).stdout.strip() == "main", "main checkout must stay put"
+        assert not (web / "a.txt").exists(), "combine must not pollute the main checkout"
+        # state records where ops will run
+        st = json.loads(cc.STATE_FILE.read_text())
+        assert st["epics"]["G"]["combined_worktrees"]["web"] == str(cwt)
+        # ops (test/stage) must target the COMBINED worktree, not the per-task ones
+        assert cc._ops_worktrees(st, "G") == [("web", str(cwt), "G-combined")], "ops runs on combined"
 
         # remove t1 -> rebuild -> a.txt gone, b.txt stays (clean removal, the proof)
         cc.cmd_group_combine(types.SimpleNamespace(group="G", add=None, remove="t1"))
-        assert not (web / "a.txt").exists(), "removed task's changes must vanish (rebuild-from-base)"
-        assert (web / "b.txt").exists(), "other task's changes must remain"
+        assert not (cwt / "a.txt").exists(), "removed task's changes must vanish (rebuild-from-base)"
+        assert (cwt / "b.txt").exists(), "other task's changes must remain"
         assert json.loads(cc.STATE_FILE.read_text())["epics"]["G"]["combined"] == ["t2"]
+
+        # remove the last task -> combined worktree torn down, branch gone
+        cc.cmd_group_combine(types.SimpleNamespace(group="G", add=None, remove="t2"))
+        assert not cwt.exists(), "empty combined set must tear down the worktree"
+        assert "combined_worktrees" not in json.loads(cc.STATE_FILE.read_text())["epics"]["G"]
     finally:
         cc.STATE_FILE, cc._BACKUP_DIR = saved
         shutil.rmtree(d, ignore_errors=True)
