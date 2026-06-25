@@ -656,6 +656,29 @@ def test_create_mr():
         cc.run = saved
 
 
+def test_snapshot():
+    # the GUI data contract: projects -> groups -> tasks/ops with status + per-repo MR facts.
+    import json, io, contextlib
+    s = {"projects": {"P": {"kind": "single", "repos": {"web": {}}}},
+         "epics": {"E1": {"project": "P", "summary": "e1"}, "P__loose": {"project": "P", "loose": True}},
+         "tasks": {"t1": {"epic": "E1", "title": "T1", "status": "mr", "branch": "b",
+                          "repos": ["web"], "base": {"web": "main"}, "mrs": {"web": "u"}}}}
+    saved = cc.load_state
+    cc.load_state = lambda: s
+    try:
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            cc.cmd_snapshot(types.SimpleNamespace(json=True))
+        d = json.loads(buf.getvalue())
+        groups = d["projects"]["P"]["groups"]
+        e1 = [x for x in groups if x["key"] == "E1"][0]
+        assert e1["tasks"][0]["status"] == "mr" and e1["tasks"][0]["repos"][0]["mr"] == "u"
+        assert not any(x["key"] == "P__loose" for x in groups)   # empty loose group hidden
+        assert d["projects"]["P"]["repos"] == ["web"]
+    finally:
+        cc.load_state = saved
+
+
 if __name__ == "__main__":
     n = 0
     for k, v in list(globals().items()):

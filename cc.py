@@ -2946,6 +2946,7 @@ def build_parser():
     sub.add_parser("orphans").set_defaults(fn=cmd_orphans)
     sub.add_parser("recover").set_defaults(fn=cmd_recover)
     a = sub.add_parser("doctor"); a.add_argument("--restore", action="store_true"); a.set_defaults(fn=cmd_doctor)
+    a = sub.add_parser("snapshot"); a.add_argument("--json", action="store_true"); a.set_defaults(fn=cmd_snapshot)
     a = sub.add_parser("log"); a.add_argument("--task"); a.add_argument("--epic"); a.add_argument("--action")
     a.add_argument("--today", action="store_true"); a.add_argument("-n", type=int, default=200)
     a.set_defaults(fn=cmd_log)
@@ -3196,12 +3197,68 @@ def cmd_log(args):
                 extra.append("%s=%s" % (k, v))
         print("%s  %-15s %-20s %s" % (ts, r.get("action", "?"), who, "  ".join(extra)))
 
+def _snap_task_status(t):
+    if t.get("pid") and pid_alive(t["pid"]):
+        return "running"
+    if t.get("merged"):
+        return "merged"
+    st = t.get("status")
+    if st in ("review", "mr", "merged", "idle"):
+        return st
+    return "mr" if t.get("mrs") else (st or "review")
+
+def _snap_ops_status(o):
+    if o.get("pid") and pid_alive(o["pid"]):
+        return "running"
+    if task_needs_input({"log": o.get("log")}):
+        return "needs_input"
+    if "exit" not in o:
+        return "done"
+    try:
+        rc = int(open(o["exit"]).read().strip())
+    except Exception:
+        rc = None
+    return "done" if rc == 0 else "failed"
+
+def cmd_snapshot(args):
+    """Full board as JSON for the GUI cockpit: projects -> groups (epics incl. loose) -> tasks/ops
+    with computed status + per-repo MR facts. Read-only — the cockpit polls this. The data CONTRACT
+    between the engine and the app."""
+    s = load_state()
+    out = {"projects": {}}
+    for pn, p in s["projects"].items():
+        keys = [k for k, e in s["epics"].items() if e.get("project") == pn and not e.get("archived")]
+        keys.sort(key=lambda k: (bool(s["epics"][k].get("loose")), k))   # real groups first, loose last
+        groups = []
+        for k in keys:
+            e = s["epics"][k]
+            tasks = []
+            for tid, t in s["tasks"].items():
+                if t.get("epic") != k:
+                    continue
+                tasks.append({
+                    "tid": tid, "title": t.get("title", tid), "status": _snap_task_status(t),
+                    "branch": t.get("branch", ""), "merged": bool(t.get("merged")),
+                    "needs_input": t.get("needs_input") or None,
+                    "repos": [{"repo": r, "base": (t.get("base") or {}).get(r, "?"),
+                               "mr": (t.get("mrs") or {}).get(r)} for r in t.get("repos", [])],
+                })
+            ops = [{"oid": oid, "kind": o.get("kind", "?"), "status": _snap_ops_status(o)}
+                   for oid, o in (s.get("ops") or {}).items() if o.get("epic") == k]
+            if e.get("loose") and not tasks and not ops:
+                continue                                   # hide an empty loose container
+            groups.append({"key": k, "summary": e.get("summary", ""), "loose": bool(e.get("loose")),
+                           "tasks": tasks, "ops": ops})
+        out["projects"][pn] = {"kind": p.get("kind", "—"),
+                               "repos": list((p.get("repos") or {}).keys()), "groups": groups}
+    print(json.dumps(out, ensure_ascii=False, indent=2))
+
 _READONLY = {cmd_task_diff, cmd_task_ls, cmd_repo_ls, cmd_repo_members,
              cmd_epic_ls, cmd_epic_memory, cmd_project_ls, cmd_jira_epics, cmd_orphans, cmd_epic_plan,
              cmd_jira_search, cmd_jira_get, cmd_jira_comment, cmd_jira_done,
              cmd_jira_attachments, cmd_jira_pull,
              cmd_jira_transitions, cmd_jira_move, cmd_jira_rollup, cmd_doctor, cmd_log,
-             cmd_task_setup}  # no cc-state writes; network/file off the lock
+             cmd_task_setup, cmd_snapshot}  # no cc-state writes; network/file off the lock
 
 _SELF_LOCKED = {cmd_epic_mrs, cmd_task_mrs, cmd_repo_add, cmd_project_new, cmd_recover,
                 cmd_task_merge, cmd_epic_merge}   # do git/network lock-free, then save under a brief mutate() themselves
