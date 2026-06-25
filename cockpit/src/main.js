@@ -16,6 +16,9 @@ function groupAlert(g){
 let STATE = null, SEL = null;
 const collapsed = new Set();
 let tabs = [], active = -1, seq = 0;   // middle = multiple tabs (chats/diffs)
+let engine = localStorage.getItem("cc_engine") || "claude";   // which agent "+ Чат" launches
+const ENGINES = ["claude", "codex"];
+const ENGINE_GLYPH = { claude: "✦", codex: "❯" };
 
 const $ = (id) => document.getElementById(id);
 function el(t, cls, txt){ const e=document.createElement(t); if(cls)e.className=cls; if(txt!=null)e.textContent=txt; return e; }
@@ -202,20 +205,37 @@ function renderTree(){
 }
 
 // ---- middle: launcher + tabbar + tabbody (persistent so terminals survive) ----
+function engineToggle(){
+  const seg=el("div","seg");
+  ENGINES.forEach(e=>{
+    const o=el("button","seg-opt"+(e===engine?" on":""), e);
+    o.onclick=()=>{ engine=e; localStorage.setItem("cc_engine", e); renderLauncher(findTask()); };
+    seg.appendChild(o);
+  });
+  return seg;
+}
 function renderLauncher(t){
   const l=$("launcher"); l.innerHTML="";
   if(!t){ l.append(el("span","dim","Выбери задачу слева")); return; }
-  l.append(dot(t.status), el("b",null,t.title), el("span","dim","  "+t.branch+"  ·  "+t.status));
-  const sel=el("select","picker"); ["claude","codex"].forEach(b=>{ const o=el("option",null,b); o.value=b; sel.appendChild(o); });
-  l.append(el("span","gap"), el("span","k","движок:"), sel,
-           btn("+ Чат", ()=>openChatTab(t, sel.value)), btn("+ Diff", ()=>openDiffTab(t), "ghost"));
+  const head=el("div","lc-head");
+  head.append(statusMark(t.status), el("span","lc-title", t.title),
+              el("span","lc-meta", t.branch+" · "+(STATUS_LABEL[t.status]||t.status)));
+  const acts=el("div","lc-acts");
+  acts.append(engineToggle(),
+              btn("+ Чат", ()=>openChatTab(t, engine), "primary"),
+              btn("+ Diff", ()=>openDiffTab(t), "ghost"));
+  l.append(head, acts);
 }
 function renderTabbar(){
   const bar=$("tabbar"); bar.innerHTML="";
+  bar.style.display = tabs.length ? "flex" : "none";
   tabs.forEach((tb,i)=>{
-    const chip=el("div","tab"+(i===active?" active":"")); chip.append(el("span",null,(tb.type==="diff"?"⟚ ":"")+tb.title));
-    const x=el("span","x","✕"); x.onclick=(e)=>{ e.stopPropagation(); closeTab(i); }; chip.append(x);
-    chip.onclick=()=>showTab(i); bar.appendChild(chip);
+    const chip=el("div","tab"+(i===active?" active":""));
+    const ic=el("span","tab-ic", tb.type==="diff" ? "⟚" : (ENGINE_GLYPH[tb.engine]||"✦"));
+    if(tb.type!=="diff") ic.classList.add("e-"+tb.engine);
+    chip.append(ic, el("span","tab-title", tb.title));
+    const x=el("span","x","✕"); x.title="Закрыть"; x.onclick=(e)=>{ e.stopPropagation(); closeTab(i); }; chip.append(x);
+    chip.onclick=()=>showTab(i); chip.title=tb.title; bar.appendChild(chip);
   });
 }
 function showTab(i){
@@ -239,7 +259,7 @@ async function openChatTab(t, backend){
   const ptyId="chat-"+(++seq);
   const un=await listen("pty-output",(e)=>{ if(e.payload.id===ptyId) term.write(new Uint8Array(e.payload.data)); });
   const ux=await listen("pty-exit",(e)=>{ if(e.payload===ptyId) term.write("\r\n[сессия завершена]\r\n"); });
-  const tab={ type:"chat", title:backend+": "+t.title.slice(0,14), el:pane, term, fit, ptyId, unlisten:()=>{un();ux();} };
+  const tab={ type:"chat", engine:backend, title:t.title, el:pane, term, fit, ptyId, unlisten:()=>{un();ux();} };
   tabs.push(tab); showTab(tabs.length-1);
   try{
     await invoke("pty_spawn",{ id:ptyId, cwd:t.dir, program:backend });
@@ -251,7 +271,7 @@ async function openChatTab(t, backend){
 }
 async function openDiffTab(t){
   const pane=el("div","tab-pane"); const pre=el("pre","diffpre","загрузка diff…"); pane.append(pre); $("tabbody").append(pane);
-  const tab={ type:"diff", title:"diff: "+t.title.slice(0,14), el:pane };
+  const tab={ type:"diff", title:t.title, el:pane };
   tabs.push(tab); showTab(tabs.length-1);
   try{ pre.textContent = (await invoke("run_cc",{args:["task","diff",t.tid]}) || "(пусто)").trim() || "(нет изменений)"; }
   catch(e){ pre.textContent="✗ "+e; pre.style.color="#f87171"; }
