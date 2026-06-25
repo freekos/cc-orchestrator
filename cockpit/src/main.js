@@ -51,6 +51,22 @@ function folderIcon(open){
     : '<svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M3.5 7.5a1.5 1.5 0 0 1 1.5-1.5h3.1l1.8 1.8H19a1.5 1.5 0 0 1 1.5 1.5v8a1.5 1.5 0 0 1-1.5 1.5H5a1.5 1.5 0 0 1-1.5-1.5z"/></svg>';
   return s;
 }
+function taskRow(t, pn, gkey){
+  const row=el("div","task"+(SEL&&SEL.tid===t.tid?" sel":""));
+  const lbl=el("span","label", t.title); lbl.title=t.title;
+  row.append(statusMark(t.status), lbl);
+  row.onclick=()=>{ SEL={p:pn,g:gkey,tid:t.tid}; renderTree(); renderFacts(t); renderLauncher(t); };
+  return row;
+}
+function opsRow(o){
+  const row=el("div","ops"); const lbl=el("span","label","ops: "+o.kind); lbl.title="ops: "+o.kind;
+  row.append(statusMark(o.status), lbl); return row;
+}
+function projectAlert(p){   // loudest signal across all the project's groups (bubbled to the folder row)
+  if (p.groups.some(g=>groupAlert(g)==="needs_input")) return "needs_input";
+  if (p.groups.some(g=>groupAlert(g)==="failed")) return "failed";
+  return null;
+}
 function renderTree(){
   const tree=$("tree"); tree.innerHTML="";
   // quiet toolbar (collapse / expand all) — like Conductor's section-header icons
@@ -61,16 +77,37 @@ function renderTree(){
   tree.appendChild(tools);
   for (const [pn,p] of Object.entries(STATE.projects)){
     const pk="proj:"+pn, pc=collapsed.has(pk);
+    const loose=p.groups.find(g=>g.loose);
+    const realGroups=p.groups.filter(g=>!g.loose);
+    // task-based: standalone tasks aren't grouped — flat under the project, most-recently-touched first
+    const looseTasks=loose ? loose.tasks.slice().sort((a,b)=>(b.activity||0)-(a.activity||0)) : [];
     const taskCount=p.groups.reduce((n,g)=>n+g.tasks.length,0);
     const ph=el("div","proj");
-    ph.append(folderIcon(!pc), el("span","p-name", pn), el("span","cnt", String(taskCount)));
+    ph.append(folderIcon(!pc), el("span","p-name", pn));
+    const pa=projectAlert(p);
+    if (pa) { const a=el("span","g-alert mark m-"+pa, MARK[pa]); a.title=STATUS_LABEL[pa]; ph.append(a); }
+    ph.append(el("span","cnt", String(taskCount)));
     ph.onclick=()=>{ pc?collapsed.delete(pk):collapsed.add(pk); renderTree(); };
     tree.appendChild(ph);
     if (pc) continue;
-    for (const g of p.groups){
+    // standalone tasks at the top of the project (no "(без группы)" header)
+    if (looseTasks.length || (loose && loose.ops.length)){
+      const lk="loose:"+pn, all=shownAll.has(lk);
+      const items=el("div","items loose");
+      (all?looseTasks:looseTasks.slice(0,MORE_LIMIT)).forEach(t=>items.appendChild(taskRow(t,pn,loose.key)));
+      if (!all && looseTasks.length>MORE_LIMIT){
+        const more=el("div","more","ещё "+(looseTasks.length-MORE_LIMIT)+"…");
+        more.onclick=()=>{ shownAll.add(lk); renderTree(); };
+        items.appendChild(more);
+      }
+      (loose.ops||[]).forEach(o=>items.appendChild(opsRow(o)));
+      tree.appendChild(items);
+    }
+    // real groups below the standalone tasks
+    for (const g of realGroups){
       const gk="group:"+pn+"/"+g.key, gc=collapsed.has(gk);
       const gh=el("div","group"+(gc?" collapsed":""));
-      gh.append(el("span","caret"), el("span","g-name", g.loose?"(без группы)":(g.summary||g.key)));
+      gh.append(el("span","caret"), el("span","g-name", g.summary||g.key));
       const alert=groupAlert(g);
       if (alert) { const a=el("span","g-alert mark m-"+alert, MARK[alert]); a.title=STATUS_LABEL[alert]; gh.append(a); }
       gh.append(el("span","cnt", String(g.tasks.length+g.ops.length)));
@@ -78,25 +115,14 @@ function renderTree(){
       tree.appendChild(gh);
       if (gc) continue;
       const items=el("div","items");
-      const all=shownAll.has(gk), list=all?g.tasks:g.tasks.slice(0,MORE_LIMIT);
-      for (const t of list){
-        const row=el("div","task"+(SEL&&SEL.tid===t.tid?" sel":""));
-        const lbl=el("span","label", t.title); lbl.title=t.title;
-        row.append(statusMark(t.status), lbl);
-        row.onclick=()=>{ SEL={p:pn,g:g.key,tid:t.tid}; renderTree(); renderFacts(t); renderLauncher(t); };
-        items.appendChild(row);
-      }
+      const all=shownAll.has(gk);
+      (all?g.tasks:g.tasks.slice(0,MORE_LIMIT)).forEach(t=>items.appendChild(taskRow(t,pn,g.key)));
       if (!all && g.tasks.length>MORE_LIMIT){
         const more=el("div","more","ещё "+(g.tasks.length-MORE_LIMIT)+"…");
         more.onclick=()=>{ shownAll.add(gk); renderTree(); };
         items.appendChild(more);
       }
-      for (const o of g.ops){
-        const row=el("div","ops");
-        const lbl=el("span","label","ops: "+o.kind); lbl.title="ops: "+o.kind;
-        row.append(statusMark(o.status), lbl);
-        items.appendChild(row);
-      }
+      (g.ops||[]).forEach(o=>items.appendChild(opsRow(o)));
       tree.appendChild(items);
     }
   }

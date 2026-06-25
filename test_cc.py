@@ -683,6 +683,8 @@ def test_snapshot():
         # combine contract: per-task `combined` flag + per-group combined set + branch name
         assert t1["combined"] is True and t2["combined"] is False
         assert e1["combined"] == ["t1"] and e1["combined_branch"] == "E1-combined"
+        # activity contract: every task carries a sort key (last-interaction), int >= 0
+        assert isinstance(t1["activity"], int) and t1["activity"] >= 0
     finally:
         cc.load_state = saved
 
