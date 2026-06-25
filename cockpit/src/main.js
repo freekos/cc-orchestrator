@@ -384,12 +384,15 @@ async function openChatTab(t, eng){
   tabs.push(tab); tab.render(); showTab(tab);     // chat opens ready; the agent only runs when you send
 }
 async function openDiffTab(t){
+  const existing=taskTabs(t.tid).find(x=>x.type==="diff");   // one diff tab per task — focus + refresh, never duplicate
+  if(existing){ showTab(existing); existing.reload&&existing.reload(); return; }
   const id="diff-"+(++seq);
   const pane=el("div","tab-pane diff"); const pre=el("pre","diffpre","загрузка diff…"); pane.append(pre); $("tabbody").append(pane);
   const tab={ type:"diff", title:"diff", el:pane, id, taskId:t.tid, unlisten:null };
-  tabs.push(tab); showTab(tab);
-  try{ pre.textContent = (await invoke("run_cc",{args:["task","diff",t.tid]}) || "(пусто)").trim() || "(нет изменений)"; }
-  catch(e){ pre.textContent="✗ "+e; pre.style.color="#f87171"; }
+  tab.reload=async()=>{ pre.style.color=""; pre.textContent="загрузка diff…";
+    try{ pre.textContent = (await invoke("run_cc",{args:["task","diff",t.tid]}) || "(пусто)").trim() || "(нет изменений)"; }
+    catch(e){ pre.textContent="✗ "+e; pre.style.color="#f87171"; } };
+  tabs.push(tab); showTab(tab); tab.reload();
 }
 
 // ---- results modal + actions ----
