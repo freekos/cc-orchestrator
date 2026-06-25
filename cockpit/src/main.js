@@ -318,7 +318,7 @@ async function chatTurn(tab, prompt, display){
   try{
     const cmd=tab.session ? "chat_followup" : "chat_spawn";
     tab.sessionEngine=tab.engine;                 // remember which engine owns the running session
-    await invoke(cmd, { id:tab.id, cwd:tab.dir, engine:tab.engine, prompt, session: tab.session||"" });
+    await invoke(cmd, { id:tab.id, cwd:tab.dir, engine:tab.engine, prompt, session: tab.session||"", dirs: tab.dirs||[] });
   }catch(e){ a.text="✗ не запустил движок: "+e; a.busy=false; tab.busy=false; tab.render(); }
 }
 // a user message: on the FIRST turn inject the task memory; after an engine switch, hand over the transcript
@@ -335,7 +335,24 @@ async function sendChat(tab, text){
     if(dig) ctx+="Контекст прошлого разговора (был другой движок), продолжаем здесь:\n"+dig+"\n\n";
     tab.carry=false;
   }
+  if(!tab.toldMemory){   // teach the agent to self-record into the shared task memory (cockpit harvests the markers)
+    ctx+="[cc] У задачи есть общая память для всех её чатов и репозиториев. Когда примешь важное решение, найдёшь ключевой факт или сменишь направление — добавь В КОНЦЕ ответа ОТДЕЛЬНОЙ строкой одно из: `cc-memory log: <кратко>` (событие/находка), `cc-memory current: <кратко>` (текущее направление), `cc-memory pivot: <кратко>` (разворот). Помечай так ТОЛЬКО эти строки, не обычный текст.\n\n";
+    tab.toldMemory=true;
+  }
   await chatTurn(tab, ctx+text, text);
+}
+// the cockpit harvests `cc-memory <kind>: ...` lines the agent emits and writes them via cc (the agent's
+// shell can't reach the `cc` alias, so the WRITE happens here through the cockpit's working run_cc)
+async function harvestMemory(tab){
+  const a=tab.msgs[tab.msgs.length-1]; if(!a || a.role!=="assistant" || !a.text) return;
+  const re=/^\s*cc-memory\s+(log|current|pivot)\s*:\s*(.+)$/gim;
+  const hits=[]; let m;
+  while((m=re.exec(a.text))) hits.push([m[1].toLowerCase(), m[2].trim()]);
+  if(!hits.length) return;
+  a.text=a.text.replace(re,"").replace(/\n{3,}/g,"\n\n").trim();   // hide the markers from the rendered chat
+  tab.render();
+  for(const [kind,val] of hits){ try{ await invoke("run_cc",{args:["task","memory",tab.taskId,"--"+kind,val]}); }catch(_){} }
+  load();   // refresh facts (has_memory / memory contents)
 }
 // engine picker that lives in the composer (bottom), Cursor-style — opens upward
 function engineMenu(anchor, tab, sync){
@@ -405,10 +422,12 @@ async function openChatTab(t, eng, opts){
   const tab={ type:"chat",
               engine: resumed ? "claude" : (eng||engine),   // old cc TUI sessions are claude
               title: resumed ? ("↩ "+((opts.preview||"чат").split("\n")[0].slice(0,20))) : ("Чат "+num),
-              el:pane, id, taskId:t.tid, dir: opts.dir || t.dir,
+              el:pane, id, taskId:t.tid, dir: opts.dir || t.dir, taskDir: t.dir,
+              // resumed chat is pinned to its session's repo cwd → let it also reach the task's other repos
+              dirs: (resumed && t.dir && opts.dir && t.dir!==opts.dir) ? [t.dir] : [],
               msgs: resumed ? (opts.history||[]).map(m=>({role:m.role, text:m.text})) : [],
               session: opts.sid || null, sessionEngine: resumed ? "claude" : null,
-              busy:false, injectedMem: resumed, carry:false };
+              busy:false, injectedMem: resumed, toldMemory:false, carry:false };
   const syncEsel=()=>{ esel.innerHTML=""; esel.append(
       el("span","e-glyph e-"+tab.engine, ENGINE_GLYPH[tab.engine]||"✦"),
       el("span","es-name", tab.engine==="codex"?"Codex":"Claude"), el("span","caret-dn","⌄")); };
@@ -427,7 +446,7 @@ async function openChatTab(t, eng, opts){
   inp.onkeydown=(e)=>{ if(e.key==="Enter"&&!e.shiftKey){ e.preventDefault(); tab.send(); } };
   inp.oninput=()=>{ inp.style.height="auto"; inp.style.height=Math.min(160, inp.scrollHeight)+"px"; };
   const un=await listen("chat-event",(e)=>{ if(e.payload && e.payload.id===id) handleChatEvent(tab, e.payload.line); });
-  const ud=await listen("chat-done",(e)=>{ if(e.payload && e.payload.id===id){ const last=tab.msgs[tab.msgs.length-1]; if(last&&last.busy) last.busy=false; tab.busy=false; tab.render(); } });
+  const ud=await listen("chat-done",(e)=>{ if(e.payload && e.payload.id===id){ const last=tab.msgs[tab.msgs.length-1]; if(last&&last.busy) last.busy=false; tab.busy=false; tab.render(); harvestMemory(tab); } });
   tab.unlisten=()=>{un();ud();};
   tabs.push(tab); tab.render(); showTab(tab);     // chat opens ready; the agent only runs when you send
 }
