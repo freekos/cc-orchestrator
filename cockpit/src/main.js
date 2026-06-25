@@ -310,5 +310,28 @@ function setupCenter(){
   const body=el("div","tabbody"); body.id="tabbody"; c.append(body);
   renderLauncher(null);
 }
+// drag the dividers to resize the panes (like Cursor); widths persist across restarts
+function setupResizers(){
+  const app=$("app");
+  const num=(v,d)=> parseInt(getComputedStyle(app).getPropertyValue("--"+v)) || d;
+  app.style.setProperty("--sw", (+localStorage.getItem("cc_sw")||286)+"px");
+  app.style.setProperty("--fw", (+localStorage.getItem("cc_fw")||320)+"px");
+  const drag=(rz, v, sign, min, max, store, def)=>{
+    if(!rz) return;
+    rz.addEventListener("mousedown",(e)=>{
+      e.preventDefault();
+      const x0=e.clientX, w0=num(v,def);
+      rz.classList.add("dragging"); document.body.classList.add("col-resizing");
+      const move=(ev)=>{ const w=Math.max(min, Math.min(max, w0+sign*(ev.clientX-x0))); app.style.setProperty("--"+v, w+"px"); };
+      const up=()=>{ document.removeEventListener("mousemove",move); document.removeEventListener("mouseup",up);
+        rz.classList.remove("dragging"); document.body.classList.remove("col-resizing");
+        localStorage.setItem(store, num(v,def));
+        const tb=tabs[active]; if(tb&&tb.fit){ try{tb.fit.fit();}catch(_){} } };
+      document.addEventListener("mousemove",move); document.addEventListener("mouseup",up);
+    });
+  };
+  drag($("rz-left"),  "sw", +1, 180, 460, "cc_sw", 286);   // drag right → wider sidebar
+  drag($("rz-right"), "fw", -1, 220, 540, "cc_fw", 320);   // drag left  → wider facts pane
+}
 window.addEventListener("resize", ()=>{ const tb=tabs[active]; if(tb&&tb.fit){ try{tb.fit.fit();}catch(e){} } });
-window.addEventListener("DOMContentLoaded", ()=>{ setupCenter(); $("refresh").onclick=load; load(); setInterval(load, 5000); });
+window.addEventListener("DOMContentLoaded", ()=>{ setupCenter(); setupResizers(); $("refresh").onclick=load; load(); setInterval(load, 5000); });
