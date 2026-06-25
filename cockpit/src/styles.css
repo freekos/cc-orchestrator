@@ -35,3 +35,8 @@ h2 { margin:0; font-size:17px; font-weight:650; }
 .lnk { color:var(--accent); cursor:pointer; } .lnk:hover { text-decoration:underline; }
 .ni { background:#2a2410; border:1px solid #5a4a16; color:#fbbf24; padding:8px 12px; border-radius:7px; margin:8px 0; }
 #statusbar { height:26px; line-height:26px; padding:0 14px; background:var(--panel); border-top:1px solid var(--border); color:var(--dim); font-size:11px; }
+.chatbar { display:flex; align-items:center; gap:8px; margin:6px 0 10px; }
+.picker { background:var(--panel2); color:var(--text); border:1px solid var(--border); border-radius:6px; padding:5px 8px; font:inherit; }
+.btn.ghost { background:transparent; }
+#term { height:calc(100vh - 200px); min-height:220px; border:1px solid var(--border); border-radius:8px; padding:6px; background:#0e0e10; }
+#center { display:flex; flex-direction:column; }
