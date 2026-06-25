@@ -55,6 +55,7 @@ function taskRow(t, pn, gkey){
   const row=el("div","task"+(SEL&&SEL.tid===t.tid?" sel":""));
   const lbl=el("span","label", t.title);     // full title + context live in the hover-card now
   row.append(statusMark(t.status), lbl);
+  const w=shortTime(t.activity); if(w){ const sp=el("span","when", w); sp.title="трогали "+relTime(t.activity); row.append(sp); }
   row.onclick=()=>{ SEL={p:pn,g:gkey,tid:t.tid}; renderTree(); renderFacts(t); renderLauncher(t); };
   row.onmouseenter=()=>showTaskCard(t, row); row.onmouseleave=hideCard;
   return row;
@@ -79,6 +80,14 @@ function relTime(sec){
   if(d<86400) return Math.floor(d/3600)+" ч назад";
   if(d<2592000) return Math.floor(d/86400)+" дн назад";
   return Math.floor(d/2592000)+" мес назад";
+}
+function shortTime(sec){    // compact relative time for the right-edge column ("5м"/"3ч"/"2д"/"4мес")
+  if(!sec) return "";
+  const d=Math.max(0, Math.floor(Date.now()/1000)-sec);
+  if(d<3600) return Math.max(1,Math.floor(d/60))+"м";
+  if(d<86400) return Math.floor(d/3600)+"ч";
+  if(d<2592000) return Math.floor(d/86400)+"д";
+  return Math.floor(d/2592000)+"мес";
 }
 function cardRow(k,v){ const r=el("div","hc-row"); r.append(el("span","hc-k",k), el("span","hc-v",v)); return r; }
 function positionCard(anchor){
@@ -140,7 +149,8 @@ function renderTree(){
   for (const [pn,p] of Object.entries(STATE.projects)){
     const pk="proj:"+pn, pc=collapsed.has(pk);
     const loose=p.groups.find(g=>g.loose);
-    const realGroups=p.groups.filter(g=>!g.loose);
+    const groupAct=g=>Math.max(0, ...(g.tasks||[]).map(t=>t.activity||0));   // group recency = its newest task
+    const realGroups=p.groups.filter(g=>!g.loose).sort((a,b)=>groupAct(b)-groupAct(a));
     // task-based: standalone tasks aren't grouped — flat under the project, most-recently-touched first
     const looseTasks=loose ? loose.tasks.slice().sort((a,b)=>(b.activity||0)-(a.activity||0)) : [];
     const taskCount=p.groups.reduce((n,g)=>n+g.tasks.length,0);
