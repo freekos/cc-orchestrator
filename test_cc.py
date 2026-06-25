@@ -783,6 +783,63 @@ def test_task_memory():
         shutil.rmtree(d, ignore_errors=True)
 
 
+def test_task_sessions_history():
+    # recover old cc TUI chats: scan ALL the task's worktrees (primary often mislabels the repo),
+    # mark cc's service one-shots, sort newest-first; history strips cc's injected preamble and
+    # merges consecutive same-role blocks.
+    import tempfile, pathlib, types, io, contextlib, shutil, json as _json, os, re
+    d = pathlib.Path(tempfile.mkdtemp(prefix="cc-sestest-"))
+    saved_cp, saved_load = cc.CLAUDE_PROJECTS, cc.load_state
+    try:
+        wtA = d / "wt" / "repoA"; wtB = d / "wt" / "repoB"
+        wtA.mkdir(parents=True); wtB.mkdir(parents=True)
+        cc.CLAUDE_PROJECTS = d / "projects"
+        cc.load_state = lambda: {"tasks": {"t1": {
+            "worktrees": {"repoA": str(wtA), "repoB": str(wtB)}, "primary": "repoA",
+            "claude_session": {}}}}
+        def enc(p): return re.sub(r"[^A-Za-z0-9-]", "-", str(p))
+        def write(wt, sid, lines, mtime):
+            pd = cc.CLAUDE_PROJECTS / enc(wt); pd.mkdir(parents=True, exist_ok=True)
+            f = pd / (sid + ".jsonl"); f.write_text("\n".join(_json.dumps(l) for l in lines))
+            os.utime(f, (mtime, mtime))
+        # chat session in the NON-primary repo (proves we scan all worktrees); user text carries cc's
+        # injected worktree block which must be stripped; two consecutive assistant blocks must merge.
+        write(wtB, "aaaa1111-0000-0000-0000-000000000001", [
+            {"type": "user", "message": {"role": "user",
+             "content": "add user profile\n\n[cc] You may create/edit files across these repo worktrees (branch X):\n- repoA: /x\nDo NOT run git"}},
+            {"type": "assistant", "message": {"content": [{"type": "text", "text": "Окей, начинаю."}]}},
+            {"type": "assistant", "message": {"content": [{"type": "text", "text": "Готово."}]}},
+        ], mtime=2000)
+        # service one-shot (cc's MR summary) in primary repo, OLDER
+        write(wtA, "bbbb2222-0000-0000-0000-000000000002", [
+            {"type": "user", "message": {"role": "user",
+             "content": "Summarize THIS branch's diff into a Merge Request, following the repo's CLAUDE.md."}},
+            {"type": "assistant", "message": {"content": [{"type": "text", "text": "feat(x): ..."}]}},
+        ], mtime=1000)
+
+        def run(fn, **kw):
+            b = io.StringIO()
+            with contextlib.redirect_stdout(b):
+                fn(types.SimpleNamespace(**kw))
+            return b.getvalue()
+
+        items = _json.loads(run(cc.cmd_task_sessions, task="t1", json=True))
+        assert len(items) == 2, items
+        assert items[0]["sid"].startswith("aaaa1111"), "newest-first ordering"
+        byrepo = {it["repo"]: it for it in items}
+        assert byrepo["repoB"]["kind"] == "chat" and byrepo["repoA"]["kind"] == "service", byrepo
+        assert byrepo["repoB"]["preview"] == "add user profile", "cc preamble stripped from preview"
+        assert byrepo["repoB"]["turns"] == 2, "consecutive assistant blocks merged -> 2 turns"
+
+        msgs = _json.loads(run(cc.cmd_task_history, session="aaaa1111", json=True))
+        assert [m["role"] for m in msgs] == ["user", "assistant"], msgs
+        assert msgs[0]["text"] == "add user profile", "injected preamble stripped in history"
+        assert msgs[1]["text"] == "Окей, начинаю.\n\nГотово.", "assistant blocks merged"
+    finally:
+        cc.CLAUDE_PROJECTS, cc.load_state = saved_cp, saved_load
+        shutil.rmtree(d, ignore_errors=True)
+
+
 if __name__ == "__main__":
     n = 0
     for k, v in list(globals().items()):
