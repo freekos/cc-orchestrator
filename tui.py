@@ -16,7 +16,8 @@ import threading
 ENGINE = str(Path(__file__).parent / "cc.py")
 GLYPH = {"running": "🔵", "review": "🟡", "mr": "🟣", "merged": "✅", "idle": "⚪", "done": "✅"}
 LEGEND = ("🟡 ждёт тебя   🔵 агент работает   🟣 MR открыт   ✅ влито   ⚪ простаивает   "
-          "💬 новый ответ   ❓ ждёт твоего ответа   ·   # эпик   ⚠️ потеряшки (U — вернуть)   ·   L — таймлайн   G — в группу   P — панель")
+          "💬 новый ответ   ❓ ждёт твоего ответа   ·   # группа   ⚠️ потеряшки (U)   ·   "
+          "o чат · n задача · P панель · G в группу · L таймлайн")
 
 _AUDIT_VERB = {"task.add": "создана", "task.merge": "влита", "epic.mr": "MR эпик→master",
                "jira.transition": "Jira", "repo.set": "repo set", "state.restore": "восстановлен стейт",
@@ -1242,24 +1243,18 @@ class CCApp(App):
         Binding("a", "add_project", "+Project"),
         Binding("R", "reviewers", "Reviewers"),
         Binding("D", "deploys", "Deploys"),
-        Binding("T", "targets", "Targets"),
         Binding("j", "project_jira", "Jira/settings"),
-        Binding("e", "new_epic", "+Epic"),
+        Binding("e", "new_epic", "+Группа"),
         Binding("n", "new_task", "+Task"),
-        Binding("o", "open", "Chat/Setup"),
-        Binding("O", "epic_chat", "Epic chat"),
-        Binding("v", "view_chat", "View"),
+        Binding("o", "open", "Chat"),
         Binding("c", "cursor", "Cursor"),
-        Binding("d", "diff", "Diff"),
-        Binding("m", "mr", "MR dry"),
         Binding("M", "mr_real", "MR!"),
-        Binding("g", "mrs", "MR links"),
-        Binding("x", "cleanup", "Cleanup/Epic"),
+        Binding("x", "cleanup", "Убрать/manage"),
         Binding("r", "refresh", "Refresh"),
         Binding("U", "recover", "Recover lost"),
         Binding("L", "timeline", "Timeline"),
-        Binding("G", "regroup", "→Group"),
-        Binding("P", "panel", "Panel"),
+        Binding("G", "regroup", "→Группа"),
+        Binding("P", "panel", "Панель"),
         Binding("q", "quit", "Quit"),
     ]
 
@@ -1680,7 +1675,7 @@ class CCApp(App):
                 L += ["  " + ln for ln in tail] if tail else ["  [dim](пусто)[/dim]"]
             except Exception:
                 L += ["  [dim](лога ещё нет)[/dim]"]
-            L += ["", "[dim]o — открыть/ответить   v — весь лог[/dim]"]
+            L += ["", "[dim]o — открыть/ответить агенту[/dim]"]
             d.update("\n".join(L))
             return
         if data["type"] == "task" and data["id"] in s["tasks"]:
@@ -1719,7 +1714,7 @@ class CCApp(App):
                 for ar in recent:
                     ts = time.strftime("%H:%M %d.%m", time.localtime(ar.get("ts", 0)))
                     L.append("  [dim]%s[/dim] %s" % (ts, _audit_brief(ar)))
-            L += ["", "[dim]o=chat v=view c=cursor d=diff m=dry M=create g=links x=cleanup  L=timeline[/dim]"]
+            L += ["", "[dim]o=чат  c=Cursor  M=создать MR  x=убрать  G=в группу  L=таймлайн  P=панель[/dim]"]
             d.update("\n".join(L))
         elif data["type"] == "epic":
             e = s["epics"][data["id"]]
@@ -1754,7 +1749,7 @@ class CCApp(App):
             if not shown:
                 hint = "[dim]…(g — найти MR в master)[/dim]" if data["id"] not in self._epic_synced else "[dim]- MR в master пока нет[/dim]"
                 L += ["  " + hint]
-            L += ["", "[dim]n=задача  M=MR эпик->master  m=dry  g=обновить MR-ссылки[/dim]"]
+            L += ["", "[dim]o=чат группы  n=задача  P=панель (MR/Test/Stage/Release)  M=MR группа→master[/dim]"]
             d.update("\n".join(L))
         elif data["type"] == "project":
             p = s["projects"][data["id"]]
@@ -2176,11 +2171,13 @@ class CCApp(App):
         data = self.current()
         if data and data.get("type") == "ops":
             self._open_ops(data["id"]); return
+        if data and data.get("type") == "epic":
+            self.action_epic_chat(); return          # `o` on a group opens its chat (folded from `O`)
         if data and data.get("type") == "project":
             self.action_project_setup(); return
         tid = self._cur_task()
         if not tid:
-            self.notify("встань на задачу (o=чат), эпик (O), или проект (o=настройка под ИИ)")
+            self.notify("встань на задачу, группу или проект — o откроет чат")
             return
         t = self.state()["tasks"][tid]
         cwd = t.get("dir") or t["worktrees"][t["primary"]]
