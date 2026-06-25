@@ -1410,6 +1410,51 @@ def cmd_task_history(args):
     for m in msgs:
         print("### %s\n%s\n" % ("Я" if m["role"] == "user" else "Агент", m["text"]))
 
+def _read_jsonl_context(path):
+    """Extract what a chat session used: skills invoked, files pulled into context (Read/Edit/Write),
+    and a tool-use histogram — Claude-Cowork-style. All from the transcript's tool_use events."""
+    skills, files, tools, seen = [], [], {}, set()
+    try:
+        with open(path) as fh:
+            for ln in fh:
+                try:
+                    o = json.loads(ln)
+                except Exception:
+                    continue
+                if o.get("type") != "assistant":
+                    continue
+                for b in (o.get("message", {}).get("content") or []):
+                    if not (isinstance(b, dict) and b.get("type") == "tool_use"):
+                        continue
+                    nm = b.get("name", "") or ""
+                    tools[nm] = tools.get(nm, 0) + 1
+                    inp = b.get("input") or {}
+                    if nm == "Skill":
+                        sk = inp.get("command") or inp.get("skill") or inp.get("name")
+                        if sk and sk not in skills:
+                            skills.append(sk)
+                    fp = inp.get("file_path") or inp.get("notebook_path")
+                    if nm in ("Read", "Edit", "Write", "NotebookEdit") and fp and fp not in seen:
+                        seen.add(fp); files.append(fp)
+    except OSError:
+        pass
+    return {"skills": skills, "files": files, "tools": tools}
+
+def cmd_task_context(args):
+    """What a chat session used (skills / context files / tools) — for the cockpit's 'в этом чате'.
+    sid accepts a prefix. --json for the UI; empty {} if the session isn't found (live chat not yet flushed)."""
+    hit = next(iter(CLAUDE_PROJECTS.glob("*/%s*.jsonl" % args.session)), None) if CLAUDE_PROJECTS.exists() else None
+    if not hit:
+        print("{}" if getattr(args, "json", False) else "(сессия не найдена)"); return
+    ctx = _read_jsonl_context(hit)
+    if getattr(args, "json", False):
+        print(json.dumps(ctx, ensure_ascii=False)); return
+    print("skills: " + (", ".join(ctx["skills"]) or "—"))
+    print("files (%d):" % len(ctx["files"]))
+    for f in ctx["files"][:25]:
+        print("  - " + f)
+    print("tools: " + ", ".join("%s×%d" % (k, v) for k, v in sorted(ctx["tools"].items(), key=lambda kv: -kv[1])))
+
 def cmd_task_open(args):
     s = load_state()
     t = s["tasks"].get(args.task) or die("unknown task '%s'" % args.task)
@@ -3437,6 +3482,8 @@ def build_parser():
     a.set_defaults(fn=cmd_task_sessions)   # recoverable old chat sessions for the task
     a = tk.add_parser("history"); a.add_argument("session"); a.add_argument("--json", action="store_true")
     a.set_defaults(fn=cmd_task_history)    # one session's transcript (for re-render + resume)
+    a = tk.add_parser("context"); a.add_argument("session"); a.add_argument("--json", action="store_true")
+    a.set_defaults(fn=cmd_task_context)    # skills / context files / tools used in a chat session
     a = tk.add_parser("open"); a.add_argument("task"); a.set_defaults(fn=cmd_task_open)
     a = tk.add_parser("done"); a.add_argument("task"); a.add_argument("--force", action="store_true"); a.set_defaults(fn=cmd_task_done)
     a = tk.add_parser("mr"); a.add_argument("task"); a.add_argument("--dry-run", action="store_true")
@@ -3746,7 +3793,7 @@ _READONLY = {cmd_task_diff, cmd_task_ls, cmd_repo_ls, cmd_repo_members,
              cmd_jira_attachments, cmd_jira_pull,
              cmd_jira_transitions, cmd_jira_move, cmd_jira_rollup, cmd_doctor, cmd_log,
              cmd_task_setup, cmd_snapshot, cmd_task_memory,
-             cmd_task_sessions, cmd_task_history}  # no cc-state writes; network/file off the lock
+             cmd_task_sessions, cmd_task_history, cmd_task_context}  # no cc-state writes; network/file off the lock
 
 _SELF_LOCKED = {cmd_epic_mrs, cmd_task_mrs, cmd_repo_add, cmd_project_new, cmd_recover,
                 cmd_task_merge, cmd_epic_merge}   # do git/network lock-free, then save under a brief mutate() themselves
