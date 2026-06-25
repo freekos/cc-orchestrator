@@ -15,7 +15,7 @@ function groupAlert(g){
 }
 let STATE = null, SEL = null;
 const collapsed = new Set();
-let tabs = [], active = -1, seq = 0;   // middle = multiple tabs (chats/diffs)
+let tabs = [], active = null, seq = 0;   // middle = per-task chat/diff tabs; `active` is the shown tab object
 let engine = localStorage.getItem("cc_engine") || "claude";   // which agent "+ Чат" launches
 const ENGINES = ["claude", "codex"];
 const ENGINE_GLYPH = { claude: "✦", codex: "❯" };
@@ -33,7 +33,7 @@ async function load(){
   try{
     STATE = JSON.parse(await invoke("get_state"));
     renderTree();
-    const t=findTask(); if(t){ renderFacts(t); renderLauncher(t); }
+    const t=findTask(); if(t) renderFacts(t);   // periodic refresh: facts/tree only — never disturb open chats
     setStatus("обновлено " + new Date().toLocaleTimeString());
   }catch(e){ setStatus("ошибка движка: "+e, true); }
 }
@@ -59,7 +59,7 @@ function taskRow(t, pn, gkey){
   const lbl=el("span","label", t.title);     // full title + context live in the hover-card now
   row.append(statusMark(t.status), lbl);
   const w=shortTime(t.activity); if(w){ const sp=el("span","when", w); sp.title="трогали "+relTime(t.activity); row.append(sp); }
-  row.onclick=()=>{ SEL={p:pn,g:gkey,tid:t.tid}; renderTree(); renderFacts(t); renderLauncher(t); };
+  row.onclick=()=>selectTask(t, pn, gkey);
   row.onmouseenter=()=>showTaskCard(t, row); row.onmouseleave=hideCard;
   return row;
 }
@@ -204,52 +204,58 @@ function renderTree(){
   }
 }
 
-// ---- middle: launcher + tabbar + tabbody (persistent so terminals survive) ----
-function engineToggle(){
-  const seg=el("div","seg");
-  ENGINES.forEach(e=>{
-    const o=el("button","seg-opt"+(e===engine?" on":""), e);
-    o.onclick=()=>{ engine=e; localStorage.setItem("cc_engine", e); renderLauncher(findTask()); };
-    seg.appendChild(o);
-  });
-  return seg;
+// ---- middle: browser-style chat tabs, per task. No launcher — a default chat opens on select. ----
+const lastTab = {};                 // tid -> last shown tab (restore the right chat when you return to a task)
+const opening = new Set();          // guard so the periodic refresh can't double-open the default chat
+function taskTabs(tid){ return tabs.filter(t=>t.taskId===tid); }
+function selectTask(t, pn, gkey){
+  SEL={p:pn,g:gkey,tid:t.tid};
+  renderTree(); renderFacts(t); showTaskChats(t);
 }
-function renderLauncher(t){
-  const l=$("launcher"); l.innerHTML="";
-  if(!t){ l.append(el("span","dim","Выбери задачу слева")); return; }
-  const head=el("div","lc-head");
-  head.append(statusMark(t.status), el("span","lc-title", t.title),
-              el("span","lc-meta", t.branch+" · "+(STATUS_LABEL[t.status]||t.status)));
-  const acts=el("div","lc-acts");
-  acts.append(engineToggle(),
-              btn("+ Чат", ()=>openChatTab(t, engine), "primary"),
-              btn("+ Diff", ()=>openDiffTab(t), "ghost"));
-  l.append(head, acts);
+function showTaskChats(t){          // bring this task's tabs to the front; open a default chat if it has none
+  if(!t){ renderTabbar(); return; }
+  const mine=taskTabs(t.tid);
+  if(!mine.length){ ensureChat(t); return; }
+  showTab((lastTab[t.tid] && mine.includes(lastTab[t.tid])) ? lastTab[t.tid] : mine[0]);
+}
+function ensureChat(t){
+  if(taskTabs(t.tid).length || opening.has(t.tid)) return;
+  opening.add(t.tid);
+  openChatTab(t, engine).finally(()=>opening.delete(t.tid));
 }
 function renderTabbar(){
   const bar=$("tabbar"); bar.innerHTML="";
-  bar.style.display = tabs.length ? "flex" : "none";
-  tabs.forEach((tb,i)=>{
-    const chip=el("div","tab"+(i===active?" active":""));
+  const t=findTask();
+  if(!t){ bar.style.display="none"; return; }
+  bar.style.display="flex";
+  for(const tb of taskTabs(t.tid)){
+    const chip=el("div","tab"+(tb===active?" active":""));
     const ic=el("span","tab-ic", tb.type==="diff" ? "⟚" : (ENGINE_GLYPH[tb.engine]||"✦"));
     if(tb.type!=="diff") ic.classList.add("e-"+tb.engine);
     chip.append(ic, el("span","tab-title", tb.title));
-    const x=el("span","x","✕"); x.title="Закрыть"; x.onclick=(e)=>{ e.stopPropagation(); closeTab(i); }; chip.append(x);
-    chip.onclick=()=>showTab(i); chip.title=tb.title; bar.appendChild(chip);
-  });
+    const x=el("span","x","✕"); x.title="Закрыть"; x.onclick=(e)=>{ e.stopPropagation(); closeTab(tb); }; chip.append(x);
+    chip.onclick=()=>showTab(tb); chip.title=tb.title; bar.appendChild(chip);
+  }
+  const add=el("div","tab tab-add","+"); add.title="Новый чат";   // browser-style "+" on the right
+  add.onclick=()=>{ const tt=findTask(); if(tt) openChatTab(tt, engine); };
+  bar.appendChild(add);
 }
-function showTab(i){
-  active=i;
-  tabs.forEach((tb,j)=>{ tb.el.style.display = j===i ? "block":"none"; });
+function showTab(tb){
+  if(!tb) return;
+  active=tb; lastTab[tb.taskId]=tb;
+  tabs.forEach(x=>{ x.el.style.display = x===tb ? (x.type==="chat"?"flex":"block") : "none"; });
   renderTabbar();
-  const tb=tabs[i]; if(tb && tb.type==="chat" && tb.fit){ try{tb.fit.fit(); tb.term.focus();}catch(e){} }
+  if(tb.focus) try{ tb.focus(); }catch(e){}
 }
-async function closeTab(i){
-  const tb=tabs[i]; if(!tb) return;
-  if(tb.type==="chat"){ try{await invoke("pty_kill",{id:tb.ptyId});}catch(e){} try{tb.unlisten&&tb.unlisten();}catch(e){} try{tb.term.dispose();}catch(e){} }
+function closeTab(tb){
+  const i=tabs.indexOf(tb); if(i<0) return;
+  try{ tb.unlisten&&tb.unlisten(); }catch(e){}
   tb.el.remove(); tabs.splice(i,1);
-  active = tabs.length? Math.min(i, tabs.length-1) : -1;
-  if(active>=0) showTab(active); else renderTabbar();
+  if(lastTab[tb.taskId]===tb) delete lastTab[tb.taskId];
+  if(active!==tb){ renderTabbar(); return; }
+  const mine=taskTabs(tb.taskId);
+  if(mine.length) showTab(mine[Math.min(i, mine.length-1)] || mine[0]);
+  else { active=null; renderTabbar(); }     // last chat closed: leave just the "+" (don't force-reopen)
 }
 // ---- minimal, CSP-safe markdown -> HTML (headings, code, lists, bold/italic, inline code) ----
 function esc(s){ return (s||"").replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;"); }
@@ -273,8 +279,8 @@ function mdRender(src){
 function handleChatEvent(tab, line){
   let ev; try{ ev=JSON.parse(line); }catch(_){ return; }
   const a=tab.msgs[tab.msgs.length-1];
-  if(ev.type==="system" && ev.subtype==="init" && ev.session_id){ tab.session=ev.session_id; return; }
-  if(ev.type==="thread.started" && ev.thread_id){ tab.session=ev.thread_id; return; }   // codex
+  if(ev.type==="system" && ev.subtype==="init" && ev.session_id){ tab.session=ev.session_id; tab.sessionEngine=tab.engine; return; }
+  if(ev.type==="thread.started" && ev.thread_id){ tab.session=ev.thread_id; tab.sessionEngine=tab.engine; return; }   // codex
   if(ev.type==="stream_event" && ev.event){
     const e2=ev.event;
     if(e2.type==="content_block_delta" && e2.delta && e2.delta.type==="text_delta"){ if(a&&a.role==="assistant"){ a.text+=e2.delta.text; tab.render(); } return; }
@@ -296,43 +302,92 @@ async function chatTurn(tab, prompt, display){
   const a=tab.msgs[tab.msgs.length-1];
   try{
     const cmd=tab.session ? "chat_followup" : "chat_spawn";
+    tab.sessionEngine=tab.engine;                 // remember which engine owns the running session
     await invoke(cmd, { id:tab.id, cwd:tab.dir, engine:tab.engine, prompt, session: tab.session||"" });
   }catch(e){ a.text="✗ не запустил движок: "+e; a.busy=false; tab.busy=false; tab.render(); }
 }
-async function openChatTab(t, engine){
+// a user message: on the FIRST turn inject the task memory; after an engine switch, hand over the transcript
+async function sendChat(tab, text){
+  let ctx="";
+  if(!tab.injectedMem && !tab.session){
+    let mem=""; try{ mem=((await invoke("run_cc",{args:["task","memory",tab.taskId]}))||"").trim(); }catch(_){}
+    const hasMem = mem && /\S/.test(mem.replace(/^#.*$/gm,"").replace(/^##.*$/gm,"").trim());
+    if(hasMem) ctx+="Память задачи (общий контекст всех чатов):\n"+mem+"\n\n";
+    tab.injectedMem=true;
+  }
+  if(tab.carry){                                  // engine just changed → the new session has no native context
+    const dig=tab.msgs.filter(m=>m.role!=="tool"&&m.text).slice(-8).map(m=>(m.role==="user"?"Я: ":"Агент: ")+m.text).join("\n\n");
+    if(dig) ctx+="Контекст прошлого разговора (был другой движок), продолжаем здесь:\n"+dig+"\n\n";
+    tab.carry=false;
+  }
+  await chatTurn(tab, ctx+text, text);
+}
+// engine picker that lives in the composer (bottom), Cursor-style — opens upward
+function engineMenu(anchor, tab, sync){
+  const old=$("enginemenu"); if(old){ old.remove(); return; }
+  const m=el("div"); m.id="enginemenu";
+  ENGINES.forEach(e=>{
+    const it=el("div","em-item"+(e===tab.engine?" on":""));
+    it.append(el("span","e-glyph e-"+e, ENGINE_GLYPH[e]||"✦"), el("span",null, e==="codex"?"Codex":"Claude"));
+    it.onclick=()=>{
+      m.remove();
+      if(e===tab.engine) return;
+      if(tab.session && tab.sessionEngine && tab.sessionEngine!==e){ tab.session=null; tab.carry=true; }  // new chat + carry context
+      tab.engine=e; localStorage.setItem("cc_engine", e); engine=e;
+      sync(); renderTabbar();
+    };
+    m.appendChild(it);
+  });
+  document.body.appendChild(m);
+  const r=anchor.getBoundingClientRect();
+  m.style.left=Math.max(8, Math.min(r.left, window.innerWidth-m.offsetWidth-8))+"px";
+  m.style.top=(r.top-m.offsetHeight-6)+"px";
+  const close=(ev)=>{ if(!m.contains(ev.target)&&ev.target!==anchor){ m.remove(); document.removeEventListener("mousedown",close); } };
+  setTimeout(()=>document.addEventListener("mousedown",close),0);
+}
+async function openChatTab(t, eng){
   if(!t.dir){ setStatus("у задачи нет worktree-папки", true); return; }
   const id="chat-"+(++seq);
+  const num=taskTabs(t.tid).filter(x=>x.type==="chat").length + 1;   // short browser-tab name: "Чат 1", "Чат 2"…
   const pane=el("div","tab-pane chat");
   const list=el("div","chat-msgs");
   const composer=el("div","chat-composer");
   const inp=el("textarea","chat-inp"); inp.placeholder="Сообщение агенту…  (Enter — отправить, Shift+Enter — перенос)"; inp.rows=1;
-  composer.append(inp, btn("▶", ()=>tab.send(), "primary send"));
+  const bar=el("div","composer-bar");
+  const esel=el("button","engine-sel");                              // model picker lives here, bottom of the chat
+  const send=btn("▶", ()=>tab.send(), "send");
+  bar.append(el("span","cb-gap"), esel, send);
+  composer.append(inp, bar);
   pane.append(list, composer); $("tabbody").append(pane);
-  const tab={ type:"chat", engine, title:t.title, el:pane, id, taskId:t.tid, dir:t.dir, msgs:[], session:null, busy:false };
+  const tab={ type:"chat", engine:eng||engine, title:"Чат "+num, el:pane, id, taskId:t.tid, dir:t.dir,
+              msgs:[], session:null, sessionEngine:null, busy:false, injectedMem:false, carry:false };
+  const syncEsel=()=>{ esel.innerHTML=""; esel.append(
+      el("span","e-glyph e-"+tab.engine, ENGINE_GLYPH[tab.engine]||"✦"),
+      el("span","es-name", tab.engine==="codex"?"Codex":"Claude"), el("span","caret-dn","⌄")); };
+  esel.onclick=()=>engineMenu(esel, tab, ()=>{ syncEsel(); }); syncEsel();
   tab.render=()=>{ list.innerHTML=""; for(const m of tab.msgs){
       const d=el("div","msg "+m.role);
       if(m.role==="assistant"){ d.innerHTML = m.text ? mdRender(m.text) : (m.busy?'<span class="typing">…</span>':""); }
       else if(m.role==="tool"){ d.textContent="▸ "+m.text; }
       else { d.textContent=m.text; }
       list.appendChild(d);
-    } list.scrollTop=list.scrollHeight; };
-  tab.send=async()=>{ const v=inp.value.trim(); if(!v||tab.busy) return; inp.value=""; inp.style.height="auto"; await chatTurn(tab, v); };
+    }
+    if(!tab.msgs.length){ list.appendChild(el("div","chat-hint","Новый чат по задаче. Память задачи подхватится в первом сообщении.")); }
+    list.scrollTop=list.scrollHeight; };
+  tab.focus=()=>{ try{ inp.focus(); }catch(e){} };
+  tab.send=async()=>{ const v=inp.value.trim(); if(!v||tab.busy) return; inp.value=""; inp.style.height="auto"; await sendChat(tab, v); };
   inp.onkeydown=(e)=>{ if(e.key==="Enter"&&!e.shiftKey){ e.preventDefault(); tab.send(); } };
   inp.oninput=()=>{ inp.style.height="auto"; inp.style.height=Math.min(160, inp.scrollHeight)+"px"; };
   const un=await listen("chat-event",(e)=>{ if(e.payload && e.payload.id===id) handleChatEvent(tab, e.payload.line); });
   const ud=await listen("chat-done",(e)=>{ if(e.payload && e.payload.id===id){ const last=tab.msgs[tab.msgs.length-1]; if(last&&last.busy) last.busy=false; tab.busy=false; tab.render(); } });
   tab.unlisten=()=>{un();ud();};
-  tabs.push(tab); showTab(tabs.length-1);
-  // first turn: inject the task's shared memory + kick off (memory shown compactly, not as a wall of text)
-  let mem=""; try{ mem=((await invoke("run_cc",{args:["task","memory",t.tid]}))||"").trim(); }catch(_){}
-  const hasMem = mem && /\S/.test(mem.replace(/^#.*|^##.*/gm,"").trim());
-  const prompt=(hasMem?"Память задачи (общий контекст всех чатов):\n"+mem+"\n\n":"")+"Задача: "+t.title+"\n\nРазберись и начни работу. Когда примешь решение или сменишь направление — кратко зафиксируй.";
-  chatTurn(tab, prompt, "▶ старт: "+t.title+(hasMem?"  · с памятью задачи":""));
+  tabs.push(tab); tab.render(); showTab(tab);     // chat opens ready; the agent only runs when you send
 }
 async function openDiffTab(t){
-  const pane=el("div","tab-pane"); const pre=el("pre","diffpre","загрузка diff…"); pane.append(pre); $("tabbody").append(pane);
-  const tab={ type:"diff", title:t.title, el:pane };
-  tabs.push(tab); showTab(tabs.length-1);
+  const id="diff-"+(++seq);
+  const pane=el("div","tab-pane diff"); const pre=el("pre","diffpre","загрузка diff…"); pane.append(pre); $("tabbody").append(pane);
+  const tab={ type:"diff", title:"diff", el:pane, id, taskId:t.tid, unlisten:null };
+  tabs.push(tab); showTab(tab);
   try{ pre.textContent = (await invoke("run_cc",{args:["task","diff",t.tid]}) || "(пусто)").trim() || "(нет изменений)"; }
   catch(e){ pre.textContent="✗ "+e; pre.style.color="#f87171"; }
 }
@@ -375,6 +430,7 @@ function renderFacts(t){
   const trow=el("div","row2 acts");
   trow.append(btn("Создать MR", ()=>runAction(["task","mr",t.tid],"task mr "+t.tid, loose)),
               btn("Влить", ()=>runAction(["task","merge",t.tid],"task merge "+t.tid, loose), "ghost"));
+  trow.append(btn("Diff", ()=>openDiffTab(t), "ghost"));
   if(t.dir) trow.append(btn("Папка", ()=>openExt(t.dir), "ghost"));
   f.appendChild(trow);
   // combine toggle: pull this task's changes INTO the group's combined branch (or take them back out)
@@ -408,10 +464,8 @@ function renderFacts(t){
 }
 function setupCenter(){
   const c=$("center"); c.innerHTML="";
-  c.append(el("div","launcher")); $("center").lastChild.id="launcher";
-  const bar=el("div","tabbar"); bar.id="tabbar"; c.append(bar);
+  const bar=el("div","tabbar"); bar.id="tabbar"; bar.style.display="none"; c.append(bar);
   const body=el("div","tabbody"); body.id="tabbody"; c.append(body);
-  renderLauncher(null);
 }
 // drag the dividers to resize the panes (like Cursor); widths persist across restarts
 function setupResizers(){
@@ -428,13 +482,11 @@ function setupResizers(){
       const move=(ev)=>{ const w=Math.max(min, Math.min(max, w0+sign*(ev.clientX-x0))); app.style.setProperty("--"+v, w+"px"); };
       const up=()=>{ document.removeEventListener("mousemove",move); document.removeEventListener("mouseup",up);
         rz.classList.remove("dragging"); document.body.classList.remove("col-resizing");
-        localStorage.setItem(store, num(v,def));
-        const tb=tabs[active]; if(tb&&tb.fit){ try{tb.fit.fit();}catch(_){} } };
+        localStorage.setItem(store, num(v,def)); };
       document.addEventListener("mousemove",move); document.addEventListener("mouseup",up);
     });
   };
   drag($("rz-left"),  "sw", +1, 180, 460, "cc_sw", 286);   // drag right → wider sidebar
   drag($("rz-right"), "fw", -1, 220, 540, "cc_fw", 320);   // drag left  → wider facts pane
 }
-window.addEventListener("resize", ()=>{ const tb=tabs[active]; if(tb&&tb.fit){ try{tb.fit.fit();}catch(e){} } });
 window.addEventListener("DOMContentLoaded", ()=>{ setupCenter(); setupResizers(); $("refresh").onclick=load; load(); setInterval(load, 5000); });
