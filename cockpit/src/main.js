@@ -468,15 +468,75 @@ async function openChatTab(t, eng, opts){
   tab.unlisten=()=>{un();ud();};
   tabs.push(tab); tab.render(); showTab(tab);     // chat opens ready; the agent only runs when you send
 }
+// ---- unified-diff parser + renderer (file blocks, line numbers, +/- coloring, collapsible) ----
+function parseDiff(text){
+  const repos=[]; const parts=(text||"").split(/^===== CCDIFF (.+?) =====$/m);
+  if(parts.length>1){ for(let i=1;i<parts.length;i+=2) repos.push({repo:parts[i].trim(), files:parseDiffFiles(parts[i+1]||"")}); }
+  else repos.push({repo:"", files:parseDiffFiles(text)});
+  return repos;
+}
+function parseDiffFiles(body){
+  const files=[]; let cur=null, hunk=null, o=0, n=0;
+  for(const line of (body||"").split("\n")){
+    if(line.startsWith("diff --git")){ cur={path:"", add:0, del:0, hunks:[], note:""}; files.push(cur); hunk=null;
+      const m=line.match(/ b\/(.+)$/); if(m) cur.path=m[1]; continue; }
+    if(!cur){ continue; }
+    if(line.startsWith("+++ ")){ const m=line.match(/^\+\+\+ b\/(.+)/); if(m) cur.path=m[1]; continue; }
+    if(line.startsWith("--- ")) continue;
+    if(line.startsWith("new file")){ cur.note="new"; continue; }
+    if(line.startsWith("deleted file")){ cur.note="deleted"; continue; }
+    if(line.startsWith("rename ")||line.startsWith("similarity ")||line.startsWith("index ")||line.startsWith("old mode")||line.startsWith("new mode")) continue;
+    if(line.startsWith("Binary files")){ cur.note="binary"; continue; }
+    const hm=line.match(/^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@(.*)/);
+    if(hm){ o=+hm[1]; n=+hm[2]; hunk={header:line, lines:[]}; cur.hunks.push(hunk); continue; }
+    if(!hunk) continue;
+    if(line.startsWith("\\")) continue;            // "\ No newline at end of file"
+    if(line.startsWith("+")){ cur.add++; hunk.lines.push({t:"add", o:"", n:n++, text:line.slice(1)}); }
+    else if(line.startsWith("-")){ cur.del++; hunk.lines.push({t:"del", o:o++, n:"", text:line.slice(1)}); }
+    else { hunk.lines.push({t:"ctx", o:o++, n:n++, text:line.slice(1)}); }
+  }
+  return files;
+}
+function renderDiff(box, text){
+  box.innerHTML="";
+  const repos=parseDiff(text);
+  const anyFiles=repos.some(r=>r.files.length);
+  if(!anyFiles){ box.append(el("div","diff-empty", ((text||"").replace(/^===== CCDIFF.*$/gm,"").trim())||"(нет изменений)")); return; }
+  for(const repo of repos){
+    if(repo.repo) box.append(el("div","diff-repo", repo.repo));
+    if(!repo.files.length){ box.append(el("div","diff-empty","(нет изменений)")); continue; }
+    for(const f of repo.files){
+      const fb=el("div","diff-file");
+      const head=el("div","diff-fhead");
+      head.append(el("span","diff-caret","▾"), el("span","diff-path", f.path||"?"));
+      if(f.note) head.append(el("span","diff-note", f.note));
+      head.append(el("span","diff-stat", "+"+f.add+" −"+f.del));
+      head.onclick=()=>fb.classList.toggle("collapsed");
+      fb.append(head);
+      const bodyEl=el("div","diff-body");
+      for(const h of f.hunks){
+        bodyEl.append(el("div","diff-hunk", h.header));
+        for(const ln of h.lines){
+          const row=el("div","diff-line "+ln.t);
+          row.append(el("span","ln", ln.o===""?"":String(ln.o)), el("span","ln", ln.n===""?"":String(ln.n)));
+          const code=el("span","diff-code"); code.textContent=(ln.t==="add"?"+":ln.t==="del"?"−":" ")+ln.text;
+          row.append(code); bodyEl.append(row);
+        }
+      }
+      if(!f.hunks.length) bodyEl.append(el("div","diff-hunk", f.note==="binary"?"(бинарный файл)":"(без изменений содержимого)"));
+      fb.append(bodyEl); box.append(fb);
+    }
+  }
+}
 async function openDiffTab(t){
   const existing=taskTabs(t.tid).find(x=>x.type==="diff");   // one diff tab per task — focus + refresh, never duplicate
   if(existing){ showTab(existing); existing.reload&&existing.reload(); return; }
   const id="diff-"+(++seq);
-  const pane=el("div","tab-pane diff"); const pre=el("pre","diffpre","загрузка diff…"); pane.append(pre); $("tabbody").append(pane);
+  const pane=el("div","tab-pane diff"); const wrap=el("div","diff-wrap"); pane.append(wrap); $("tabbody").append(pane);
   const tab={ type:"diff", title:"diff", el:pane, id, taskId:t.tid, unlisten:null };
-  tab.reload=async()=>{ pre.style.color=""; pre.textContent="загрузка diff…";
-    try{ pre.textContent = (await invoke("run_cc",{args:["task","diff",t.tid]}) || "(пусто)").trim() || "(нет изменений)"; }
-    catch(e){ pre.textContent="✗ "+e; pre.style.color="#f87171"; } };
+  tab.reload=async()=>{ wrap.innerHTML=""; wrap.append(el("div","diff-empty","загрузка diff…"));
+    try{ renderDiff(wrap, (await invoke("run_cc",{args:["task","diff",t.tid]})) || ""); }
+    catch(e){ wrap.innerHTML=""; wrap.append(el("div","diff-empty","✗ "+e)); } };
   tabs.push(tab); showTab(tab); tab.reload();
 }
 
