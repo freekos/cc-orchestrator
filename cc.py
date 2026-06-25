@@ -2134,6 +2134,12 @@ def render_ops_runbook(s, ekey, kind):
 def ops_id(ekey, kind):
     return "ops_%s_%s" % (kind, slugify(ekey))
 
+# Launcher wrapper: runs the agent (argv[2:]) and writes its REAL exit code to argv[1]. cc reads that
+# file as the FACT of success/failure — not the agent's prose. argv list avoids any shell quoting.
+_OPS_WRAP = ("import subprocess,sys\n"
+             "rc=subprocess.run(sys.argv[2:]).returncode\n"
+             "open(sys.argv[1],'w').write(str(rc))\n")
+
 def cmd_epic_ops(args):
     """Launch a headless ops agent (test/stage/deploy) for a group. cc prepares the scope + runbook
     and runs claude in the background; the agent studies the repos and acts, logging visibly and
@@ -2152,25 +2158,34 @@ def cmd_epic_ops(args):
     (opsdir / "CLAUDE.md").write_text(render_ops_runbook(s, args.key, kind))
     oid = ops_id(args.key, kind)
     log = STATE_DIR / ("%s.log" % oid)
+    exit_file = STATE_DIR / ("%s.exit" % oid)   # the wrapper writes the agent's REAL exit code here
+    try:
+        exit_file.unlink()                      # clear a stale code from a previous run
+    except OSError:
+        pass
     adds = [wt for _, wt, _ in wts]
     s.setdefault("ops", {})[oid] = {"epic": args.key, "kind": kind, "dir": str(opsdir),
-                                    "log": str(log), "status": "running", "claude_session": {}}
+                                    "log": str(log), "exit": str(exit_file),
+                                    "status": "running", "claude_session": {}}
     save_state(s)
     audit("ops.start", epic=args.key, kind=kind)
     if getattr(args, "manual", False):
         print("ops dir готов (manual, агент не запущен): %s" % opsdir)
         return
     prompt = ("[cc] You are the OPS agent for group %s (%s). Follow this folder's CLAUDE.md: study the "
-              "repos, do the job, report each step, and if you must stop, end with a single "
-              "`[cc-needs-input] …` line." % (args.key, kind))
+              "repos, do the job, report each step, end with `[cc-done] <what you did + how to verify>` "
+              "on success, or a single `[cc-needs-input] …` line if you must stop." % (args.key, kind))
     addflags = []
     for a in adds:
         addflags += ["--add-dir", a]
+    # Wrap the agent in a tiny launcher that records its REAL exit code to exit_file. cc derives the
+    # ops status from that FACT (+ the [cc-needs-input] marker), never from the agent's prose.
     with open(log, "w") as lf:
-        proc = subprocess.Popen(["claude", "--permission-mode", "bypassPermissions", "-p", prompt] + addflags,
+        proc = subprocess.Popen([sys.executable, "-c", _OPS_WRAP, str(exit_file),
+                                 "claude", "--permission-mode", "bypassPermissions", "-p", prompt] + addflags,
                                 cwd=str(opsdir), stdout=lf, stderr=lf)
     s = load_state(); s["ops"][oid]["pid"] = proc.pid; save_state(s)
-    print("ops-агент [%s] запущен для группы %s (pid=%s)\n  лог: %s\n  следить: cc tui (или tail -f лог)"
+    print("ops-агент [%s] запущен для группы %s (pid=%s)\n  лог: %s\n  статус будет из exit-code (факт), не из слов агента"
           % (kind, args.key, proc.pid, log))
 
 def cmd_epic_open(args):

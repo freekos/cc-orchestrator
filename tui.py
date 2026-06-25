@@ -110,17 +110,32 @@ def fast_status(t):
     return "review"
 
 
+def _ops_exit(o):
+    """The REAL exit code the launcher wrapper recorded for the ops agent (int), or None if the
+    process died without writing one (a crash). This is the FACT cc trusts, not the agent's prose."""
+    p = o.get("exit")
+    if not p:
+        return None
+    try:
+        return int(open(p).read().strip())
+    except Exception:
+        return None
+
+
 def _ops_status(o):
-    """Live status of an ops run: agent alive -> running; log ends with [cc-needs-input] -> needs_input;
-    else done. Reuses cc.task_needs_input's [cc-needs-input] sniffer on the ops log."""
+    """Status from FACTS, not the agent's narration: running while alive; then the agent's REAL exit
+    code (0 -> done, nonzero or crashed -> failed). [cc-needs-input] -> needs_input. A run can NEVER
+    show ✓ just because the agent SAID so — only exit 0 does."""
     if o.get("pid") and cc.pid_alive(o["pid"]):
         return "running"
     if cc.task_needs_input({"log": o.get("log")}):
         return "needs_input"
-    return "done"
+    if "exit" not in o:
+        return "done"                  # legacy ops record (pre-facts layer) — don't false-alarm
+    return "done" if _ops_exit(o) == 0 else "failed"
 
 
-OPS_GLYPH = {"running": "🔵", "needs_input": "❓", "done": "✅"}
+OPS_GLYPH = {"running": "🔵", "needs_input": "❓", "done": "✅", "failed": "❌"}
 
 
 class NewEpicScreen(ModalScreen):
@@ -1663,8 +1678,17 @@ class CCApp(App):
             return
         if data["type"] == "ops" and data["id"] in (s.get("ops") or {}):
             o = s["ops"][data["id"]]
-            st = o.get("status") or _ops_status(o)
-            L = ["[b]ops: %s[/b]   группа %s   status=%s" % (o.get("kind", "?"), o.get("epic", "?"), st)]
+            st = _ops_status(o)
+            L = ["[b]ops: %s[/b]   группа %s   %s %s" % (o.get("kind", "?"), o.get("epic", "?"),
+                                                          OPS_GLYPH.get(st, "?"), st)]
+            # outcome FROM FACTS (the recorded exit code), not the agent's prose
+            if st == "done":
+                L.append("[green]✓ успех — агент завершился с exit 0[/green]")
+            elif st == "failed":
+                rc = _ops_exit(o)
+                L.append("[bold red]✗ НЕ удалось — exit=%s%s[/bold red]"
+                         % (rc, " (агент умер без кода — крах)" if rc is None else ""))
+                L.append("[dim]o — открыть сессию, разобраться/перезапустить[/dim]")
             ni = cc.task_needs_input({"log": o.get("log")})
             if ni:
                 L += ["", "[bold yellow]❓ агент ждёт ответа:[/bold yellow] %s" % ni,

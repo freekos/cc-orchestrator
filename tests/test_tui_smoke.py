@@ -286,9 +286,30 @@ def test_bindings_culled():
         assert kept in keys, "binding %s should remain" % kept
 
 
+def test_ops_status_from_facts():
+    # ops status comes from the FACT (recorded exit code) + needs-input marker — never the agent's prose.
+    import os, tempfile, shutil
+    d = tempfile.mkdtemp(prefix="cc-opsfacts-")
+    try:
+        assert tui._ops_status({"pid": os.getpid(), "exit": "/nope"}) == "running"   # alive pid
+        e0 = os.path.join(d, "e0"); open(e0, "w").write("0")
+        assert tui._ops_status({"pid": None, "exit": e0}) == "done"                  # exit 0 -> ✓
+        e1 = os.path.join(d, "e1"); open(e1, "w").write("1")
+        assert tui._ops_status({"pid": None, "exit": e1}) == "failed"                # nonzero -> ✗
+        assert tui._ops_status({"pid": None, "exit": os.path.join(d, "gone")}) == "failed"  # crash (no code)
+        assert tui._ops_status({"pid": None}) == "done"                             # legacy record -> ✓ (no false alarm)
+        lg = os.path.join(d, "ni.log"); open(lg, "w").write("работаю\n[cc-needs-input] какой порт?\n")
+        assert tui._ops_status({"pid": None, "exit": e0, "log": lg}) == "needs_input"  # marker beats exit
+        assert tui._ops_exit({"exit": e1}) == 1 and tui._ops_exit({}) is None
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
 if __name__ == "__main__":
     test_bindings_culled()
     print("ok test_bindings_culled")
+    test_ops_status_from_facts()
+    print("ok test_ops_status_from_facts")
     asyncio.run(_smoke())
     print("ok test_tui_smoke")
     test_parse_mr_plan()
