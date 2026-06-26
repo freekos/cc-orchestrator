@@ -904,21 +904,35 @@ function fuzzyScore(q, text){
   }
   return {score, pos};
 }
-function taskHaystack(x){   // everything worth matching, title first
-  return [x.t.title, x.pn, x.gkey||"", x.t.branch||"", (x.t.repos||[]).map(r=>r.repo).join(" ")].join("  ");
+function groupSummaryOf(pn, gkey){ const p=STATE&&STATE.projects[pn]; const g=p&&(p.groups||[]).find(x=>x.key===gkey); return g?(g.summary||g.key):(gkey||""); }
+function snippetOf(t){ return (t.prompt||"").replace(/\s+/g," ").trim(); }
+function taskHaystack(x){   // find by what it's ABOUT, not just the name: + description, + epic/group, + branch, + repos
+  return [x.t.title, snippetOf(x.t), x.pn, x.gkey||"", groupSummaryOf(x.pn,x.gkey), x.t.branch||"",
+          (x.t.repos||[]).map(r=>r.repo).join(" ")].join("  ");
 }
-function searchTasks(q){
-  const all=allTasksFlat();
-  if(!q.trim()) return all.sort((a,b)=>(b.t.activity||0)-(a.t.activity||0)).slice(0,14).map(x=>({x,pos:[]}));
+function searchAll(q){   // tasks (content-aware) + groups; active first, then score, then recency
+  const tasks=allTasksFlat();
+  if(!q.trim())
+    return tasks.filter(x=>!isArchived(x)).sort((a,b)=>(b.t.activity||0)-(a.t.activity||0)).slice(0,14).map(x=>({type:"task", x, arch:false, pos:[]}));
   const out=[];
-  for(const x of all){
-    const combined=fuzzyScore(q, taskHaystack(x));
-    if(!combined) continue;
+  for(const x of tasks){
+    const hay=fuzzyScore(q, taskHaystack(x)); if(!hay) continue;
     const titleM=fuzzyScore(q, x.t.title||"");
-    out.push({x, score: combined.score + (titleM ? titleM.score+25 : 0), pos: titleM?titleM.pos:[]});  // title weighs more
+    out.push({type:"task", x, arch:isArchived(x), pos: titleM?titleM.pos:[], score: hay.score + (titleM?titleM.score+25:0)});
   }
-  out.sort((a,b)=> b.score-a.score || (b.x.t.activity||0)-(a.x.t.activity||0));   // recency breaks ties
-  return out.slice(0,14);
+  const seen=new Set();
+  for(const [pn,p] of Object.entries(STATE.projects||{})) for(const g of (p.groups||[])){
+    if(g.loose) continue; const key=pn+"/"+g.key; if(seen.has(key)) continue; seen.add(key);
+    const gm=fuzzyScore(q, (g.summary||"")+"  "+g.key); if(!gm) continue;
+    out.push({type:"group", g, pn, arch:!!g.archived, pos:gm.pos, score: gm.score+12});
+  }
+  out.sort((a,b)=> (a.arch-b.arch) || (b.score-a.score) || (((b.x&&b.x.t.activity)||0)-((a.x&&a.x.t.activity)||0)));
+  return out.slice(0,16);
+}
+function revealGroup(pn, g){   // search → group: open it in the tree + land on its first task
+  collapsed.delete("proj:"+pn); collapsed.delete("group:"+pn+"/"+g.key);
+  const t0=(g.tasks||[]).find(t=>!t.archived) || (g.tasks||[])[0];
+  if(t0) selectTask(t0, pn, g.key); else renderTree();
 }
 function hlTitle(title, pos){
   const set=new Set(pos), span=el("span","pal-title");
@@ -932,28 +946,46 @@ function openSearch(){
   const existing=$("palette"); if(existing){ existing.querySelector(".pal-input").focus(); return; }
   const ov=el("div","overlay pal-ov"); ov.id="palette";
   const box=el("div","palette-box");
-  const inp=el("input","pal-input"); inp.placeholder="Поиск задач по всем проектам…  (название · проект · эпик · ветка · репо)";
+  const inp=el("input","pal-input"); inp.placeholder="Поиск по названию И описанию задач/групп — по всем проектам, вкл. архив";
   const list=el("div","pal-list");
   box.append(inp, list); ov.append(box); document.body.append(ov);
   let results=[], sel=0;
   const markSel=()=>{ [...list.children].forEach((c,i)=>c.classList.toggle("sel", i===sel)); const cur=list.children[sel]; if(cur&&cur.scrollIntoView) cur.scrollIntoView({block:"nearest"}); };
+  const taskRow2=(r,i)=>{
+    const t=r.x.t;
+    const row=el("div","pal-row two"+(i===sel?" sel":"")+(r.arch?" arch":""));
+    const top=el("div","pal-top");
+    top.append(statusMark(t.status), el("span","hr-proj", r.x.pn));
+    top.append(r.pos.length ? hlTitle(t.title, r.pos) : el("span","pal-title", t.title));
+    if(r.arch) top.append(el("span","pal-arch","архив"));
+    const w = r.arch && t.archived_at ? t.archived_at.slice(5,10) : shortTime(t.activity);
+    if(w) top.append(el("span","hr-when", w));
+    row.append(top);
+    // second line — what disambiguates identical titles: epic/group · branch · description
+    const meta=[groupSummaryOf(r.x.pn, r.x.gkey), t.branch, snippetOf(t)].filter(Boolean).join("  ·  ");
+    if(meta) row.append(el("div","pal-sub", meta));
+    return row;
+  };
+  const groupRow2=(r,i)=>{
+    const g=r.g, n=(g.tasks||[]).filter(t=>!t.archived).length;
+    const row=el("div","pal-row two grp"+(i===sel?" sel":"")+(r.arch?" arch":""));
+    const top=el("div","pal-top");
+    top.append(el("span","pal-gico","▣"), el("span","hr-proj", r.pn));
+    top.append(r.pos.length ? hlTitle(g.summary||g.key, r.pos) : el("span","pal-title", g.summary||g.key));
+    if(r.arch) top.append(el("span","pal-arch","архив"));
+    top.append(el("span","hr-when", "группа · "+n));
+    row.append(top, el("div","pal-sub", g.key));
+    return row;
+  };
   const render=()=>{
     list.innerHTML="";
-    results.forEach((r,i)=>{
-      const arch=isArchived(r.x);
-      const row=el("div","pal-row"+(i===sel?" sel":"")+(arch?" arch":""));
-      row.append(statusMark(r.x.t.status), el("span","hr-proj", r.x.pn));
-      row.append(r.pos.length ? hlTitle(r.x.t.title, r.pos) : el("span","pal-title", r.x.t.title));
-      if(arch) row.append(el("span","pal-arch","архив"));
-      if(r.x.t.branch) row.append(el("span","pal-meta", r.x.t.branch));
-      const w=shortTime(r.x.t.activity); if(w) row.append(el("span","hr-when", w));
-      row.onclick=()=>pick(i); row.onmouseenter=()=>{ sel=i; markSel(); };
-      list.appendChild(row);
-    });
+    results.forEach((r,i)=>{ const row = r.type==="group" ? groupRow2(r,i) : taskRow2(r,i);
+      row.onclick=()=>pick(i); row.onmouseenter=()=>{ sel=i; markSel(); }; list.appendChild(row); });
     if(!results.length) list.append(el("div","pal-empty","ничего не найдено"));
   };
-  const refresh=()=>{ results=searchTasks(inp.value); sel=0; render(); };
-  const pick=(i)=>{ const r=results[i]; if(!r) return; ov.remove(); selectTask(r.x.t, r.x.pn, r.x.gkey); };
+  const refresh=()=>{ results=searchAll(inp.value); sel=0; render(); };
+  const pick=(i)=>{ const r=results[i]; if(!r) return; ov.remove();
+    if(r.type==="group") revealGroup(r.pn, r.g); else selectTask(r.x.t, r.x.pn, r.x.gkey); };
   inp.oninput=refresh;
   inp.onkeydown=(e)=>{
     if(e.key==="ArrowDown"){ e.preventDefault(); sel=Math.min(results.length-1, sel+1); markSel(); }
