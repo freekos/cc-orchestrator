@@ -15,6 +15,7 @@ function groupAlert(g){
 }
 let STATE = null, SEL = null;
 const collapsed = new Set();
+const seenKeys = new Set();   // projects/groups start COLLAPSED by default — seed each new key once
 let tabs = [], active = null, seq = 0;   // middle = per-task chat/diff tabs; `active` is the shown tab object
 let engine = localStorage.getItem("cc_engine") || "claude";   // which agent "+ Чат" launches
 const ENGINES = ["claude", "codex"];
@@ -144,6 +145,7 @@ function toggleKey(anchor){
 }
 function renderTree(){
   const tree=$("tree"); tree.innerHTML="";
+  for(const k of allKeys()){ if(!seenKeys.has(k)){ seenKeys.add(k); collapsed.add(k); } }   // default: collapsed
   // quiet toolbar (collapse / expand all) — like Conductor's section-header icons
   const tools=el("div","tree-tools");
   tools.append(el("span","tt-label","проекты"), el("span","gap"),
@@ -213,6 +215,7 @@ const opening = new Set();          // guard so the periodic refresh can't doubl
 function taskTabs(tid){ return tabs.filter(t=>t.taskId===tid); }
 function selectTask(t, pn, gkey){
   SEL={p:pn,g:gkey,tid:t.tid};
+  collapsed.delete("proj:"+pn); collapsed.delete("group:"+pn+"/"+gkey);   // reveal the selected task's path
   centerMode(false);
   renderTree(); renderFacts(t); showTaskChats(t);
 }
