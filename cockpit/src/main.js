@@ -222,21 +222,23 @@ function showTaskChats(t){          // bring this task's tabs to the front; open
   if(!mine.length){ ensureChat(t); return; }
   showTab((lastTab[t.tid] && mine.includes(lastTab[t.tid])) ? lastTab[t.tid] : mine[0]);
 }
+const CHAT_RESTORE_LIMIT=8;   // restore the most recent N chat sessions as tabs; older stay behind "⟲"
 async function ensureChat(t){
   if(taskTabs(t.tid).length || opening.has(t.tid)) return;
   opening.add(t.tid);
   try{
-    let opts={};
-    try{   // resume the task's most recent REAL chat (old cc TUI conversation), if any
-      const sess=JSON.parse((await invoke("run_cc",{args:["task","sessions",t.tid,"--json"]}))||"[]").filter(x=>x.kind==="chat");
-      if(sess.length){
-        const s0=sess[0];
-        const hist=JSON.parse((await invoke("run_cc",{args:["task","history",s0.sid,"--json"]}))||"[]");
-        opts={sid:s0.sid, dir:s0.dir, history:hist, preview:s0.preview};
-      }
-    }catch(_){}
-    if(taskTabs(t.tid).length) return;   // a "+" opened one while we were fetching
-    await openChatTab(t, engine, opts);
+    let chats=[];
+    try{ chats=JSON.parse((await invoke("run_cc",{args:["task","sessions",t.tid,"--json"]}))||"[]").filter(x=>x.kind==="chat"); }catch(_){}
+    if(taskTabs(t.tid).length) return;            // a "+" opened one while we were fetching
+    if(!chats.length){ await openChatTab(t, engine); return; }   // no past chats → one fresh chat
+    // restore ALL the task's real chat sessions as tabs (newest ends up active). oldest-first so the
+    // last one opened — the newest — becomes the active tab.
+    const restore=chats.slice(0, CHAT_RESTORE_LIMIT).reverse();
+    for(const s of restore){
+      if(taskTabs(t.tid).some(x=>x.session===s.sid)) continue;
+      let hist=[]; try{ hist=JSON.parse((await invoke("run_cc",{args:["task","history",s.sid,"--json"]}))||"[]"); }catch(_){}
+      await openChatTab(t, "claude", {sid:s.sid, dir:s.dir, history:hist, preview:s.preview});
+    }
   } finally { opening.delete(t.tid); }
 }
 function renderTabbar(){
@@ -453,7 +455,7 @@ async function openChatTab(t, eng, opts){
       else { d.textContent=m.text; }
       list.appendChild(d);
     }
-    if(!tab.msgs.length){ list.appendChild(el("div","chat-hint","Новый чат по задаче. Память задачи подхватится в первом сообщении.")); }
+    if(!tab.msgs.length){ list.appendChild(el("div","chat-hint","Пустой чат. Напиши сообщение — агент подхватит память задачи и начнёт. Прошлые чаты задачи — кнопка ⟲ сверху.")); }
     list.scrollTop=list.scrollHeight; };
   tab.focus=()=>{ try{ inp.focus(); }catch(e){} };
   tab.send=async()=>{ const v=inp.value.trim(); if(!v||tab.busy) return; inp.value=""; inp.style.height="auto"; await sendChat(tab, v); };
