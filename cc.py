@@ -1004,6 +1004,38 @@ def cmd_group_combine(args):
             print("  [%s] ✓ влито %d: %s  ->  %s"
                   % (r, len(info["merged"]), ", ".join(info["merged"]) or "—", info["worktree"]))
 
+def cmd_group_dev(args):
+    """Local-run info for the group's COMBINED branch (all included tasks merged into one integration
+    branch). Returns the combined worktree dir, per-repo dev commands, and a 'run all' concurrently
+    oneliner — so the whole group can be tested locally at once. --json for the cockpit."""
+    s = load_state()
+    g = s["epics"].get(args.group) or die("unknown group '%s'" % args.group)
+    proj = s["projects"][g["project"]]
+    cwts = g.get("combined_worktrees") or {}
+    cb = combined_branch(args.group)
+    combined_dir = str(Path(proj["path"]) / "cctui" / args.group / "__combined__")
+    repos = [{"repo": r, "dir": wt, "cmd": proj["repos"].get(r, {}).get("run") or ""}
+             for r, wt in cwts.items()]
+    runnable = [x for x in repos if x["cmd"] and x["dir"]]
+    oneliner = ""
+    if runnable:
+        oneliner = "npx -y concurrently --names %s --prefix-colors auto %s" % (
+            ",".join(x["repo"] for x in runnable),
+            " ".join(shlex.quote("cd %s && %s" % (shlex.quote(x["dir"]), x["cmd"])) for x in runnable))
+    ok = bool(cwts)
+    out = {"ok": ok, "reason": "" if ok else "общая ветка не собрана — влей задачи в группу (⊕) и пересобери",
+           "dir": combined_dir, "branch": cb, "included": g.get("combined", []),
+           "repos": repos, "oneliner": oneliner}
+    if getattr(args, "json", False):
+        print(json.dumps(out, ensure_ascii=False)); return
+    if not ok:
+        print(out["reason"]); return
+    print("combined dir: %s  (ветка %s, задач: %d)" % (combined_dir, cb, len(g.get("combined", []))))
+    for x in repos:
+        print("  [%s] %s — %s" % (x["repo"], x["dir"], x["cmd"] or "(нет dev-команды)"))
+    if oneliner:
+        print("\nrun all:\n%s" % oneliner)
+
 def cmd_task_regroup(args):
     """Move a task to another GROUP (epic) within the SAME project, recomputing its MR targets. The
     branch and worktrees are untouched — only group membership + per-repo base change (single-membership:
@@ -3471,6 +3503,8 @@ def build_parser():
         a = grp.add_parser("merge"); a.add_argument("key"); a.add_argument("--dry-run", action="store_true"); a.add_argument("--squash", action="store_true"); a.set_defaults(fn=cmd_epic_merge)
         a = grp.add_parser("combine"); a.add_argument("group"); a.add_argument("--add"); a.add_argument("--remove")
         a.set_defaults(fn=cmd_group_combine)
+        a = grp.add_parser("dev"); a.add_argument("group"); a.add_argument("--json", action="store_true")
+        a.set_defaults(fn=cmd_group_dev)   # local-run info for the combined branch (test the whole group)
         a = grp.add_parser("set"); a.add_argument("key"); a.add_argument("--summary"); a.add_argument("--repos"); a.add_argument("--target", action="append"); a.set_defaults(fn=cmd_epic_set)
         a = grp.add_parser("note"); a.add_argument("key"); a.add_argument("text"); a.set_defaults(fn=cmd_epic_note)
         a = grp.add_parser("memory"); a.add_argument("key"); a.set_defaults(fn=cmd_epic_memory)
@@ -3819,7 +3853,8 @@ _READONLY = {cmd_task_diff, cmd_task_ls, cmd_repo_ls, cmd_repo_members,
              cmd_jira_attachments, cmd_jira_pull,
              cmd_jira_transitions, cmd_jira_move, cmd_jira_rollup, cmd_doctor, cmd_log,
              cmd_task_setup, cmd_snapshot, cmd_task_memory,
-             cmd_task_sessions, cmd_task_history, cmd_task_context, cmd_task_dev}  # no cc-state writes; network/file off the lock
+             cmd_task_sessions, cmd_task_history, cmd_task_context, cmd_task_dev,
+             cmd_group_dev}  # no cc-state writes; network/file off the lock
 
 _SELF_LOCKED = {cmd_epic_mrs, cmd_task_mrs, cmd_repo_add, cmd_project_new, cmd_recover,
                 cmd_task_merge, cmd_epic_merge}   # do git/network lock-free, then save under a brief mutate() themselves

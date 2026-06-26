@@ -547,20 +547,20 @@ async function openDiffTab(t){
   tabs.push(tab); showTab(tab); tab.reload();
 }
 // ---- terminal tab: an interactive shell in the task folder (PTY + xterm) ----
-async function openTermTab(t){
-  if(!t.dir){ setStatus("у задачи нет worktree-папки", true); return; }
-  const existing=taskTabs(t.tid).find(x=>x.type==="term");   // one terminal per task
-  if(existing){ showTab(existing); return; }
+// shared terminal core: a PTY shell + xterm in `cwd`, with a "run all" that pastes a dev oneliner.
+// opts: {termKey (dedup), taskId (which tab strip it lives on), cwd, title, devArgs, hint, runLabel}
+async function spawnTerminal(opts){
   if(typeof Terminal==="undefined"){ setStatus("xterm не загружен", true); return; }
+  const existing=tabs.find(x=>x.type==="term" && x.termKey===opts.termKey);
+  if(existing){ gotoTab(existing); return; }
   const id="term-"+(++seq);
   const pane=el("div","tab-pane term");
-  const bar=el("div","term-bar");
-  const host=el("div","term-host");
+  const bar=el("div","term-bar"); const host=el("div","term-host");
   pane.append(bar, host); $("tabbody").append(pane);
-  const tab={ type:"term", title:"терминал", el:pane, id, taskId:t.tid, dir:t.dir, term:null, fit:null, unlisten:null };
-  const runBtn=btn("▶ Запустить все репо", ()=>termRunAll(tab), "send");
-  runBtn.title="Запустить dev-команды всех репо задачи разом (concurrently, логи с префиксами)";
-  bar.append(runBtn, el("span","term-hint", "shell в "+t.dir.split("/").pop()+" · репозитории — подпапки, уже на ветке задачи"));
+  const tab={ type:"term", title:opts.title, el:pane, id, taskId:opts.taskId, termKey:opts.termKey,
+              devArgs:opts.devArgs, dir:opts.cwd, term:null, fit:null, unlisten:null };
+  const runBtn=btn(opts.runLabel||"▶ Запустить все репо", ()=>termRunAll(tab), "send"); runBtn.title=opts.hint||"";
+  bar.append(runBtn, el("span","term-hint", opts.hint||""));
   const term=new Terminal({ fontFamily:"Menlo, monospace", fontSize:12, cursorBlink:true, theme:{ background:"#0e0e10", foreground:"#e6e6ea" } });
   const fit=new FitAddon.FitAddon(); term.loadAddon(fit);
   term.open(host); try{ fit.fit(); }catch(e){}
@@ -571,14 +571,29 @@ async function openTermTab(t){
   const ux=await listen("pty-exit", e=>{ if(e.payload===id) term.write("\r\n\x1b[90m[процесс завершён]\x1b[0m\r\n"); });
   tab.unlisten=()=>{ try{uo();}catch(e){} try{ux();}catch(e){} };
   tab.onClose=async()=>{ try{ await invoke("pty_kill",{id}); }catch(e){} try{ term.dispose(); }catch(e){} };
-  try{ await invoke("pty_spawn",{ id, cwd:t.dir, program:"" }); }
+  try{ await invoke("pty_spawn",{ id, cwd:opts.cwd, program:"" }); }
   catch(e){ term.write("✗ не запустил shell: "+e+"\r\n"); }
   tabs.push(tab); showTab(tab); setTimeout(()=>tab.refit&&tab.refit(),60);
 }
+function gotoTab(tab){   // bring a tab to front even if it lives on another task's strip
+  if(tab.taskId){ const x=allTasksFlat().find(z=>z.t.tid===tab.taskId); if(x){ selectTask(x.t, x.pn, x.gkey); } }
+  showTab(tab);
+}
+function openTermTab(t){   // per-task terminal: shell in the task folder (repos are subfolders, on the task branch)
+  if(!t.dir){ setStatus("у задачи нет worktree-папки", true); return; }
+  spawnTerminal({ termKey:"t:"+t.tid, taskId:t.tid, cwd:t.dir, title:"терминал", devArgs:["task","dev",t.tid],
+                  hint:"shell в "+t.dir.split("/").pop()+" · репозитории — подпапки, уже на ветке задачи" });
+}
+async function openGroupTerm(gkey, t){   // group terminal: shell in the COMBINED worktree (all tasks merged)
+  let d=null; try{ d=JSON.parse((await invoke("run_cc",{args:["group","dev",gkey,"--json"]}))||"{}"); }catch(e){ setStatus("✗ "+e, true); return; }
+  if(!d || !d.ok){ setStatus(d&&d.reason ? d.reason : "общая ветка группы не собрана", true); return; }
+  spawnTerminal({ termKey:"g:"+gkey, taskId:t.tid, cwd:d.dir, title:"combined: "+gkey, devArgs:["group","dev",gkey],
+                  runLabel:"▶ Запустить combined", hint:"combined-ветка "+d.branch+" · все задачи группы вместе" });
+}
 async function termRunAll(tab){
-  try{ const d=JSON.parse((await invoke("run_cc",{args:["task","dev",tab.taskId,"--json"]}))||"{}");
+  try{ const d=JSON.parse((await invoke("run_cc",{args:[...tab.devArgs,"--json"]}))||"{}");
     if(d.oneliner) await invoke("pty_write",{ id:tab.id, data:Array.from(new TextEncoder().encode(d.oneliner+"\n")) });
-    else setStatus("у репозиториев задачи нет dev-команд", true);
+    else setStatus(d.reason || "нет dev-команд для запуска", true);
   }catch(e){ setStatus("✗ "+e, true); }
 }
 
@@ -602,6 +617,11 @@ async function openMemory(t){
   catch(e){ body.textContent="✗ "+e; }
 }
 async function openInCursor(dir){ try{ await invoke("open_editor",{path:dir}); }catch(e){ setStatus("не открыл Cursor: "+e, true); } }
+async function openGroupInCursor(gkey){   // open the combined worktree (all group tasks merged) in Cursor
+  try{ const d=JSON.parse((await invoke("run_cc",{args:["group","dev",gkey,"--json"]}))||"{}");
+    if(d && d.ok) openInCursor(d.dir); else setStatus(d&&d.reason ? d.reason : "combined не собран", true);
+  }catch(e){ setStatus("✗ "+e, true); }
+}
 // MR confirmation modal: show exactly WHERE each repo's MR goes + a Draft toggle before creating
 function openMrModal(t, loose){
   const ov=el("div","overlay"); const box=el("div","modal form");
@@ -675,7 +695,11 @@ function renderFacts(t){
       f.appendChild(crow); }
     if(g && !loose){ const cn=(g.combined||[]).length;
       f.appendChild(el("div","row2 dim", cn? ("Объединено: "+cn+" задач → "+g.combined_branch) : "Объединено: пусто (общей ветки нет)"));
-      f.appendChild(tip(btn("↻ Пересобрать общую ветку", ()=>runAction(["group","combine",SEL.g],"пересобрать combined "+SEL.g,false), "ghost"), "Заново собрать общую (combined) ветку группы из влитых задач")); }
+      f.appendChild(tip(btn("↻ Пересобрать общую ветку", ()=>runAction(["group","combine",SEL.g],"пересобрать combined "+SEL.g,false), "ghost"), "Заново собрать общую (combined) ветку группы из влитых задач"));
+      if(cn){ const drow=el("div","row2 acts");   // local test of the WHOLE group = run the combined branch
+        drow.append(tip(btn("▶ Запустить combined", ()=>openGroupTerm(SEL.g, t), "ghost"), "Терминал в combined-ветке — поднять dev-серверы всех задач группы вместе, смотреть логи"),
+                    tip(btn("Combined в Cursor", ()=>openGroupInCursor(SEL.g), "ghost"), "Открыть combined-worktree (все задачи группы слиты) в Cursor"));
+        f.appendChild(drow); } }
     const grow=el("div","row2 acts");
     grow.append(tip(btn("Test", ()=>runAction(["group","ops",SEL.g,"--kind","test"],"ops test "+SEL.g,false), "ghost"), "Прогнать тесты по группе"),
                 tip(btn("Stage", ()=>runAction(["group","ops",SEL.g,"--kind","stage"],"ops stage "+SEL.g,false), "ghost"), "Задеплоить группу на stage"));
