@@ -246,8 +246,8 @@ function renderTabbar(){
   bar.style.display="flex";
   for(const tb of taskTabs(t.tid)){
     const chip=el("div","tab"+(tb===active?" active":""));
-    const ic=el("span","tab-ic", tb.type==="diff" ? "⟚" : (ENGINE_GLYPH[tb.engine]||"✦"));
-    if(tb.type!=="diff") ic.classList.add("e-"+tb.engine);
+    const ic=el("span","tab-ic", tb.type==="diff" ? "⟚" : tb.type==="term" ? "▌" : (ENGINE_GLYPH[tb.engine]||"✦"));
+    if(tb.type==="chat") ic.classList.add("e-"+tb.engine);
     chip.append(ic, el("span","tab-title", tb.title));
     const x=el("span","x","✕"); x.title="Закрыть"; x.onclick=(e)=>{ e.stopPropagation(); closeTab(tb); }; chip.append(x);
     chip.onclick=()=>showTab(tb); chip.title=tb.title; bar.appendChild(chip);
@@ -262,13 +262,15 @@ function renderTabbar(){
 function showTab(tb){
   if(!tb) return;
   active=tb; lastTab[tb.taskId]=tb;
-  tabs.forEach(x=>{ x.el.style.display = x===tb ? (x.type==="chat"?"flex":"block") : "none"; });
+  tabs.forEach(x=>{ x.el.style.display = x===tb ? ((x.type==="chat"||x.type==="term")?"flex":"block") : "none"; });
   renderTabbar(); updateChatContext();   // refresh "в этом чате" for the now-active chat
+  if(tb.refit) setTimeout(()=>tb.refit(),30);   // terminal needs a re-fit after being shown
   if(tb.focus) try{ tb.focus(); }catch(e){}
 }
 function closeTab(tb){
   const i=tabs.indexOf(tb); if(i<0) return;
   try{ tb.unlisten&&tb.unlisten(); }catch(e){}
+  try{ tb.onClose&&tb.onClose(); }catch(e){}   // term: kill the PTY + dispose xterm
   tb.el.remove(); tabs.splice(i,1);
   if(lastTab[tb.taskId]===tb) delete lastTab[tb.taskId];
   if(active!==tb){ renderTabbar(); return; }
@@ -539,6 +541,41 @@ async function openDiffTab(t){
     catch(e){ wrap.innerHTML=""; wrap.append(el("div","diff-empty","✗ "+e)); } };
   tabs.push(tab); showTab(tab); tab.reload();
 }
+// ---- terminal tab: an interactive shell in the task folder (PTY + xterm) ----
+async function openTermTab(t){
+  if(!t.dir){ setStatus("у задачи нет worktree-папки", true); return; }
+  const existing=taskTabs(t.tid).find(x=>x.type==="term");   // one terminal per task
+  if(existing){ showTab(existing); return; }
+  if(typeof Terminal==="undefined"){ setStatus("xterm не загружен", true); return; }
+  const id="term-"+(++seq);
+  const pane=el("div","tab-pane term");
+  const bar=el("div","term-bar");
+  const host=el("div","term-host");
+  pane.append(bar, host); $("tabbody").append(pane);
+  const tab={ type:"term", title:"терминал", el:pane, id, taskId:t.tid, dir:t.dir, term:null, fit:null, unlisten:null };
+  const runBtn=btn("▶ Запустить все репо", ()=>termRunAll(tab), "send");
+  runBtn.title="Запустить dev-команды всех репо задачи разом (concurrently, логи с префиксами)";
+  bar.append(runBtn, el("span","term-hint", "shell в "+t.dir.split("/").pop()+" · репозитории — подпапки, уже на ветке задачи"));
+  const term=new Terminal({ fontFamily:"Menlo, monospace", fontSize:12, cursorBlink:true, theme:{ background:"#0e0e10", foreground:"#e6e6ea" } });
+  const fit=new FitAddon.FitAddon(); term.loadAddon(fit);
+  term.open(host); try{ fit.fit(); }catch(e){}
+  tab.term=term; tab.fit=fit;
+  tab.refit=()=>{ try{ fit.fit(); invoke("pty_resize",{id, rows:term.rows, cols:term.cols}); }catch(e){} };
+  term.onData(d=> invoke("pty_write",{ id, data:Array.from(new TextEncoder().encode(d)) }));
+  const uo=await listen("pty-output", e=>{ if(e.payload && e.payload.id===id) term.write(new Uint8Array(e.payload.data)); });
+  const ux=await listen("pty-exit", e=>{ if(e.payload===id) term.write("\r\n\x1b[90m[процесс завершён]\x1b[0m\r\n"); });
+  tab.unlisten=()=>{ try{uo();}catch(e){} try{ux();}catch(e){} };
+  tab.onClose=async()=>{ try{ await invoke("pty_kill",{id}); }catch(e){} try{ term.dispose(); }catch(e){} };
+  try{ await invoke("pty_spawn",{ id, cwd:t.dir, program:"" }); }
+  catch(e){ term.write("✗ не запустил shell: "+e+"\r\n"); }
+  tabs.push(tab); showTab(tab); setTimeout(()=>tab.refit&&tab.refit(),60);
+}
+async function termRunAll(tab){
+  try{ const d=JSON.parse((await invoke("run_cc",{args:["task","dev",tab.taskId,"--json"]}))||"{}");
+    if(d.oneliner) await invoke("pty_write",{ id:tab.id, data:Array.from(new TextEncoder().encode(d.oneliner+"\n")) });
+    else setStatus("у репозиториев задачи нет dev-команд", true);
+  }catch(e){ setStatus("✗ "+e, true); }
+}
 
 // ---- results modal + actions ----
 function modal(title){
@@ -607,6 +644,7 @@ function renderFacts(t){
     tip(btn("Создать MR", ()=>openMrModal(t, loose), "primary"), "Создать MR по изменённым репозиториям (с подтверждением и выбором Draft)"),
     tip(btn("Diff", ()=>openDiffTab(t), "ghost"), "Изменения задачи (git diff) по всем репозиториям"));
   if(t.dir) trow.append(tip(btn("Открыть в Cursor", ()=>openInCursor(t.dir), "ghost"), "Открыть папку задачи в Cursor"));
+  if(t.dir) trow.append(tip(btn("Терминал", ()=>openTermTab(t), "ghost"), "Терминал в папке задачи — запускай репозитории на их ветках, смотри логи"));
   // memory folded into the action row: it's read-only and auto-filled from the chats, so it's just a view
   const memBtn=tip(btn("🧠 Память", ()=>openMemory(t), "ghost"),
                    "Память задачи: решения, направление, находки — копятся из чатов автоматически. Только просмотр.");
@@ -966,8 +1004,10 @@ function setupResizers(){
   };
   drag($("rz-left"),  "sw", +1, 180, 460, "cc_sw", 286);   // drag right → wider sidebar
   drag($("rz-right"), "fw", -1, 220, 540, "cc_fw", 320);   // drag left  → wider facts pane
+  ["rz-left","rz-right"].forEach(idr=>{ const r=$(idr); if(r) r.addEventListener("mouseup", ()=>{ if(active&&active.refit) active.refit(); }); });
 }
 window.addEventListener("DOMContentLoaded", ()=>{ setupCenter(); setupResizers(); $("refresh").onclick=load;
   const brand=document.querySelector(".brand"); if(brand){ brand.style.cursor="pointer"; brand.title="На обзор"; brand.onclick=goHome; }
   document.addEventListener("keydown", globalKeydown);   // Cmd+T new chat · Cmd+Shift+F search · Cmd+P palette (rebindable)
+  window.addEventListener("resize", ()=>{ if(active && active.refit) active.refit(); });   // keep the terminal fitted
   load(); setInterval(load, 5000); });

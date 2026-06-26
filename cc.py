@@ -1455,6 +1455,30 @@ def cmd_task_context(args):
         print("  - " + f)
     print("tools: " + ", ".join("%s×%d" % (k, v) for k, v in sorted(ctx["tools"].items(), key=lambda kv: -kv[1])))
 
+def cmd_task_dev(args):
+    """Dev-run info for the cockpit terminal: per-repo dev command + a 'run all' concurrently oneliner.
+    Repos run from their OWN worktrees (already on the task branch). --json for the UI."""
+    s = load_state()
+    t = s["tasks"].get(args.task) or die("unknown task '%s'" % args.task)
+    proj = s["projects"][s["epics"][t["epic"]]["project"]]
+    task_dir = t.get("dir") or (str(Path(next(iter(t["worktrees"].values()))).parent) if t.get("worktrees") else "")
+    repos = [{"repo": r, "dir": t["worktrees"].get(r, ""), "cmd": proj["repos"].get(r, {}).get("run") or ""}
+             for r in t["repos"]]
+    runnable = [x for x in repos if x["cmd"] and x["dir"]]
+    oneliner = ""
+    if runnable:
+        oneliner = "npx -y concurrently --names %s --prefix-colors auto %s" % (
+            ",".join(x["repo"] for x in runnable),
+            " ".join(shlex.quote("cd %s && %s" % (shlex.quote(x["dir"]), x["cmd"])) for x in runnable))
+    out = {"dir": task_dir, "repos": repos, "oneliner": oneliner}
+    if getattr(args, "json", False):
+        print(json.dumps(out, ensure_ascii=False)); return
+    print("task dir: %s" % task_dir)
+    for x in repos:
+        print("  [%s] %s — %s" % (x["repo"], x["dir"], x["cmd"] or "(нет dev-команды)"))
+    if oneliner:
+        print("\nrun all:\n%s" % oneliner)
+
 def cmd_task_open(args):
     s = load_state()
     t = s["tasks"].get(args.task) or die("unknown task '%s'" % args.task)
@@ -3484,6 +3508,8 @@ def build_parser():
     a.set_defaults(fn=cmd_task_history)    # one session's transcript (for re-render + resume)
     a = tk.add_parser("context"); a.add_argument("session"); a.add_argument("--json", action="store_true")
     a.set_defaults(fn=cmd_task_context)    # skills / context files / tools used in a chat session
+    a = tk.add_parser("dev"); a.add_argument("task"); a.add_argument("--json", action="store_true")
+    a.set_defaults(fn=cmd_task_dev)        # per-repo dev commands + 'run all' oneliner for the terminal
     a = tk.add_parser("open"); a.add_argument("task"); a.set_defaults(fn=cmd_task_open)
     a = tk.add_parser("done"); a.add_argument("task"); a.add_argument("--force", action="store_true"); a.set_defaults(fn=cmd_task_done)
     a = tk.add_parser("mr"); a.add_argument("task"); a.add_argument("--dry-run", action="store_true")
@@ -3793,7 +3819,7 @@ _READONLY = {cmd_task_diff, cmd_task_ls, cmd_repo_ls, cmd_repo_members,
              cmd_jira_attachments, cmd_jira_pull,
              cmd_jira_transitions, cmd_jira_move, cmd_jira_rollup, cmd_doctor, cmd_log,
              cmd_task_setup, cmd_snapshot, cmd_task_memory,
-             cmd_task_sessions, cmd_task_history, cmd_task_context}  # no cc-state writes; network/file off the lock
+             cmd_task_sessions, cmd_task_history, cmd_task_context, cmd_task_dev}  # no cc-state writes; network/file off the lock
 
 _SELF_LOCKED = {cmd_epic_mrs, cmd_task_mrs, cmd_repo_add, cmd_project_new, cmd_recover,
                 cmd_task_merge, cmd_epic_merge}   # do git/network lock-free, then save under a brief mutate() themselves

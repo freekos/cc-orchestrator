@@ -45,14 +45,19 @@ fn run_cc(args: Vec<String>) -> Result<String, String> {
     if out.status.success() { Ok(s) } else { Err(if s.trim().is_empty() { "(no output)".into() } else { s }) }
 }
 
-// --- embedded terminal (chat) via PTY: runs claude/codex in the task worktree ---
+// --- embedded terminal via PTY: an interactive shell in the task folder (repos are subfolders) ---
 #[tauri::command]
 fn pty_spawn(app: AppHandle, state: State<Ptys>, id: String, cwd: String, program: String) -> Result<(), String> {
     let pty = native_pty_system();
     let pair = pty.openpty(PtySize { rows: 30, cols: 100, pixel_width: 0, pixel_height: 0 })
         .map_err(|e| e.to_string())?;
-    let mut cmd = CommandBuilder::new(&program);
+    // empty program → the user's login shell (so aliases/PATH load); set TERM for xterm.js
+    let prog = if program.trim().is_empty() {
+        std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".into())
+    } else { program };
+    let mut cmd = CommandBuilder::new(&prog);
     cmd.cwd(&cwd);
+    cmd.env("TERM", "xterm-256color");
     pair.slave.spawn_command(cmd).map_err(|e| e.to_string())?;
     let mut reader = pair.master.try_clone_reader().map_err(|e| e.to_string())?;
     let writer = pair.master.take_writer().map_err(|e| e.to_string())?;
