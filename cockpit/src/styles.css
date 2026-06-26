@@ -279,6 +279,12 @@ h2 { margin:0; font-size:17px; font-weight:650; }
 .pal-empty { padding:14px; color:var(--dim); font-size:13px; }
 .pal-arch { flex:0 0 auto; font-size:10px; color:var(--dim); border:1px solid var(--border); border-radius:4px; padding:1px 5px; text-transform:uppercase; }
 .pal-row.arch .pal-title { color:var(--dim); }
+/* two-line result rows — second line disambiguates identical titles */
+.pal-row.two { flex-direction:column; align-items:stretch; gap:3px; }
+.pal-top { display:flex; align-items:center; gap:10px; }
+.pal-sub { color:var(--dim); font-size:11.5px; padding-left:24px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.pal-gico { flex:0 0 auto; color:var(--accent); font-size:12px; }
+.pal-row.grp .pal-title { font-weight:600; }
 /* command palette rows + rebindable shortcut chip */
 .pal-row.cmd { gap:10px; }
 .cmd-label { flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-size:13.5px; color:var(--text); }
