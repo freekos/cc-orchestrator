@@ -33,12 +33,59 @@ function findTask(){ const g=curGroup(); return g? g.tasks.find(t=>t.tid===SEL.t
 async function load(){
   try{
     STATE = JSON.parse(await invoke("get_state"));
+    computeUpdates();   // diff vs last snapshot → "what's new" feed (before renderTree so tree dots show)
     renderTree();
     const t=findTask();
     if(t) renderFacts(t);                 // a task is open → refresh its facts (never disturb open chats)
     else { renderHome(); centerMode(true); }   // nothing selected → live triage overview (refreshes each tick)
     setStatus("обновлено " + new Date().toLocaleTimeString());
   }catch(e){ setStatus("ошибка движка: "+e, true); }
+}
+// ---- "What's New": detect status changes across ALL tasks since the last snapshot ----
+let lastSig=null;                  // tid -> status signature (null until baseline established)
+const unseen=new Map();            // tid -> {title, pn, gkey, label, status, isNew} not yet acknowledged
+function taskSig(t){ return t.status+"|"+(t.merged?1:0)+"|"+((t.repos||[]).filter(r=>r.mr).length)+"|"+(t.combined?1:0); }
+function taskLabel(t){ return t.merged ? "влито ✓" : (STATUS_LABEL[t.status]||t.status); }
+function computeUpdates(){
+  const flat=allTasksFlat(); const cur={};
+  flat.forEach(x=>cur[x.t.tid]=taskSig(x.t));
+  if(lastSig){
+    for(const x of flat){ const tid=x.t.tid;
+      const changed = lastSig[tid]!==undefined && lastSig[tid]!==cur[tid];
+      const isNew   = lastSig[tid]===undefined;
+      if((changed||isNew) && !(SEL && SEL.tid===tid))   // skip the task you're already looking at
+        unseen.set(tid, {title:x.t.title, pn:x.pn, gkey:x.gkey, label:taskLabel(x.t), status:x.t.status, isNew});
+    }
+  }
+  lastSig=cur;
+  renderWhatsNew();
+}
+function renderWhatsNew(){
+  const b=$("whatsnew"); if(!b) return;
+  const n=unseen.size;
+  if(!n){ b.style.display="none"; const p=$("wnpanel"); if(p) p.remove(); return; }
+  b.style.display=""; b.textContent="● "+n+(n===1?" обновление":" обновл.");
+  b.classList.toggle("alert", [...unseen.values()].some(u=>u.status==="needs_input"||u.status==="failed"));
+  b.onclick=(e)=>{ e.stopPropagation(); toggleWhatsNew(b); };
+}
+function toggleWhatsNew(anchor){
+  const old=$("wnpanel"); if(old){ old.remove(); return; }
+  const p=el("div"); p.id="wnpanel";
+  p.append(el("div","wn-head","Обновления статусов"));
+  for(const [tid,u] of [...unseen.entries()].reverse()){
+    const row=el("div","wn-row");
+    row.append(statusMark(u.status), el("span","wn-proj", u.pn), el("span","wn-title", u.title), el("span","wn-label", u.isNew?"новая":u.label));
+    row.onclick=()=>{ const x=allTasksFlat().find(z=>z.t.tid===tid); unseen.delete(tid); p.remove(); renderWhatsNew();
+                      if(x) selectTask(x.t, x.pn, x.gkey); };
+    p.appendChild(row);
+  }
+  const foot=el("div","wn-foot"); foot.append(btn("Отметить всё прочитанным", ()=>{ unseen.clear(); p.remove(); renderWhatsNew(); renderTree(); }, "ghost"));
+  p.appendChild(foot);
+  document.body.appendChild(p);
+  const r=anchor.getBoundingClientRect();
+  p.style.left=Math.max(8, Math.min(r.left, window.innerWidth-p.offsetWidth-8))+"px"; p.style.top=(r.bottom+6)+"px";
+  const close=(ev)=>{ if(!p.contains(ev.target)&&ev.target!==anchor){ p.remove(); document.removeEventListener("mousedown",close); } };
+  setTimeout(()=>document.addEventListener("mousedown",close),0);
 }
 function allKeys(){
   const ks=[];
@@ -58,7 +105,7 @@ function folderIcon(open){
   return s;
 }
 function taskRow(t, pn, gkey){
-  const row=el("div","task"+(SEL&&SEL.tid===t.tid?" sel":""));
+  const row=el("div","task"+(SEL&&SEL.tid===t.tid?" sel":"")+(unseen.has(t.tid)?" has-update":""));
   const lbl=el("span","label", t.title);     // full title + context live in the hover-card now
   row.append(statusMark(t.status), lbl);
   const w=shortTime(t.activity); if(w){ const sp=el("span","when", w); sp.title="трогали "+relTime(t.activity); row.append(sp); }
@@ -215,6 +262,7 @@ const opening = new Set();          // guard so the periodic refresh can't doubl
 function taskTabs(tid){ return tabs.filter(t=>t.taskId===tid); }
 function selectTask(t, pn, gkey){
   SEL={p:pn,g:gkey,tid:t.tid};
+  if(unseen.delete(t.tid)) renderWhatsNew();   // opening a task acknowledges its update
   collapsed.delete("proj:"+pn); collapsed.delete("group:"+pn+"/"+gkey);   // reveal the selected task's path
   centerMode(false);
   renderTree(); renderFacts(t); showTaskChats(t);
@@ -1039,4 +1087,6 @@ window.addEventListener("DOMContentLoaded", ()=>{ setupCenter(); setupResizers()
   const brand=document.querySelector(".brand"); if(brand){ brand.style.cursor="pointer"; brand.title="На обзор"; brand.onclick=goHome; }
   document.addEventListener("keydown", globalKeydown);   // Cmd+T new chat · Cmd+Shift+F search · Cmd+P palette (rebindable)
   window.addEventListener("resize", ()=>{ if(active && active.refit) active.refit(); });   // keep the terminal fitted
-  load(); setInterval(load, 5000); });
+  let loading=false; const reload=async()=>{ if(loading) return; loading=true; try{ await load(); } finally{ loading=false; } };
+  try{ invoke("watch_state"); listen("state-changed", reload); }catch(e){}   // realtime: refresh the moment cc writes state
+  load(); setInterval(reload, 10000); });   // slow safety poll (worktree-activity recency doesn't touch state.json)

@@ -14,8 +14,23 @@ body.col-resizing { cursor:col-resize; user-select:none; }
 #center { overflow:auto; padding:18px 24px; }
 .side-head { display:flex; align-items:center; justify-content:space-between; padding:11px 14px; border-bottom:1px solid var(--border); position:sticky; top:0; background:var(--panel); z-index:1; }
 .brand { font-weight:650; letter-spacing:.01em; }
+.side-head .gap { flex:1; }
 #refresh { background:none; border:none; color:var(--dim); cursor:pointer; font-size:15px; transition:color .15s; }
 #refresh:hover { color:var(--text); }
+/* What's New badge + panel */
+#whatsnew { background:var(--accent); border:none; color:#fff; cursor:pointer; font-size:11px; font-weight:600; border-radius:11px; padding:3px 9px; margin-right:8px; white-space:nowrap; }
+#whatsnew.alert { background:#fbbf24; color:#1a1a1a; }
+#whatsnew:hover { filter:brightness(1.1); }
+#wnpanel { position:fixed; z-index:60; background:var(--panel); border:1px solid var(--border); border-radius:10px; box-shadow:0 14px 40px rgba(0,0,0,.55); min-width:320px; max-width:460px; max-height:64vh; overflow-y:auto; }
+.wn-head { padding:9px 12px 7px; color:var(--dim); font-size:11px; text-transform:uppercase; letter-spacing:.05em; }
+.wn-row { display:flex; align-items:center; gap:9px; padding:8px 12px; cursor:pointer; }
+.wn-row:hover { background:var(--panel2); }
+.wn-proj { flex:0 0 auto; color:var(--dim); font-size:10px; background:var(--panel2); border:1px solid var(--border); border-radius:4px; padding:1px 5px; }
+.wn-title { flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-size:13px; color:var(--text); }
+.wn-label { flex:0 0 auto; color:var(--dim); font-size:11px; }
+.wn-foot { padding:6px 10px 9px; border-top:1px solid var(--border); }
+/* tree dot for a task with an unacknowledged update */
+.task.has-update .label::after { content:"●"; color:var(--accent); font-size:8px; margin-left:6px; vertical-align:middle; }
 /* ---- sidebar tree (calm, Conductor-style) ---- */
 #tree { padding:4px 0 8px; }
 .tree-tools { display:flex; align-items:center; gap:6px; padding:8px 14px 6px; }

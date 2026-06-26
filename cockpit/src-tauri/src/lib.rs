@@ -28,6 +28,25 @@ fn open_external(target: String) -> Result<(), String> {
     std::process::Command::new("open").arg(&target).spawn().map(|_| ()).map_err(|e| e.to_string())
 }
 
+// Watch ~/.cc/state.json for changes (poll mtime ~1s — microseconds) and emit `state-changed` so the
+// cockpit refreshes the moment cc writes new state (combine, MR, task add/done, agent progress) —
+// realtime for ALL tasks, cheaper than blind polling (snapshot runs only when state actually changed).
+#[tauri::command]
+fn watch_state(app: AppHandle) {
+    std::thread::spawn(move || {
+        let path = std::path::PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(".cc/state.json");
+        let mut last: u64 = 0;
+        loop {
+            std::thread::sleep(std::time::Duration::from_millis(1000));
+            let m = std::fs::metadata(&path).ok()
+                .and_then(|md| md.modified().ok())
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|d| d.as_millis() as u64).unwrap_or(0);
+            if m != 0 && m != last { last = m; let _ = app.emit("state-changed", m); }
+        }
+    });
+}
+
 // Open a folder in Cursor. Prefer the `cursor` CLI; fall back to `open -a Cursor` if it's not on PATH.
 #[tauri::command]
 fn open_editor(path: String) -> Result<(), String> {
@@ -175,7 +194,7 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .manage(Ptys::default())
-        .invoke_handler(tauri::generate_handler![get_state, open_external, open_editor, run_cc, pty_spawn, pty_write, pty_resize, pty_kill, chat_spawn, chat_followup])
+        .invoke_handler(tauri::generate_handler![get_state, open_external, open_editor, run_cc, watch_state, pty_spawn, pty_write, pty_resize, pty_kill, chat_spawn, chat_followup])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
