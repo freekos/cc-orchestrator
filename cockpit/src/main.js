@@ -37,6 +37,8 @@ async function load(){
     renderTree();
     const t=findTask();
     if(t) renderFacts(t);                 // a task is open → refresh its facts (never disturb open chats)
+    else if(SEL && SEL.g && SEL.tid===null && groupOf(SEL.p, SEL.g)){   // a group is selected → its dashboard
+      renderGroupView(SEL.p, SEL.g); renderGroupFacts(SEL.p, SEL.g); centerMode("group"); }
     else { renderHome(); centerMode(true); }   // nothing selected → live triage overview (refreshes each tick)
     setStatus("обновлено " + new Date().toLocaleTimeString());
   }catch(e){ setStatus("ошибка движка: "+e, true); }
@@ -253,12 +255,14 @@ function renderTree(){
     for (const g of realGroups){
       const gtasks=(g.tasks||[]).filter(t=>!t.archived);   // archived tasks → search only
       const gk="group:"+pn+"/"+g.key, gc=collapsed.has(gk);
-      const gh=el("div","group"+(gc?" collapsed":""));
-      gh.append(el("span","caret"), el("span","g-name", g.summary||g.key));
+      const gsel = SEL && SEL.p===pn && SEL.g===g.key && !SEL.tid;
+      const gh=el("div","group"+(gc?" collapsed":"")+(gsel?" gsel":""));
+      const car=el("span","caret"); car.onclick=(e)=>{ e.stopPropagation(); gc?collapsed.delete(gk):collapsed.add(gk); renderTree(); };
+      gh.append(car, el("span","g-name", g.summary||g.key));
       const alert=groupAlert(g);
       if (alert) { const a=el("span","g-alert mark m-"+alert, MARK[alert]); a.title=STATUS_LABEL[alert]; gh.append(a); }
       gh.append(el("span","cnt", String(gtasks.length+g.ops.length)));
-      gh.onclick=()=>{ gc?collapsed.delete(gk):collapsed.add(gk); renderTree(); };
+      gh.onclick=()=>selectGroup(pn, g.key);   // open the feature dashboard (caret toggles collapse)
       gh.onmouseenter=()=>showGroupCard(g, gh); gh.onmouseleave=hideCard;
       tree.appendChild(gh);
       if (gc) continue;
@@ -826,23 +830,102 @@ async function updateChatContext(){
 const ccCtxExpanded=new Set();
 function setupCenter(){
   const c=$("center"); c.innerHTML="";
-  const home=el("div"); home.id="home"; c.append(home);   // triage home shown when no task is selected
+  const home=el("div"); home.id="home"; c.append(home);            // triage home (no selection)
+  const gv=el("div"); gv.id="groupview"; gv.style.display="none"; c.append(gv);   // group dashboard (group selected)
   const bar=el("div","tabbar"); bar.id="tabbar"; bar.style.display="none"; c.append(bar);
   const body=el("div","tabbody"); body.id="tabbody"; c.append(body);
   const f=$("facts"); f.innerHTML=""; f.append(el("div","empty","выбери задачу — здесь появятся MR, ветки и действия"));
 }
-// center has two modes: triage HOME (no task) vs the task's chat/diff tabs (WORK)
-function centerMode(home){
-  const h=$("home"), b=$("tabbody");
-  if(h) h.style.display = home ? "block" : "none";
-  if(b) b.style.display = home ? "none" : "";
-  if(home){ const bar=$("tabbar"); if(bar) bar.style.display="none"; }
-  $("app").classList.toggle("no-task", !!home);   // hide the facts pane while nothing is selected
+// center has three modes: 'home' (triage) · 'group' (feature dashboard) · 'work' (task chat/diff/term)
+function centerMode(mode){
+  if(mode===true) mode="home"; if(mode===false) mode="work";   // back-compat with the old boolean calls
+  const set=(id,on)=>{ const e=$(id); if(e) e.style.display=on?"":"none"; };
+  set("home", mode==="home"); set("groupview", mode==="group"); set("tabbody", mode==="work");
+  if(mode!=="work"){ const bar=$("tabbar"); if(bar) bar.style.display="none"; }
+  $("app").classList.toggle("no-task", mode==="home");   // facts hidden only on home (group/work show it)
 }
 function goHome(){            // clicking the cc logo deselects → back to the overview
   SEL=null; hideCard();
   centerMode(true); renderHome(); renderTree();
   const f=$("facts"); f.innerHTML=""; f.append(el("div","empty","выбери задачу — здесь появятся MR, ветки и действия"));
+}
+// ---- GROUP view: the feature's dashboard (its tasks by status + next step + flow) ----
+function groupOf(pn, gkey){ const p=STATE&&STATE.projects[pn]; return p&&(p.groups||[]).find(g=>g.key===gkey); }
+function selectGroup(pn, gkey){   // click a group → open its feature dashboard
+  SEL={p:pn, g:gkey, tid:null}; hideCard();
+  collapsed.delete("proj:"+pn); collapsed.delete("group:"+pn+"/"+gkey);   // reveal it in the tree too
+  centerMode("group"); renderTree(); renderGroupView(pn,gkey); renderGroupFacts(pn,gkey);
+}
+function groupNextStep(g, tasks){   // one-line "what to do next" for the feature
+  const by=(s)=>tasks.filter(t=>t.status===s).length;
+  const running=by("running"), review=tasks.filter(t=>t.status==="mr"||t.status==="review").length;
+  const allMerged=tasks.length>0 && tasks.every(t=>t.merged);
+  const comb=(g.combined||[]).length;
+  if(running) return "🔵 "+running+" задач(и) ещё в работе — доведи их.";
+  if(review)  return "🟡 "+review+" на ревью — проверь и влей MR в GitLab.";
+  if(allMerged && !comb) return "✅ все смёржены — можно собрать combined и тест/релиз.";
+  if(comb) return "⊕ собрано "+comb+" — запусти combined / тест / релиз.";
+  return "Добавь задачи в фичу (Cmd+T → этот эпик).";
+}
+function renderGroupView(pn, gkey){
+  const v=$("groupview"); if(!v) return; v.innerHTML="";
+  const g=groupOf(pn,gkey); if(!g){ v.append(el("div","empty","группа не найдена")); return; }
+  const active=(g.tasks||[]).filter(t=>!t.archived);
+  const archived=(g.tasks||[]).filter(t=>t.archived).length;
+  v.append(el("div","gv-title", (g.summary||g.key)));
+  const sub=el("div","gv-sub"); sub.append(el("span","gv-key", gkey), el("span",null, "·"), el("span",null, pn),
+              el("span",null,"·"), el("span",null, active.length+" задач"));
+  if((g.combined||[]).length) sub.append(el("span",null,"·"), el("span","gv-comb","⊕ собрано "+(g.combined||[]).length));
+  v.append(sub);
+  v.append(el("div","gv-next", groupNextStep(g, active)));
+  const SECTIONS=[
+    {label:"🔵 В работе", match:t=>t.status==="running"},
+    {label:"🟡 На ревью", match:t=>t.status==="mr"||t.status==="review"},
+    {label:"⚠ Нужен ответ / упало", match:t=>t.status==="needs_input"||t.status==="failed"},
+    {label:"✅ Готовы / влиты", match:t=>t.merged||t.status==="done"},
+  ];
+  for(const sec of SECTIONS){
+    const items=active.filter(sec.match); if(!items.length) continue;
+    v.append(el("div","gv-sec", sec.label+"  ("+items.length+")"));
+    items.forEach(t=>{ const r=el("div","gv-row");
+      r.append(statusMark(t.status), el("span","gv-rt", t.title));
+      if((t.repos||[]).length) r.append(el("span","gv-rm", (t.repos||[]).map(x=>x.repo).join(", ")));
+      const w=shortTime(t.activity); if(w) r.append(el("span","hr-when", w));
+      r.onclick=()=>selectTask(t, pn, gkey); v.appendChild(r); });
+  }
+  if(archived) v.append(el("div","gv-arch", "в архиве: "+archived+" (найти через поиск)"));
+  v.append(el("div","gv-hint","клик по задаче — открыть её чат; действия фичи — справа"));
+}
+function renderGroupFacts(pn, gkey){
+  const f=$("facts"); f.innerHTML="";
+  const g=groupOf(pn,gkey); if(!g){ f.append(el("div","empty","—")); return; }
+  const tip=(b,s)=>{ b.title=s; return b; };
+  f.appendChild(el("div","sec","ФИЧА · "+gkey));
+  f.appendChild(el("div","row2 dim", (g.summary||gkey)));
+  // the flow, top to bottom: collect → run/test → ship
+  f.appendChild(el("div","sec","1 · СОБРАТЬ ДЛЯ ТЕСТА"));
+  const cn=(g.combined||[]).length;
+  f.appendChild(el("div","row2 dim", cn? ("Собрано "+cn+" задач → "+g.combined_branch) : "Пусто — влей задачи в фичу (в задаче: ⊕ Влить в группу)"));
+  const r1=el("div","row2 acts");
+  r1.append(tip(btn("↻ Пересобрать", ()=>runAction(["group","combine",gkey],"пересобрать combined "+gkey,false), "ghost"), "Заново собрать общую (combined) ветку из влитых задач"));
+  if(cn){ r1.append(tip(btn("▶ Запустить combined", ()=>openGroupTermByKey(pn,gkey), "ghost"), "Терминал в combined-ветке — поднять все репо вместе"),
+                   tip(btn("Cursor", ()=>openGroupInCursor(gkey), "ghost"), "Открыть combined-worktree в Cursor")); }
+  f.appendChild(r1);
+  f.appendChild(el("div","sec","2 · ПРОВЕРИТЬ"));
+  const r2=el("div","row2 acts");
+  r2.append(tip(btn("Тест", ()=>runAction(["group","ops",gkey,"--kind","test"],"ops test "+gkey,false), "ghost"), "Прогнать тесты по фиче"),
+            tip(btn("Stage", ()=>runAction(["group","ops",gkey,"--kind","stage"],"ops stage "+gkey,false), "ghost"), "Задеплоить фичу на stage"));
+  f.appendChild(r2);
+  f.appendChild(el("div","sec","3 · ВЫКАТИТЬ"));
+  const r3=el("div","row2 acts");
+  r3.append(tip(btn("Влить все задачи", ()=>runAction(["group","merge",gkey],"group merge "+gkey,false), "ghost"), "Слить MR всех задач фичи в их целевые ветки"),
+            tip(btn("Релиз: MR в master", ()=>runAction(["group","mr",gkey],"group mr "+gkey,true), "warn"), "Создать релизный MR фичи в master (прод!)"));
+  f.appendChild(r3);
+}
+async function openGroupTermByKey(pn, gkey){   // group terminal needs an owner task tab; use the group's first active task
+  const g=groupOf(pn,gkey); const t0=(g.tasks||[]).find(t=>!t.archived);
+  if(!t0){ setStatus("в фиче нет активных задач для терминала", true); return; }
+  openGroupTerm(gkey, t0);
 }
 // Cmd+T → create a task under a project (epic-less) or under an epic. Defaults: --manual (no auto
 // background agent — you drive it in the cockpit chat) + --no-jira (quick local task; link Jira later).
