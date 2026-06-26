@@ -277,6 +277,8 @@ h2 { margin:0; font-size:17px; font-weight:650; }
 .pal-title .hl { color:var(--accent); font-weight:700; }
 .pal-meta { flex:0 0 auto; color:var(--dim); font-size:11px; font-family:Menlo,monospace; max-width:230px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 .pal-empty { padding:14px; color:var(--dim); font-size:13px; }
+.pal-arch { flex:0 0 auto; font-size:10px; color:var(--dim); border:1px solid var(--border); border-radius:4px; padding:1px 5px; text-transform:uppercase; }
+.pal-row.arch .pal-title { color:var(--dim); }
 /* command palette rows + rebindable shortcut chip */
 .pal-row.cmd { gap:10px; }
 .cmd-label { flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-size:13.5px; color:var(--text); }

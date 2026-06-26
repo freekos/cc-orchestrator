@@ -47,7 +47,7 @@ const unseen=new Map();            // tid -> {title, pn, gkey, label, status, is
 function taskSig(t){ return t.status+"|"+(t.merged?1:0)+"|"+((t.repos||[]).filter(r=>r.mr).length)+"|"+(t.combined?1:0); }
 function taskLabel(t){ return t.merged ? "влито ✓" : (STATUS_LABEL[t.status]||t.status); }
 function computeUpdates(){
-  const flat=allTasksFlat(); const cur={};
+  const flat=activeTasksFlat(); const cur={};   // never badge archived tasks
   flat.forEach(x=>cur[x.t.tid]=taskSig(x.t));
   if(lastSig){
     for(const x of flat){ const tid=x.t.tid;
@@ -82,7 +82,7 @@ async function refreshTaskMr(tid, manual){
 let mrPollIdx=0;
 function pollMrs(){
   if(!STATE) return;
-  const cands=allTasksFlat().filter(x=>!x.t.merged && (x.t.repos||[]).some(r=>r.mr)).map(x=>x.t.tid);
+  const cands=activeTasksFlat().filter(x=>!x.t.merged && (x.t.repos||[]).some(r=>r.mr)).map(x=>x.t.tid);
   if(!cands.length) return;
   for(let k=0;k<2 && k<cands.length;k++) refreshTaskMr(cands[(mrPollIdx+k)%cands.length]);
   mrPollIdx=(mrPollIdx+2)%cands.length;
@@ -224,10 +224,10 @@ function renderTree(){
     const pk="proj:"+pn, pc=collapsed.has(pk);
     const loose=p.groups.find(g=>g.loose);
     const groupAct=g=>Math.max(0, ...(g.tasks||[]).map(t=>t.activity||0));   // group recency = its newest task
-    const realGroups=p.groups.filter(g=>!g.loose).sort((a,b)=>groupAct(b)-groupAct(a));
+    const realGroups=p.groups.filter(g=>!g.loose && !g.archived).sort((a,b)=>groupAct(b)-groupAct(a));   // archived groups → search only
     // task-based: standalone tasks aren't grouped — flat under the project, most-recently-touched first
-    const looseTasks=loose ? loose.tasks.slice().sort((a,b)=>(b.activity||0)-(a.activity||0)) : [];
-    const taskCount=p.groups.reduce((n,g)=>n+g.tasks.length,0);
+    const looseTasks=loose ? loose.tasks.filter(t=>!t.archived).slice().sort((a,b)=>(b.activity||0)-(a.activity||0)) : [];
+    const taskCount=p.groups.reduce((n,g)=> n + (g.archived?0:(g.tasks||[]).filter(t=>!t.archived).length), 0);
     const ph=el("div","proj");
     ph.append(folderIcon(!pc), el("span","p-name", pn));
     const pa=projectAlert(p);
@@ -251,21 +251,22 @@ function renderTree(){
     }
     // real groups below the standalone tasks
     for (const g of realGroups){
+      const gtasks=(g.tasks||[]).filter(t=>!t.archived);   // archived tasks → search only
       const gk="group:"+pn+"/"+g.key, gc=collapsed.has(gk);
       const gh=el("div","group"+(gc?" collapsed":""));
       gh.append(el("span","caret"), el("span","g-name", g.summary||g.key));
       const alert=groupAlert(g);
       if (alert) { const a=el("span","g-alert mark m-"+alert, MARK[alert]); a.title=STATUS_LABEL[alert]; gh.append(a); }
-      gh.append(el("span","cnt", String(g.tasks.length+g.ops.length)));
+      gh.append(el("span","cnt", String(gtasks.length+g.ops.length)));
       gh.onclick=()=>{ gc?collapsed.delete(gk):collapsed.add(gk); renderTree(); };
       gh.onmouseenter=()=>showGroupCard(g, gh); gh.onmouseleave=hideCard;
       tree.appendChild(gh);
       if (gc) continue;
       const items=el("div","items");
       const all=shownAll.has(gk);
-      (all?g.tasks:g.tasks.slice(0,MORE_LIMIT)).forEach(t=>items.appendChild(taskRow(t,pn,g.key)));
-      if (!all && g.tasks.length>MORE_LIMIT){
-        const more=el("div","more","ещё "+(g.tasks.length-MORE_LIMIT)+"…");
+      (all?gtasks:gtasks.slice(0,MORE_LIMIT)).forEach(t=>items.appendChild(taskRow(t,pn,g.key)));
+      if (!all && gtasks.length>MORE_LIMIT){
+        const more=el("div","more","ещё "+(gtasks.length-MORE_LIMIT)+"…");
         more.onclick=()=>{ shownAll.add(gk); renderTree(); };
         items.appendChild(more);
       }
@@ -719,6 +720,14 @@ function openMrModal(t, loose){
   foot.append(status, mk);
   box.append(hd, body, foot); ov.append(box); document.body.append(ov);
 }
+// mark a task done → soft archive; it leaves the board, so drop back to the home overview
+async function doneTask(t){
+  if(!confirm("Готово — убрать «"+t.title+"» в архив?\n\nJira→Done, worktrees снимаются. Ветку/MR/чаты не трогаем — задачу можно вернуть через поиск (↩ Вернуть).")) return;
+  const m=modal("⏳ убираю в архив …");
+  try{ m.body.textContent=(await invoke("run_cc",{args:["task","done",t.tid]})||"(готово)").trim(); }
+  catch(e){ m.body.textContent="✗ "+e; m.body.style.color="#f87171"; return; }
+  goHome(); load();
+}
 async function runAction(args, label, prod){
   if (!confirm((prod?"⚠ ПРОД-bound — пойдёт в master!\n\n":"")+"Выполнить:\n"+label+" ?")) return;
   const m=modal("⏳ "+label+" …");
@@ -730,14 +739,23 @@ function renderFacts(t){
   const f=$("facts"); f.innerHTML="";
   const g=curGroup(), loose=g&&g.loose;
   const cc=el("div"); cc.id="chatctx"; f.appendChild(cc); updateChatContext();   // "в этом чате" — skills/files/tools of the active chat
+  const tip=(b,s)=>{ b.title=s; return b; };
+  if(t.archived){   // archived task: only the way back
+    f.appendChild(el("div","sec","ЗАДАЧА · В АРХИВЕ"+(t.archived_at?" · "+t.archived_at:"")));
+    f.appendChild(el("div","row2 dim","Убрана с доски. Ветка/MR/чаты целы."));
+    const arow=el("div","row2 acts");
+    arow.append(tip(btn("↩ Вернуть из архива", ()=>runAction(["task","restore",t.tid],"вернуть "+t.tid+" из архива",false), "primary"), "Ре-материализовать worktrees из ветки и вернуть на доску"));
+    f.appendChild(arow);
+    return;   // no MR/diff/done actions for an archived task
+  }
   f.appendChild(el("div","sec","ЗАДАЧА"));
   const trow=el("div","row2 acts");
-  const tip=(b,s)=>{ b.title=s; return b; };
   trow.append(
     tip(btn("Создать MR", ()=>openMrModal(t, loose), "primary"), "Создать MR по изменённым репозиториям (с подтверждением и выбором Draft)"),
     tip(btn("Diff", ()=>openDiffTab(t), "ghost"), "Изменения задачи (git diff) по всем репозиториям"));
   if(t.dir) trow.append(tip(btn("Открыть в Cursor", ()=>openInCursor(t.dir), "ghost"), "Открыть папку задачи в Cursor"));
   if(t.dir) trow.append(tip(btn("Терминал", ()=>openTermTab(t), "ghost"), "Терминал в папке задачи — запускай репозитории на их ветках, смотри логи"));
+  trow.append(tip(btn("✓ Готово", ()=>doneTask(t), "ghost"), "Готово → убрать в архив (Jira→Done, worktrees снимаются; ветка/MR/чаты целы, вернуть можно через поиск)"));
   // memory folded into the action row: it's read-only and auto-filled from the chats, so it's just a view
   const memBtn=tip(btn("🧠 Память", ()=>openMemory(t), "ghost"),
                    "Память задачи: решения, направление, находки — копятся из чатов автоматически. Только просмотр.");
@@ -859,7 +877,7 @@ function openNewTask(presetProject){
     try{
       await invoke("run_cc",{args:["task","add", where.value, "--prompt", desc]});   // no --manual → bg agent; no --repos → all project repos
       ov.remove(); await load();
-      const fresh=allTasksFlat().sort((a,b)=>(b.t.activity||0)-(a.t.activity||0))[0];   // newest = the task we just created
+      const fresh=activeTasksFlat().sort((a,b)=>(b.t.activity||0)-(a.t.activity||0))[0];   // newest = the task we just created
       if(fresh) selectTask(fresh.t, fresh.pn, fresh.gkey);
     }catch(e){ status.textContent=""; runBtn.disabled=false; body.append(el("pre","nt-err","✗ "+e)); }
   };
@@ -922,9 +940,11 @@ function openSearch(){
   const render=()=>{
     list.innerHTML="";
     results.forEach((r,i)=>{
-      const row=el("div","pal-row"+(i===sel?" sel":""));
+      const arch=isArchived(r.x);
+      const row=el("div","pal-row"+(i===sel?" sel":"")+(arch?" arch":""));
       row.append(statusMark(r.x.t.status), el("span","hr-proj", r.x.pn));
       row.append(r.pos.length ? hlTitle(r.x.t.title, r.pos) : el("span","pal-title", r.x.t.title));
+      if(arch) row.append(el("span","pal-arch","архив"));
       if(r.x.t.branch) row.append(el("span","pal-meta", r.x.t.branch));
       const w=shortTime(r.x.t.activity); if(w) row.append(el("span","hr-when", w));
       row.onclick=()=>pick(i); row.onmouseenter=()=>{ sel=i; markSel(); };
@@ -1034,13 +1054,15 @@ function openCommandPalette(){
   refresh(); inp.focus();
 }
 // flatten every task across projects/groups, keeping its project + group for selectTask
-function allTasksFlat(){
+function allTasksFlat(){   // EVERYTHING incl. archived — used by search
   const out=[];
   for(const [pn,p] of Object.entries(STATE.projects||{}))
     for(const g of (p.groups||[]))
-      for(const t of (g.tasks||[])) out.push({t, pn, gkey:g.key});
+      for(const t of (g.tasks||[])) out.push({t, pn, gkey:g.key, garch:!!g.archived});
   return out;
 }
+function isArchived(x){ return !!(x.t.archived || x.garch); }   // archived task OR task in an archived group
+function activeTasksFlat(){ return allTasksFlat().filter(x=>!isArchived(x)); }   // board view (tree/home/what's-new)
 function homeRow(x){
   const r=el("div","home-row");
   r.append(statusMark(x.t.status), el("span","hr-proj", x.pn), el("span","hr-title", x.t.title));
@@ -1053,7 +1075,7 @@ const HOME_LIMIT=7; const homeExpanded=new Set();   // long sections collapse to
 function renderHome(){
   const h=$("home"); if(!h) return; h.innerHTML="";
   if(!STATE){ return; }
-  const all=allTasksFlat();
+  const all=activeTasksFlat();   // home triage = active board only
   h.append(el("div","home-title","cc — обзор"));
   const SECTIONS=[
     {label:"⚠ Ждут тебя",  cls:"wait",   match:t=>t.status==="needs_input"||t.status==="failed"},

@@ -17,7 +17,9 @@ struct PtyOut { id: String, data: Vec<u8> }
 #[tauri::command]
 fn get_state() -> Result<String, String> {
     let engine = std::env::var("CC_ENGINE").unwrap_or_else(|_| "cc".to_string());
-    let out = std::process::Command::new(&engine).args(["snapshot", "--json"]).output()
+    // --all: include archived epics/tasks (flagged). The cockpit hides them from the tree but
+    // makes them findable via search.
+    let out = std::process::Command::new(&engine).args(["snapshot", "--json", "--all"]).output()
         .map_err(|e| format!("cannot run engine '{}': {}", engine, e))?;
     if out.status.success() { Ok(String::from_utf8_lossy(&out.stdout).into_owned()) }
     else { Err(String::from_utf8_lossy(&out.stderr).into_owned()) }
