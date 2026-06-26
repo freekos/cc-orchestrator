@@ -68,6 +68,25 @@ function renderWhatsNew(){
   b.classList.toggle("alert", [...unseen.values()].some(u=>u.status==="needs_input"||u.status==="failed"));
   b.onclick=(e)=>{ e.stopPropagation(); toggleWhatsNew(b); };
 }
+// ---- network MR-state refresh: GitLab merge isn't local, so `task mrs` (network) must run to detect it ----
+const mrInflight=new Set();
+async function refreshTaskMr(tid, manual){
+  if(mrInflight.has(tid)) return; mrInflight.add(tid);
+  if(manual) setStatus("обновляю MR " + tid + " …");
+  try{ await invoke("run_cc",{args:["task","mrs",tid]}); if(manual) await load(); }   // writes state.json → watcher/poll refresh
+  catch(e){ if(manual) setStatus("✗ "+e, true); }
+  finally{ mrInflight.delete(tid); }
+}
+// bounded background poll: refresh MR state for tasks with OPEN MRs, a couple per cycle (round-robin),
+// so GitLab merges on ANY task surface — without hammering glab (≈2 calls / 90s).
+let mrPollIdx=0;
+function pollMrs(){
+  if(!STATE) return;
+  const cands=allTasksFlat().filter(x=>!x.t.merged && (x.t.repos||[]).some(r=>r.mr)).map(x=>x.t.tid);
+  if(!cands.length) return;
+  for(let k=0;k<2 && k<cands.length;k++) refreshTaskMr(cands[(mrPollIdx+k)%cands.length]);
+  mrPollIdx=(mrPollIdx+2)%cands.length;
+}
 function toggleWhatsNew(anchor){
   const old=$("wnpanel"); if(old){ old.remove(); return; }
   const p=el("div"); p.id="wnpanel";
@@ -266,6 +285,7 @@ function selectTask(t, pn, gkey){
   collapsed.delete("proj:"+pn); collapsed.delete("group:"+pn+"/"+gkey);   // reveal the selected task's path
   centerMode(false);
   renderTree(); renderFacts(t); showTaskChats(t);
+  if(!t.merged && (t.repos||[]).some(r=>r.mr)) refreshTaskMr(t.tid);   // freshen the focused task's MR state
 }
 function showTaskChats(t){          // bring this task's tabs to the front; open a default chat if it has none
   if(!t){ renderTabbar(); return; }
@@ -729,7 +749,10 @@ function renderFacts(t){
   f.appendChild(el("div","sec","репозитории → ветка-цель"));
   for(const r of t.repos){ const row=el("div","row2"); row.append(el("span","k", r.repo+" → "+r.base)); if(r.mr){ const a=el("a","lnk"," MR ↗"); a.onclick=()=>openExt(r.mr); row.append(a); } f.appendChild(row); }
   const mrs=t.repos.filter(r=>r.mr);
-  f.appendChild(el("div","row2 dim","MR: "+mrs.length+"/"+t.repos.length+(t.merged?"   ✅ влито":"")+(t.combined?"   ⊕ в общей ветке":"")));
+  const mrRow=el("div","row2 dim");
+  mrRow.append(el("span",null,"MR: "+mrs.length+"/"+t.repos.length+(t.merged?"   ✅ влито":"")+(t.combined?"   ⊕ в общей ветке":"")));
+  if(mrs.length && !t.merged){ const rb=btn("↻", ()=>refreshTaskMr(t.tid, true), "mini"); rb.title="Обновить статус MR из GitLab"; mrRow.append(rb); }
+  f.appendChild(mrRow);
   // group + release actions — advanced, collapsed by default (rarely needed day-to-day, some hit prod)
   const gopen = localStorage.getItem("cc_group_open")==="1";
   const ghead=el("div","sec sec-toggle"); ghead.append(el("span","sec-caret", gopen?"▾":"▸"), el("span",null,"ГРУППА · РЕЛИЗ"+(SEL&&SEL.g?" — "+SEL.g:"")));
@@ -1089,4 +1112,5 @@ window.addEventListener("DOMContentLoaded", ()=>{ setupCenter(); setupResizers()
   window.addEventListener("resize", ()=>{ if(active && active.refit) active.refit(); });   // keep the terminal fitted
   let loading=false; const reload=async()=>{ if(loading) return; loading=true; try{ await load(); } finally{ loading=false; } };
   try{ invoke("watch_state"); listen("state-changed", reload); }catch(e){}   // realtime: refresh the moment cc writes state
-  load(); setInterval(reload, 10000); });   // slow safety poll (worktree-activity recency doesn't touch state.json)
+  load(); setInterval(reload, 10000);   // slow safety poll (worktree-activity recency doesn't touch state.json)
+  setInterval(pollMrs, 90000); });      // bounded network MR-state poll → catch GitLab merges on any task
