@@ -181,6 +181,12 @@ h2 { margin:0; font-size:17px; font-weight:650; }
 .diff-line.add { background:rgba(52,211,153,.10); } .diff-line.add .diff-code { color:#9ff0cf; }
 .diff-line.del { background:rgba(248,113,113,.10); } .diff-line.del .diff-code { color:#f6b6b6; }
 .diff-line.ctx .diff-code { color:#b9b9c2; }
+/* ---- terminal tab (PTY + xterm) ---- */
+.tab-pane.term { display:flex; flex-direction:column; padding:0; }
+.term-bar { display:flex; align-items:center; gap:10px; padding:8px 12px; border-bottom:1px solid var(--border); background:var(--panel2); }
+.term-hint { color:var(--dim); font-size:11.5px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.term-host { flex:1; min-height:0; padding:6px 8px; overflow:hidden; }
+.term-host .xterm { height:100%; }
 /* ---- markdown chat (headless engine, rendered conversation) ---- */
 .tab-pane.chat { display:flex; flex-direction:column; padding:0; }
 .chat-msgs { flex:1; overflow-y:auto; padding:18px 22px; display:flex; flex-direction:column; gap:14px; }
