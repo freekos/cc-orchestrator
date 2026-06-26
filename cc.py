@@ -1725,8 +1725,9 @@ def cmd_task_abort(args):
 
 
 def cmd_task_done(args):
-    """Готово и убрать с доски: Jira(task)->Done, snap local worktrees, drop the task from cc.
-    Remote MR/branch are left intact (merged work stays). Refuses if uncommitted, unless --force."""
+    """Готово → мягкий АРХИВ (обратимо): Jira(task)->Done, снять worktrees (диск), убрать с доски,
+    но СОХРАНИТЬ запись (флаг archived) + ветку/MR/чаты. `cc task restore` возвращает.
+    Refuses if uncommitted, unless --force."""
     s = load_state()
     t = s["tasks"].get(args.task) or die("unknown task '%s'" % args.task)
     proj = s["projects"][s["epics"][t["epic"]]["project"]]
@@ -1756,9 +1757,44 @@ def cmd_task_done(args):
     if task_dir and task_dir.exists():
         shutil.rmtree(task_dir, ignore_errors=True)
         print("removed task dir: %s" % task_dir)
-    s["tasks"].pop(args.task, None)
+    # SOFT ARCHIVE (reversible): keep the task entry + branch/MR/chats; just flag it off the board.
+    # Worktree dirs are freed (above); restore re-materializes them from the branch.
+    t["archived"] = True
+    t["archived_at"] = time.strftime("%Y-%m-%d %H:%M")
+    t.pop("pid", None); t.pop("combined", None)
+    s["tasks"][args.task] = t
     save_state(s)
-    print("task %s готово и убрано с доски (Jira->Done; remote MR/ветка не тронуты)." % args.task)
+    print("task %s → архив (Jira->Done; ветка/MR/чаты целы). Вернуть: cc task restore %s" % (args.task, args.task))
+
+def cmd_task_restore(args):
+    """Вернуть задачу из архива: ре-материализовать worktrees из её (существующей) ветки + снять флаг.
+    Ветка/MR/чаты уже на месте — восстанавливаем только рабочие копии и запись на доске."""
+    s = load_state()
+    t = s["tasks"].get(args.task) or die("unknown task '%s'" % args.task)
+    if not t.get("archived"):
+        die("task %s не в архиве" % args.task)
+    proj = s["projects"][s["epics"][t["epic"]]["project"]]
+    branch = t.get("branch", "")
+    restored, missing = [], []
+    for r in t.get("repos", []):
+        rp = proj["repos"].get(r, {}).get("path")
+        wt = (t.get("worktrees") or {}).get(r)
+        if not (rp and wt):
+            continue
+        if not have_ref(rp, branch):                 # branch gone (e.g. deleted after release) → can't restore that repo
+            missing.append(r); continue
+        Path(wt).parent.mkdir(parents=True, exist_ok=True)
+        run(["git", "worktree", "prune"], cwd=rp, check=False)
+        run(["git", "worktree", "add", wt, branch], cwd=rp, check=False)
+        restored.append(r)
+    t.pop("archived", None); t.pop("archived_at", None)
+    if t.get("worktrees"):
+        t["dir"] = str(Path(next(iter(t["worktrees"].values()))).parent)
+    save_state(s)
+    write_task_claude_md(s, args.task)   # refresh the agent's rules file in the restored worktree
+    print("task %s возвращена из архива — worktrees: %s%s" % (
+        args.task, ", ".join(restored) or "—",
+        ("  ⚠️ ветка отсутствует у: " + ", ".join(missing)) if missing else ""))
 
 _GH_STATE = {"OPEN": "opened", "MERGED": "merged", "CLOSED": "closed"}   # gh PR state -> glab MR vocab
 
@@ -3458,7 +3494,9 @@ def build_parser():
     sub.add_parser("orphans").set_defaults(fn=cmd_orphans)
     sub.add_parser("recover").set_defaults(fn=cmd_recover)
     a = sub.add_parser("doctor"); a.add_argument("--restore", action="store_true"); a.set_defaults(fn=cmd_doctor)
-    a = sub.add_parser("snapshot"); a.add_argument("--json", action="store_true"); a.set_defaults(fn=cmd_snapshot)
+    a = sub.add_parser("snapshot"); a.add_argument("--json", action="store_true")
+    a.add_argument("--all", action="store_true", help="include archived epics/tasks (flagged) — for search")
+    a.set_defaults(fn=cmd_snapshot)
     a = sub.add_parser("log"); a.add_argument("--task"); a.add_argument("--epic"); a.add_argument("--action")
     a.add_argument("--today", action="store_true"); a.add_argument("-n", type=int, default=200)
     a.set_defaults(fn=cmd_log)
@@ -3552,6 +3590,7 @@ def build_parser():
     a = tk.add_parser("mrs"); a.add_argument("task"); a.set_defaults(fn=cmd_task_mrs)
     a = tk.add_parser("merge"); a.add_argument("task"); a.add_argument("--dry-run", action="store_true"); a.add_argument("--squash", action="store_true"); a.set_defaults(fn=cmd_task_merge)
     a = tk.add_parser("abort"); a.add_argument("task"); a.set_defaults(fn=cmd_task_abort)
+    a = tk.add_parser("restore"); a.add_argument("task"); a.set_defaults(fn=cmd_task_restore)   # un-archive + re-materialize worktrees
     return p
 
 # commands that only read state -> no lock; everything else mutates -> serialize
@@ -3812,8 +3851,9 @@ def cmd_snapshot(args):
     s = load_state()
     act_map = _audit_activity()
     out = {"projects": {}}
+    inc_arch = getattr(args, "all", False)   # --all also returns archived epics/tasks (flagged) — for search
     for pn, p in s["projects"].items():
-        keys = [k for k, e in s["epics"].items() if e.get("project") == pn and not e.get("archived")]
+        keys = [k for k, e in s["epics"].items() if e.get("project") == pn and (inc_arch or not e.get("archived"))]
         keys.sort(key=lambda k: (bool(s["epics"][k].get("loose")), k))   # real groups first, loose last
         groups = []
         for k in keys:
@@ -3823,9 +3863,13 @@ def cmd_snapshot(args):
             for tid, t in s["tasks"].items():
                 if t.get("epic") != k:
                     continue
+                if t.get("archived") and not inc_arch:   # done → archived: off the board, found via search
+                    continue
                 tasks.append({
                     "tid": tid, "title": t.get("title", tid), "status": _snap_task_status(t),
                     "branch": t.get("branch", ""), "merged": bool(t.get("merged")),
+                    "archived": bool(t.get("archived")), "archived_at": t.get("archived_at") or None,
+                    "prompt": (t.get("prompt") or "")[:280],   # short description — for content search
                     "combined": tid in combset,            # included in the group's combined branch
                     "activity": _task_activity(tid, t, act_map),   # last interaction (sort key)
                     "has_memory": task_memory_path(tid).exists(),  # shared task memory written?
@@ -3841,6 +3885,7 @@ def cmd_snapshot(args):
                 continue                                   # hide an empty loose container
             combined = [tid for tid in (e.get("combined") or []) if tid in s["tasks"]]
             groups.append({"key": k, "summary": e.get("summary", ""), "loose": bool(e.get("loose")),
+                           "archived": bool(e.get("archived")),
                            "tasks": tasks, "ops": ops,
                            "combined": combined, "combined_branch": combined_branch(k)})
         out["projects"][pn] = {"kind": p.get("kind", "—"),

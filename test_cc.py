@@ -783,6 +783,41 @@ def test_task_memory():
         shutil.rmtree(d, ignore_errors=True)
 
 
+def test_snapshot_archived():
+    # soft archive: an archived task is OFF the board by default, but returned (flagged) with --all for search.
+    import json, io, contextlib
+    s = {"projects": {"P": {"kind": "single", "repos": {"web": {}}}},
+         "epics": {"E1": {"project": "P", "summary": "e1"},
+                   "E2": {"project": "P", "summary": "e2", "archived": True}},
+         "tasks": {"t1": {"epic": "E1", "title": "Live", "status": "mr", "branch": "b", "repos": ["web"], "base": {"web": "main"}},
+                   "t2": {"epic": "E1", "title": "Done", "status": "done", "branch": "b2", "repos": ["web"], "base": {"web": "main"},
+                          "archived": True, "archived_at": "2026-06-26 10:00"},
+                   "t3": {"epic": "E2", "title": "InArchEpic", "status": "done", "branch": "b3", "repos": ["web"], "base": {"web": "main"}}}}
+    saved = cc.load_state; cc.load_state = lambda: s
+    try:
+        def snap(all_):
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                cc.cmd_snapshot(types.SimpleNamespace(json=True, all=all_))
+            return json.loads(buf.getvalue())
+        # default: archived task t2 hidden, archived epic E2 hidden entirely
+        d = snap(False); groups = d["projects"]["P"]["groups"]
+        e1 = [x for x in groups if x["key"] == "E1"][0]
+        assert [t["tid"] for t in e1["tasks"]] == ["t1"], "archived task hidden by default"
+        assert not any(x["key"] == "E2" for x in groups), "archived epic hidden by default"
+        # --all: archived task + epic returned, flagged
+        d2 = snap(True); groups2 = d2["projects"]["P"]["groups"]
+        e1b = [x for x in groups2 if x["key"] == "E1"][0]
+        t2 = [t for t in e1b["tasks"] if t["tid"] == "t2"][0]
+        assert t2["archived"] is True and t2["archived_at"] == "2026-06-26 10:00"
+        e2 = [x for x in groups2 if x["key"] == "E2"][0]
+        assert e2["archived"] is True and any(t["tid"] == "t3" for t in e2["tasks"])
+        # live task carries archived=False (contract present for the cockpit filter)
+        assert [t for t in e1["tasks"] if t["tid"] == "t1"][0]["archived"] is False
+    finally:
+        cc.load_state = saved
+
+
 def test_task_sessions_history():
     # recover old cc TUI chats: scan ALL the task's worktrees (primary often mislabels the repo),
     # mark cc's service one-shots, sort newest-first; history strips cc's injected preamble and
