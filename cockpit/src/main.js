@@ -36,7 +36,8 @@ async function load(){
     STATE = JSON.parse(await invoke("get_state"));
     computeUpdates();   // diff vs last snapshot → "what's new" feed (before renderTree so tree dots show)
     renderTree();
-    if(centerView==="ops" || centerView==="scopechat"){ /* transient full-screen view — don't clobber it on the poll */ }
+    if(centerView==="scopechat"){ /* a live chat — don't clobber it */ }
+    else if(centerView==="ops"){ renderOps(false); }   // refresh running-ops/history live; keep cached deploys (no network)
     else { const t=findTask();
       if(t) renderFacts(t);                 // a task is open → refresh its facts (never disturb open chats)
       else if(SEL && SEL.g && SEL.tid===null && groupOf(SEL.p, SEL.g)){   // a group is selected → its dashboard
@@ -864,19 +865,46 @@ function goHome(){            // clicking the cc logo deselects → back to the 
 // ---- global OPS console (view): where each repo is deployed (dev/stage/prod) + the shipping history ----
 const OPS_SHIP=new Set(["ops.start","group.mr","group.merge","task.merge"]);   // "shipping" actions for the history feed
 const OPS_LABEL={ "ops.start":"тест/деплой запущен", "group.mr":"релиз: MR в master", "group.merge":"влиты задачи группы", "task.merge":"влита задача" };
-function openOps(){ SEL=null; hideCard(); centerMode("ops"); renderOps(); }
-async function renderOps(){
+function openOps(){ SEL=null; hideCard(); centerMode("ops"); renderOps(true); }   // first open → fetch deploys
+let opsDeployCache=null;   // deploy state is network — fetch on open/↻, reuse on the poll
+async function renderOps(refetchDeploys){
   const v=$("opsview"); if(!v) return; v.innerHTML="";
   const head=el("div","ops-head");
-  head.append(el("div","ops-title","Операции — где что залито + история"),
-              btn("↻ Обновить деплои", ()=>renderOps(), "ghost"));
+  head.append(el("div","ops-title","Операции"), btn("↻ Обновить", ()=>renderOps(true), "ghost"));
   v.append(head);
-  // history first (fast: local audit)
-  v.append(el("div","ops-sec","История (деплои · релизы · мёржи)"));
+  const tip=(b,s)=>{ b.title=s; return b; };
+  // 1) running / recent ops (LOCAL, from snapshot) — facts-based ✓/✗; refreshes on the poll
+  const running=[];
+  for(const [pn,p] of Object.entries((STATE&&STATE.projects)||{})) for(const g of (p.groups||[])) for(const o of (g.ops||[]))
+    running.push({gsum:g.summary||g.key, o});
+  if(running.length){
+    v.append(el("div","ops-sec","Операции — запущено / недавние"));
+    running.sort((a,b)=> (a.o.status==="running"?0:1)-(b.o.status==="running"?0:1));
+    running.slice(0,8).forEach(x=>{ const row=el("div","ops-orow");
+      row.append(statusMark(x.o.status), el("span","ops-ok", x.o.kind), el("span","ops-og", x.gsum));
+      const ci=(x.o.ci||[]).map(p=>p.status).filter(Boolean).join(", "); if(ci) row.append(el("span","ops-oci","CI: "+ci));
+      v.append(row); });
+  }
+  // 2) ACT — trigger Test / Stage / Release per feature, from one place (confirmation-gated)
+  v.append(el("div","ops-sec","Запустить по фиче"));
+  const trig=el("div","ops-trig"); let any=false;
+  for(const [pn,p] of Object.entries((STATE&&STATE.projects)||{})) for(const g of (p.groups||[])){
+    if(g.loose||g.archived) continue; const active=(g.tasks||[]).filter(t=>!t.archived); if(!active.length) continue; any=true;
+    const row=el("div","ops-trow");
+    row.append(el("span","ops-tg", g.summary||g.key), el("span","ops-tgp", pn));
+    row.append(tip(btn("Тест", ()=>runAction(["group","ops",g.key,"--kind","test"],"тест по фиче "+(g.summary||g.key),false), "ghost"), "Прогнать тесты по фиче"),
+               tip(btn("Stage", ()=>runAction(["group","ops",g.key,"--kind","stage"],"stage-деплой фичи "+(g.summary||g.key),false), "ghost"), "Задеплоить фичу на stage"),
+               tip(btn("Релиз", ()=>runAction(["group","mr",g.key],"РЕЛИЗ: MR в master "+(g.summary||g.key),true), "warn"), "Релизный MR фичи в master (прод!)"));
+    trig.append(row);
+  }
+  if(!any) trig.append(el("div","dim","нет активных фич"));
+  v.append(trig);
+  // 3) history (cheap: local audit)
+  v.append(el("div","ops-sec","История (релизы · деплои · мёржи)"));
   const hist=el("div","ops-hist"); hist.append(el("div","dim","загрузка…")); v.append(hist);
-  // deploy state (slow: network glab/EAS)
+  // 4) where it's deployed (network: glab/EAS) — cached
   v.append(el("div","ops-sec","Где что залито (dev · stage · prod)"));
-  const dep=el("div","ops-dep"); dep.append(el("div","dim","опрашиваю glab/EAS… (это сетевой запрос)")); v.append(dep);
+  const dep=el("div","ops-dep"); v.append(dep);
   try{ const recs=JSON.parse((await invoke("run_cc",{args:["log","--json","-n","60"]}))||"[]").filter(r=>OPS_SHIP.has(r.action));
     if($("opsview")!==v) return; hist.innerHTML="";
     if(!recs.length) hist.append(el("div","dim","пока нет записей о деплоях/релизах"));
@@ -886,20 +914,25 @@ async function renderOps(){
       const who=r.epic||r.task||r.project||""; if(who) row.append(el("span","ops-hw", who));
       const ex=[r.kind,r.repo,r.base].filter(Boolean).join(" · "); if(ex) row.append(el("span","ops-he", ex));
       hist.append(row); });
-  }catch(e){ hist.innerHTML=""; hist.append(el("div","dim","✗ история: "+e)); }
-  try{ const dd=JSON.parse((await invoke("run_cc",{args:["deploys","--all","--json"]}))||"[]");
-    if($("opsview")!==v) return; dep.innerHTML="";
-    const byProj={}; dd.forEach(x=>{ (byProj[x.project]=byProj[x.project]||[]).push(x); });
-    if(!Object.keys(byProj).length) dep.append(el("div","dim","нет данных о деплоях"));
-    for(const [pn,rows] of Object.entries(byProj)){
-      dep.append(el("div","ops-proj", pn));
-      rows.forEach(x=>{ const row=el("div","ops-drow"); row.append(el("span","ops-repo", x.repo));
-        if(x.kind==="eas"){ const ch=x.channels||{};
-          row.append(envChip("staging", ch.staging), envChip("prod", ch.production)); }
-        else { const e=x.envs||{}; ["dev","stage","prod"].forEach(k=> row.append(envChip(k, e[k]?(e[k].ref+"@"+e[k].sha):null))); }
-        dep.append(row); });
-    }
-  }catch(e){ dep.innerHTML=""; dep.append(el("div","dim","✗ деплои: "+e)); }
+  }catch(e){ if($("opsview")===v){ hist.innerHTML=""; hist.append(el("div","dim","✗ история: "+e)); } }
+  if(refetchDeploys || !opsDeployCache){ dep.append(el("div","dim","опрашиваю glab/EAS… (сетевой запрос)"));
+    try{ opsDeployCache=JSON.parse((await invoke("run_cc",{args:["deploys","--all","--json"]}))||"[]"); }
+    catch(e){ if($("opsview")===v){ dep.innerHTML=""; dep.append(el("div","dim","✗ деплои: "+e)); } return; }
+  }
+  if($("opsview")!==v) return;
+  renderDeployTable(dep, opsDeployCache||[]);
+}
+function renderDeployTable(dep, dd){
+  dep.innerHTML="";
+  const byProj={}; dd.forEach(x=>{ (byProj[x.project]=byProj[x.project]||[]).push(x); });
+  if(!Object.keys(byProj).length){ dep.append(el("div","dim","нет данных о деплоях (↻ Обновить)")); return; }
+  for(const [pn,rows] of Object.entries(byProj)){
+    dep.append(el("div","ops-proj", pn));
+    rows.forEach(x=>{ const row=el("div","ops-drow"); row.append(el("span","ops-repo", x.repo));
+      if(x.kind==="eas"){ const ch=x.channels||{}; row.append(envChip("staging", ch.staging), envChip("prod", ch.production)); }
+      else { const e=x.envs||{}; ["dev","stage","prod"].forEach(k=> row.append(envChip(k, e[k]?(e[k].ref+"@"+e[k].sha):null))); }
+      dep.append(row); });
+  }
 }
 function envChip(env, val){ const c=el("span","ops-env env-"+env);
   c.append(el("span","ops-envk", env), el("span","ops-envv", val||"—")); return c; }
