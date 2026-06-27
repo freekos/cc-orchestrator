@@ -3888,7 +3888,7 @@ def cmd_snapshot(args):
                            "archived": bool(e.get("archived")),
                            "tasks": tasks, "ops": ops,
                            "combined": combined, "combined_branch": combined_branch(k)})
-        out["projects"][pn] = {"kind": p.get("kind", "—"),
+        out["projects"][pn] = {"kind": p.get("kind", "—"), "path": p.get("path", ""),
                                "repos": list((p.get("repos") or {}).keys()), "groups": groups}
     print(json.dumps(out, ensure_ascii=False, indent=2))
 

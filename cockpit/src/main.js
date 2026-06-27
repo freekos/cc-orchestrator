@@ -234,7 +234,9 @@ function renderTree(){
     ph.append(folderIcon(!pc), el("span","p-name", pn));
     const pa=projectAlert(p);
     if (pa) { const a=el("span","g-alert mark m-"+pa, MARK[pa]); a.title=STATUS_LABEL[pa]; ph.append(a); }
-    ph.append(el("span","cnt", String(taskCount)));
+    const pchat=el("span","p-chat","💬"); pchat.title="Чат про проект (общая картина)";
+    pchat.onclick=(e)=>{ e.stopPropagation(); openProjectChat(pn); };
+    ph.append(pchat, el("span","cnt", String(taskCount)));
     ph.onclick=()=>{ pc?collapsed.delete(pk):collapsed.add(pk); renderTree(); };
     tree.appendChild(ph);
     if (pc) continue;
@@ -417,9 +419,13 @@ async function chatTurn(tab, prompt, display){
 async function sendChat(tab, text){
   let ctx="";
   if(!tab.injectedMem && !tab.session){
-    let mem=""; try{ mem=((await invoke("run_cc",{args:["task","memory",tab.taskId]}))||"").trim(); }catch(_){}
-    const hasMem = mem && /\S/.test(mem.replace(/^#.*$/gm,"").replace(/^##.*$/gm,"").trim());
-    if(hasMem) ctx+="Память задачи (общий контекст всех чатов):\n"+mem+"\n\n";
+    if(tab.firstContext){                         // scoped chat (feature/project): inject its context, no task-memory
+      ctx += tab.firstContext + "\n\n";
+    } else {
+      let mem=""; try{ mem=((await invoke("run_cc",{args:["task","memory",tab.taskId]}))||"").trim(); }catch(_){}
+      const hasMem = mem && /\S/.test(mem.replace(/^#.*$/gm,"").replace(/^##.*$/gm,"").trim());
+      if(hasMem) ctx+="Память задачи (общий контекст всех чатов):\n"+mem+"\n\n";
+    }
     tab.injectedMem=true;
   }
   if(tab.carry){                                  // engine just changed → the new session has no native context
@@ -427,7 +433,7 @@ async function sendChat(tab, text){
     if(dig) ctx+="Контекст прошлого разговора (был другой движок), продолжаем здесь:\n"+dig+"\n\n";
     tab.carry=false;
   }
-  if(!tab.toldMemory){   // teach the agent to self-record into the shared task memory (cockpit harvests the markers)
+  if(!tab.toldMemory && !tab.firstContext){   // task chats only: teach the agent to self-record into task memory
     ctx+="[cc] У задачи есть общая память для всех её чатов и репозиториев. Когда примешь важное решение, найдёшь ключевой факт или сменишь направление — добавь В КОНЦЕ ответа ОТДЕЛЬНОЙ строкой одно из: `cc-memory log: <кратко>` (событие/находка), `cc-memory current: <кратко>` (текущее направление), `cc-memory pivot: <кратко>` (разворот). Помечай так ТОЛЬКО эти строки, не обычный текст.\n\n";
     tab.toldMemory=true;
   }
@@ -832,6 +838,7 @@ function setupCenter(){
   const c=$("center"); c.innerHTML="";
   const home=el("div"); home.id="home"; c.append(home);            // triage home (no selection)
   const gv=el("div"); gv.id="groupview"; gv.style.display="none"; c.append(gv);   // group dashboard (group selected)
+  const sc=el("div"); sc.id="scopechat"; sc.style.display="none"; c.append(sc);   // feature/project "ask" chat
   const bar=el("div","tabbar"); bar.id="tabbar"; bar.style.display="none"; c.append(bar);
   const body=el("div","tabbody"); body.id="tabbody"; c.append(body);
   const f=$("facts"); f.innerHTML=""; f.append(el("div","empty","выбери задачу — здесь появятся MR, ветки и действия"));
@@ -840,7 +847,7 @@ function setupCenter(){
 function centerMode(mode){
   if(mode===true) mode="home"; if(mode===false) mode="work";   // back-compat with the old boolean calls
   const set=(id,on)=>{ const e=$(id); if(e) e.style.display=on?"":"none"; };
-  set("home", mode==="home"); set("groupview", mode==="group"); set("tabbody", mode==="work");
+  set("home", mode==="home"); set("groupview", mode==="group"); set("scopechat", mode==="scopechat"); set("tabbody", mode==="work");
   if(mode!=="work"){ const bar=$("tabbar"); if(bar) bar.style.display="none"; }
   $("app").classList.toggle("no-task", mode==="home");   // facts hidden only on home (group/work show it)
 }
@@ -877,7 +884,10 @@ function renderGroupView(pn, gkey){
               el("span",null,"·"), el("span",null, active.length+" задач"));
   if((g.combined||[]).length) sub.append(el("span",null,"·"), el("span","gv-comb","⊕ собрано "+(g.combined||[]).length));
   v.append(sub);
-  v.append(el("div","gv-next", groupNextStep(g, active)));
+  const nx=el("div","gv-nextrow");
+  const fb=btn("💬 Чат фичи", ()=>openFeatureChat(pn,gkey), "ghost"); fb.title="Чат про состояние фичи (агент знает её задачи и combined)";
+  nx.append(el("div","gv-next", groupNextStep(g, active)), fb);
+  v.append(nx);
   const SECTIONS=[
     {label:"🔵 В работе", match:t=>t.status==="running"},
     {label:"🟡 На ревью", match:t=>t.status==="mr"||t.status==="review"},
@@ -926,6 +936,78 @@ async function openGroupTermByKey(pn, gkey){   // group terminal needs an owner 
   const g=groupOf(pn,gkey); const t0=(g.tasks||[]).find(t=>!t.archived);
   if(!t0){ setStatus("в фиче нет активных задач для терминала", true); return; }
   openGroupTerm(gkey, t0);
+}
+// ---- scoped "ask" chat: a chat ABOUT a feature or a project (context-seeded, no task) ----
+const scopeSess={};   // remember the session per scope key so re-opening continues the conversation
+function statusWord(t){ return t.merged?"влито ✓":(STATUS_LABEL[t.status]||t.status); }
+async function featureContext(pn, gkey){
+  const g=groupOf(pn,gkey); if(!g) return {cwd:"", text:""};
+  const active=(g.tasks||[]).filter(t=>!t.archived);
+  let mem=""; try{ mem=((await invoke("run_cc",{args:["epic","memory",gkey]}))||"").trim(); }catch(_){}
+  const lines=active.map(t=>"- "+t.title+" — "+statusWord(t)+((t.combined)?" · в combined":"")+(t.branch?"  ["+t.branch+"]":""));
+  const cn=(g.combined||[]).length;
+  const text="Это чат ПРО ФИЧУ (не про код одной задачи). Отвечай про её состояние/прогресс, что осталось, "
+    +"помоги собрать/протестить/релизнуть. Сам код правится в задачах — новые правки = новые задачи в фиче.\n\n"
+    +"Фича: "+(g.summary||gkey)+"  ("+gkey+", проект "+pn+")\n"
+    +"Задачи ("+active.length+"):\n"+(lines.join("\n")||"—")+"\n"
+    +"Combined: "+(cn?(cn+" задач → "+g.combined_branch):"пусто")+"\n"
+    +(mem && /(?!^#)\S/.test(mem.replace(/^#.*$/gm,"").trim()) ? ("\nЦель/память фичи:\n"+mem+"\n") : "");
+  const t0=active[0];
+  const p=STATE.projects[pn]||{};
+  return {cwd: (t0&&t0.dir) || p.path || "", text};
+}
+function projectContext(pn){
+  const p=STATE.projects[pn]||{};
+  const parts=[];
+  for(const g of (p.groups||[]).filter(g=>!g.archived)){
+    const active=(g.tasks||[]).filter(t=>!t.archived); if(!active.length) continue;
+    if(g.loose){ active.forEach(t=>parts.push("- "+t.title+" — "+statusWord(t))); }
+    else { parts.push("• ["+(g.summary||g.key)+" / "+g.key+"]  "+active.length+" задач: "+active.map(statusWord).join(", ")); }
+  }
+  const text="Это чат ПРО ПРОЕКТ "+pn+" — общая картина: какие фичи и задачи, что в каком состоянии, помоги "
+    +"сориентироваться и оркестрировать. Конкретный код — в задачах.\n\nКартина проекта:\n"+(parts.join("\n")||"—");
+  return {cwd: p.path || "", text};
+}
+function openScopedChat(opts){   // opts: {key, title, cwd, firstContext, backFn}
+  if(!opts.cwd){ setStatus("нет рабочей папки для чата — нужна хотя бы одна задача/путь проекта", true); return; }
+  centerMode("scopechat");
+  const host=$("scopechat"); host.innerHTML="";
+  const headbar=el("div","sc-head");
+  headbar.append(btn("←", ()=>{ opts.backFn&&opts.backFn(); }, "ghost"), el("span","sc-title", opts.title));
+  const pane=el("div","tab-pane chat sc-pane");
+  const list=el("div","chat-msgs"); const composer=el("div","chat-composer");
+  const inp=el("textarea","chat-inp"); inp.placeholder="Спроси про "+opts.scope+"…  (Enter — отправить)"; inp.rows=1;
+  const bar=el("div","composer-bar"); const send=btn("▶", ()=>tab.send(), "send");
+  bar.append(el("span","cb-gap"), send); composer.append(inp, bar);
+  pane.append(list, composer); host.append(headbar, pane);
+  const id="scope-"+(++seq);
+  const tab={ type:"chat", engine, dir:opts.cwd, id, msgs:[], session: scopeSess[opts.key]||null,
+              firstContext:opts.firstContext, injectedMem: !!scopeSess[opts.key], busy:false, dirs:[] };
+  tab.render=()=>{ list.innerHTML=""; for(const m of tab.msgs){
+      const d=el("div","msg "+m.role);
+      if(m.role==="assistant"){ d.innerHTML = m.text ? mdRender(m.text) : (m.busy?'<span class="typing">…</span>':""); }
+      else if(m.role==="tool"){ d.textContent="▸ "+m.text; } else { d.textContent=m.text; }
+      list.appendChild(d); }
+    if(!tab.msgs.length) list.appendChild(el("div","chat-hint", opts.hint||"Спроси о состоянии — агент знает контекст."));
+    list.scrollTop=list.scrollHeight; };
+  tab.send=async()=>{ const v=inp.value.trim(); if(!v||tab.busy) return; inp.value=""; inp.style.height="auto"; await sendChat(tab, v); };
+  inp.onkeydown=(e)=>{ if(e.key==="Enter"&&!e.shiftKey){ e.preventDefault(); tab.send(); } };
+  inp.oninput=()=>{ inp.style.height="auto"; inp.style.height=Math.min(160, inp.scrollHeight)+"px"; };
+  const un=listen("chat-event",(e)=>{ if(e.payload && e.payload.id===id) handleChatEvent(tab, e.payload.line); });
+  const ud=listen("chat-done",(e)=>{ if(e.payload && e.payload.id===id){ const last=tab.msgs[tab.msgs.length-1]; if(last&&last.busy) last.busy=false; tab.busy=false; tab.render(); if(tab.session) scopeSess[opts.key]=tab.session; } });
+  tab.render(); inp.focus();
+}
+async function openFeatureChat(pn, gkey){
+  const c=await featureContext(pn,gkey); const g=groupOf(pn,gkey);
+  openScopedChat({ key:"g:"+gkey, scope:"фичу", title:"💬 "+(g?(g.summary||gkey):gkey), cwd:c.cwd, firstContext:c.text,
+                   hint:"Спроси про фичу: что готово, что осталось, собери/протестируй/релизни.",
+                   backFn:()=>selectGroup(pn, gkey) });
+}
+function openProjectChat(pn){
+  const c=projectContext(pn);
+  openScopedChat({ key:"p:"+pn, scope:"проект", title:"💬 Проект "+pn, cwd:c.cwd, firstContext:c.text,
+                   hint:"Спроси про проект: что где, что катить, общая картина.",
+                   backFn:()=>goHome() });
 }
 // Cmd+T → create a task under a project (epic-less) or under an epic. Defaults: --manual (no auto
 // background agent — you drive it in the cockpit chat) + --no-jira (quick local task; link Jira later).

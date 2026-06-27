@@ -282,6 +282,16 @@ h2 { margin:0; font-size:17px; font-weight:650; }
 .gv-arch { margin-top:14px; color:var(--dim); font-size:12px; }
 .gv-hint { margin-top:10px; color:var(--dim); font-size:12px; opacity:.7; }
 .group.gsel { background:var(--sel); border-radius:7px; }
+.p-chat { flex:0 0 auto; font-size:12px; opacity:0; cursor:pointer; padding:0 4px; }
+.proj:hover .p-chat { opacity:.65; } .p-chat:hover { opacity:1 !important; }
+.gv-nextrow { display:flex; align-items:stretch; gap:10px; margin:16px 0 8px; }
+.gv-nextrow .gv-next { flex:1; margin:0; }
+.gv-nextrow .btn { flex:0 0 auto; align-self:center; }
+/* scoped feature/project chat */
+#scopechat { height:100%; display:flex; flex-direction:column; }
+.sc-head { display:flex; align-items:center; gap:10px; padding:9px 12px; border-bottom:1px solid var(--border); background:var(--panel2); }
+.sc-title { font-size:13.5px; font-weight:600; color:var(--text); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.sc-pane { flex:1; min-height:0; }
 /* ---- task search palette (Cmd+P) ---- */
 .pal-ov { align-items:flex-start; }
 .palette-box { width:640px; max-width:92vw; margin-top:11vh; background:var(--panel); border:1px solid var(--border); border-radius:12px; box-shadow:0 24px 70px rgba(0,0,0,.6); display:flex; flex-direction:column; max-height:70vh; overflow:hidden; }
