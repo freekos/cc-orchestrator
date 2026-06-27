@@ -3175,6 +3175,36 @@ def cmd_project_jira(args):
         except Exception as ex:
             print("  WARN — could not reach Jira: %s" % str(ex)[:120])
 
+def cmd_project_automerge(args):
+    """Toggle auto-merge for a PROJECT: when ON, its tasks land into the project's main/master on done
+    WITHOUT an MR (fast lane for parallel quick edits). OFF by default — opt in only when you want it."""
+    s = load_state()
+    proj = s["projects"].get(args.project) or die("unknown project '%s'" % args.project)
+    on = args.mode == "on"
+    if on:
+        proj["automerge"] = True
+    else:
+        proj.pop("automerge", None)
+    save_state(s)
+    print("project '%s' automerge: %s" % (
+        args.project, "ON — задачи сами вливаются в main без MR" if on else "off — как обычно, по MR"))
+
+
+def cmd_group_automerge(args):
+    """Toggle auto-merge for a GROUP: when ON, its tasks land into the group's branch on done without
+    an MR. OFF by default."""
+    s = load_state()
+    g = s["epics"].get(args.key) or die("unknown group '%s'" % args.key)
+    on = args.mode == "on"
+    if on:
+        g["automerge"] = True
+    else:
+        g.pop("automerge", None)
+    save_state(s)
+    print("group '%s' automerge: %s" % (
+        args.key, "ON — задачи сами вливаются в ветку группы без MR" if on else "off — по MR"))
+
+
 def cmd_jira_create_epic(args):
     s = load_state()
     proj = s["projects"].get(args.project) or die("unknown project '%s'" % args.project)
@@ -3565,6 +3595,8 @@ def build_parser():
     a.add_argument("--write", action="store_true", help="opt IN to automatic Jira writes (default: pull-only)")
     a.add_argument("--no-write", dest="no_write", action="store_true", help="back to pull-only (default)")
     a.set_defaults(fn=cmd_project_jira)
+    a = pj.add_parser("automerge"); a.add_argument("project"); a.add_argument("mode", choices=["on", "off"])
+    a.set_defaults(fn=cmd_project_automerge)
 
     a = sub.add_parser("deploys"); a.add_argument("project", nargs="?"); a.add_argument("repo", nargs="?")
     a.add_argument("--all", action="store_true", help="every project (for the cockpit ops console)")
@@ -3614,6 +3646,8 @@ def build_parser():
         a = grp.add_parser("new"); a.add_argument("project"); a.add_argument("name")
         a.add_argument("--tasks", help="comma-separated task ids to move into the new group")
         a.add_argument("--json", action="store_true"); a.set_defaults(fn=cmd_group_new)
+        a = grp.add_parser("automerge"); a.add_argument("key"); a.add_argument("mode", choices=["on", "off"])
+        a.set_defaults(fn=cmd_group_automerge)
         a = grp.add_parser("add"); a.add_argument("project"); a.add_argument("key")
         a.add_argument("--summary"); a.add_argument("--target", action="append"); a.add_argument("--repos")
         a.set_defaults(fn=cmd_epic_add)
@@ -3970,10 +4004,11 @@ def cmd_snapshot(args):
                 continue                                   # hide an empty loose container
             combined = [tid for tid in (e.get("combined") or []) if tid in s["tasks"]]
             groups.append({"key": k, "summary": e.get("summary", ""), "loose": bool(e.get("loose")),
-                           "archived": bool(e.get("archived")),
+                           "archived": bool(e.get("archived")), "automerge": bool(e.get("automerge")),
                            "tasks": tasks, "ops": ops,
                            "combined": combined, "combined_branch": combined_branch(k)})
         out["projects"][pn] = {"kind": p.get("kind", "—"), "path": p.get("path", ""),
+                               "automerge": bool(p.get("automerge")),
                                "repos": list((p.get("repos") or {}).keys()), "groups": groups}
     print(json.dumps(out, ensure_ascii=False, indent=2))
 

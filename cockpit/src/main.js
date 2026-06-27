@@ -974,12 +974,27 @@ async function renderOps(refetchDeploys){
   if($("ops-body")!==v) return;
   renderDeployTable(dep, opsDeployCache||[]);
 }
+// auto-merge toggle: configure how a project's / group's tasks land — by MR (default) or auto-merged
+function automergeToggle(scopeArgs, on, label){
+  const t=el("span","am-toggle"+(on?" on":""), (on?"● ":"○ ")+(label||"авто-влитие"));
+  t.title = on ? "ВКЛ: задачи вливаются сами, без MR. Клик — выключить (вернуть MR)."
+              : "ВЫКЛ: задачи идут по MR, как обычно. Клик — включить авто-влитие без MR.";
+  t.onclick=async(e)=>{ e.stopPropagation();
+    try{ await invoke("run_cc",{args:[...scopeArgs, on?"off":"on"]});
+      setStatus("авто-влитие "+(on?"выключено (по MR)":"включено (без MR)")); await load(); }
+    catch(err){ setStatus("не удалось переключить: "+err, true); }
+  };
+  return t;
+}
 function renderDeployTable(dep, dd){
   dep.innerHTML="";
   const byProj={}; dd.forEach(x=>{ (byProj[x.project]=byProj[x.project]||[]).push(x); });
   if(!Object.keys(byProj).length){ dep.append(el("div","dim","нет данных о деплоях (↻ Обновить)")); return; }
   for(const [pn,rows] of Object.entries(byProj)){
-    dep.append(el("div","ops-proj", pn));
+    const ph=el("div","ops-proj"); ph.append(el("span",null,pn));
+    const p=(STATE&&STATE.projects&&STATE.projects[pn])||{};
+    ph.append(automergeToggle(["project","automerge",pn], p.automerge, "авто-влитие в main"));
+    dep.append(ph);
     rows.forEach(x=>{ const row=el("div","ops-drow"); row.append(el("span","ops-repo", x.repo));
       if(x.kind==="eas"){ const ch=x.channels||{}; row.append(envChip("staging", ch.staging), envChip("prod", ch.production)); }
       else { const e=x.envs||{}; ["dev","stage","prod"].forEach(k=> row.append(envChip(k, e[k]?(e[k].ref+"@"+e[k].sha):null))); }
@@ -1021,6 +1036,10 @@ function renderGroupView(pn, gkey){
   const fb=btn("💬 Чат фичи", ()=>openFeatureChat(pn,gkey), "ghost"); fb.title="Чат про состояние фичи (агент знает её задачи и combined)";
   nx.append(el("div","gv-next", groupNextStep(g, active)), ntb, fb);
   v.append(nx);
+  const amrow=el("div","gv-amrow");
+  amrow.append(el("span","gv-amlbl","Как вливаются задачи фичи:"),
+               automergeToggle(["group","automerge",gkey], g.automerge, "в ветку группы без MR"));
+  v.append(amrow);
   const SECTIONS=[
     {label:"🔵 В работе", match:t=>t.status==="running"},
     {label:"🟡 На ревью", match:t=>t.status==="mr"||t.status==="review"},

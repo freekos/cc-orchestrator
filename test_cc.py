@@ -883,6 +883,37 @@ def test_jira_write_pull_only_by_default():
     assert cc.jira_write_on({"write": True}) is True
 
 
+def test_automerge_toggle_default_off():
+    # auto-merge is OFF by default (no key); on/off sets/clears the flag on project + group
+    import io, contextlib
+    state = {"projects": {"P": {"repos": {}}}, "epics": {"g1": {"project": "P"}}, "tasks": {}}
+    saved = (cc.load_state, cc.save_state)
+    try:
+        cc.load_state = lambda: state
+        cc.save_state = lambda s: None
+        assert not state["projects"]["P"].get("automerge") and not state["epics"]["g1"].get("automerge")
+
+        class PA:
+            project = "P"; mode = "on"
+        with contextlib.redirect_stdout(io.StringIO()):
+            cc.cmd_project_automerge(PA())
+        assert state["projects"]["P"]["automerge"] is True
+
+        class PB:
+            project = "P"; mode = "off"
+        with contextlib.redirect_stdout(io.StringIO()):
+            cc.cmd_project_automerge(PB())
+        assert "automerge" not in state["projects"]["P"], "off clears the flag"
+
+        class GA:
+            key = "g1"; mode = "on"
+        with contextlib.redirect_stdout(io.StringIO()):
+            cc.cmd_group_automerge(GA())
+        assert state["epics"]["g1"]["automerge"] is True
+    finally:
+        cc.load_state, cc.save_state = saved
+
+
 def test_group_new_logical_grouping():
     # ad-hoc grouping: create a local group + move tasks logically (branch/worktrees untouched);
     # a task with an open MR is skipped (its target can't silently change), single-membership.
