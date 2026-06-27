@@ -973,8 +973,10 @@ async function renderOps(refetchDeploys){
   const tip=(b,s)=>{ b.title=s; return b; };
   // 1) running / recent ops (LOCAL, from snapshot) — facts-based ✓/✗; refreshes on the poll
   const running=[];
-  for(const [pn,p] of Object.entries((STATE&&STATE.projects)||{})) for(const g of (p.groups||[])) for(const o of (g.ops||[]))
-    running.push({gsum:g.summary||g.key, o});
+  for(const [pn,p] of Object.entries((STATE&&STATE.projects)||{})){
+    for(const o of (p.ops||[])) running.push({gsum:"проект "+pn, o});     // project-as-a-unit ops
+    for(const g of (p.groups||[])) for(const o of (g.ops||[])) running.push({gsum:g.summary||g.key, o});
+  }
   if(running.length){
     v.append(el("div","ops-sec","Операции — запущено / недавние"));
     running.sort((a,b)=> (a.o.status==="running"?0:1)-(b.o.status==="running"?0:1));
@@ -997,6 +999,17 @@ async function renderOps(refetchDeploys){
   }
   if(!any) trig.append(el("div","dim","нет активных фич"));
   v.append(trig);
+  // 2b) ACT on the WHOLE PROJECT (main) — run/test/deploy the project as a unit
+  v.append(el("div","ops-sec","Весь проект (main)"));
+  const ptrig=el("div","ops-trig");
+  for(const pn of Object.keys((STATE&&STATE.projects)||{})){
+    const row=el("div","ops-trow"); row.append(el("span","ops-tg", pn));
+    row.append(tip(btn("Тест", ()=>runAction(["project","ops",pn,"--kind","test"],"запустить проект "+pn+" локально (main)",false), "ghost"), "Запустить проект целиком локально (репо на main)"),
+               tip(btn("Stage", ()=>runAction(["project","ops",pn,"--kind","stage"],"stage-деплой проекта "+pn+" (main)",false), "ghost"), "Задеплоить main проекта на stage"),
+               tip(btn("Деплой prod", ()=>runAction(["project","ops",pn,"--kind","deploy"],"ПРОД-деплой проекта "+pn+" (main)",true), "warn"), "Деплой main проекта в ПРОД!"));
+    ptrig.append(row);
+  }
+  v.append(ptrig);
   // 3) history (cheap: local audit)
   v.append(el("div","ops-sec","История (релизы · деплои · мёржи)"));
   const hist=el("div","ops-hist"); hist.append(el("div","dim","загрузка…")); v.append(hist);
