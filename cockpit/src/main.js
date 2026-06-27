@@ -1090,45 +1090,73 @@ function openProjectChat(pn){
                    hint:"Спроси про проект: что где, что катить, общая картина.",
                    backFn:()=>goHome() });
 }
-// ---- scratch: a floating "throwaway" chat that DOESN'T add a tab; reuses one session per context ----
-const scratchSess={};
-function scratchCtx(){   // cwd + a light context from whatever is selected (task / feature / project / first project)
+// ---- scratch: a GLOBAL MODAL with the history of past throwaway chats + a textarea to start a new one ----
+function scratchCtx(){   // cwd + a light context for a NEW scratch chat, from whatever is selected
   const t=findTask();
-  if(t) return {key:"t:"+t.tid, cwd:t.dir, label:"⚡ Быстрый · "+t.title,
+  if(t) return {cwd:t.dir, label:t.title,
                 ctx:"Это быстрый (черновой) чат в контексте задачи «"+t.title+"». Можешь делать что прошу прямо в этой папке. Кратко."};
   if(SEL && SEL.g && SEL.tid===null){ const g=groupOf(SEL.p,SEL.g); const t0=(g&&g.tasks||[]).find(x=>!x.archived);
-    return {key:"g:"+SEL.g, cwd:(t0&&t0.dir)||(STATE.projects[SEL.p]||{}).path||"",
-            label:"⚡ Быстрый · "+(g?(g.summary||SEL.g):SEL.g), ctx:"Быстрый чат в контексте фичи «"+(g?(g.summary||SEL.g):SEL.g)+"». Кратко."}; }
+    return {cwd:(t0&&t0.dir)||(STATE.projects[SEL.p]||{}).path||"",
+            label:(g?(g.summary||SEL.g):SEL.g), ctx:"Быстрый чат в контексте фичи «"+(g?(g.summary||SEL.g):SEL.g)+"». Кратко."}; }
   const pn=(SEL&&SEL.p) || Object.keys(STATE&&STATE.projects||{})[0];
   const p=(STATE&&STATE.projects&&STATE.projects[pn])||{};
-  return {key:"p:"+(pn||"x"), cwd:p.path||"", label:"⚡ Быстрый"+(pn?" · "+pn:""), ctx:"Быстрый черновой чат. Кратко."};
+  return {cwd:p.path||"", label:(pn||"общий"), ctx:"Быстрый черновой чат. Кратко."};
 }
-function closeScratch(){ const p=$("scratch"); if(p){ try{p._un&&p._un();}catch(e){} p.remove(); } }
-async function toggleScratch(){
-  if($("scratch")){ closeScratch(); return; }
-  const c=scratchCtx();
-  if(!c.cwd){ setStatus("нет рабочей папки для быстрого чата — выбери задачу/проект", true); return; }
-  const pan=el("div"); pan.id="scratch";
-  const head=el("div","scr-head"); head.append(el("span","scr-title", c.label), btn("✕", closeScratch, "ghost"));
-  const list=el("div","chat-msgs scr-msgs"); const composer=el("div","chat-composer");
-  const inp=el("textarea","chat-inp"); inp.placeholder="Быстрый вопрос / правка…  (Enter)"; inp.rows=1;
-  const bar=el("div","composer-bar"); const send=btn("▶", ()=>tab.send(), "send"); bar.append(el("span","cb-gap"), send);
-  composer.append(inp, bar); pan.append(head, list, composer); document.body.append(pan);
-  const id="scratch-"+(++seq);
-  const tab={ type:"chat", engine, dir:c.cwd, id, msgs:[], session:scratchSess[c.key]||null,
-              firstContext:c.ctx, injectedMem:!!scratchSess[c.key], busy:false, dirs:[] };
-  tab.render=()=>{ list.innerHTML=""; for(const m of tab.msgs){ const d=el("div","msg "+m.role);
+let scratchChats = (()=>{ try{ return JSON.parse(localStorage.getItem("cc.scratch")||"[]"); }catch(_){ return []; } })();
+let scratchActive = null;
+function saveScratch(){ try{ localStorage.setItem("cc.scratch", JSON.stringify(scratchChats.slice(0,50))); }catch(_){} }
+function persistScratch(){ const t=scratchActive; if(!t||!t.entry) return; t.entry.session=t.session||t.entry.session; t.entry.msgs=t.msgs; saveScratch(); }
+function makeScratchTab(en){ return { type:"chat", engine, dir:en.cwd, id:en.id, msgs:en.msgs||(en.msgs=[]),
+  session:en.session||null, firstContext:en.firstContext, injectedMem:!!en.session, busy:false, dirs:[], entry:en }; }
+function toggleScratch(){ if($("scratch-modal")) closeScratchModal(); else openScratchModal(); }
+function closeScratchModal(){ const ov=$("scratch-modal"); if(ov){ try{ov._un&&ov._un();}catch(_){}; ov.remove(); } scratchActive=null; }
+async function openScratchModal(){
+  if($("scratch-modal")){ closeScratchModal(); return; }
+  const ov=el("div","overlay"); ov.id="scratch-modal"; ov.onclick=(e)=>{ if(e.target===ov) closeScratchModal(); };
+  const box=el("div","modal scratch-box");
+  const head=el("div","mhead"); head.append(el("span",null,"⚡ Быстрые чаты"), btn("✕", closeScratchModal, "ghost"));
+  const body=el("div","scratch-body"); const lc=el("div","scratch-list"); const main=el("div","scratch-main");
+  body.append(lc, main); box.append(head, body); ov.append(box); document.body.append(ov);
+  ov._list=lc; ov._main=main;
+  const un1=await listen("chat-event",(e)=>{ const t=scratchActive; if(t&&e.payload&&e.payload.id===t.id) handleChatEvent(t,e.payload.line); });
+  const un2=await listen("chat-done",(e)=>{ const t=scratchActive; if(t&&e.payload&&e.payload.id===t.id){ const l=t.msgs[t.msgs.length-1]; if(l&&l.busy)l.busy=false; t.busy=false; t.render(); persistScratch(); } });
+  ov._un=()=>{ try{un1();}catch(_){}; try{un2();}catch(_){}; };
+  renderScratchList();
+  if(scratchChats.length) selectScratch(scratchChats[0]); else newScratch();
+}
+function renderScratchList(){
+  const ov=$("scratch-modal"); if(!ov) return; const lc=ov._list; lc.innerHTML="";
+  lc.append(btn("+ Новый чат", ()=>newScratch(), "scratch-new"));
+  if(!scratchChats.length){ lc.append(el("div","dim scratch-empty","история пуста")); return; }
+  scratchChats.forEach(en=>{ const row=el("div","scratch-li"+(scratchActive&&scratchActive.entry===en?" sel":""));
+    row.append(el("div","scratch-li-t", en.title||"(новый)"), el("div","scratch-li-s", en.ctxLabel||""));
+    row.onclick=()=>selectScratch(en); lc.append(row); });
+}
+function selectScratch(en){ scratchActive=makeScratchTab(en); renderScratchList(); renderScratchMain(true); }
+function newScratch(){ const c=scratchCtx();
+  const en={ id:"sc-"+(++seq), title:"", ctxLabel:c.label, cwd:c.cwd, firstContext:c.ctx, session:null, msgs:[], ts:Date.now(), fresh:true };
+  scratchActive=makeScratchTab(en); renderScratchList(); renderScratchMain(true);
+}
+function renderScratchMain(focusInput){
+  const ov=$("scratch-modal"); if(!ov||!scratchActive) return; const main=ov._main; main.innerHTML="";
+  const t=scratchActive;
+  const list=el("div","chat-msgs scratch-msgs"); const composer=el("div","chat-composer");
+  const inp=el("textarea","chat-inp"); inp.placeholder="Новый быстрый разговор… (Enter — отправить · контекст: "+(t.entry.ctxLabel||"общий")+")"; inp.rows=2;
+  const bar=el("div","composer-bar"); bar.append(el("span","cb-gap"), btn("▶", ()=>t.send(), "send"));
+  composer.append(inp, bar); main.append(list, composer);
+  t.render=()=>{ list.innerHTML=""; for(const m of t.msgs){ const d=el("div","msg "+m.role);
       if(m.role==="assistant"){ d.innerHTML=m.text?mdRender(m.text):(m.busy?'<span class="typing">…</span>':""); }
       else if(m.role==="tool"){ d.textContent="▸ "+m.text; } else d.textContent=m.text; list.appendChild(d); }
-    if(!tab.msgs.length) list.appendChild(el("div","chat-hint","Черновой чат — не плодит вкладок. Контекст: "+c.label.replace("⚡ Быстрый · ","")+"."));
+    if(!t.msgs.length) list.appendChild(el("div","chat-hint","Черновой чат. Контекст: "+(t.entry.ctxLabel||"общий")+". История слева."));
     list.scrollTop=list.scrollHeight; };
-  tab.send=async()=>{ const v=inp.value.trim(); if(!v||tab.busy) return; inp.value=""; inp.style.height="auto"; await sendChat(tab, v); };
-  inp.onkeydown=(e)=>{ if(e.key==="Enter"&&!e.shiftKey){ e.preventDefault(); tab.send(); } else if(e.key==="Escape"){ e.preventDefault(); closeScratch(); } };
-  inp.oninput=()=>{ inp.style.height="auto"; inp.style.height=Math.min(140, inp.scrollHeight)+"px"; };
-  const un=await listen("chat-event",(e)=>{ if(e.payload&&e.payload.id===id) handleChatEvent(tab,e.payload.line); });
-  const ud=await listen("chat-done",(e)=>{ if(e.payload&&e.payload.id===id){ const last=tab.msgs[tab.msgs.length-1]; if(last&&last.busy) last.busy=false; tab.busy=false; tab.render(); if(tab.session) scratchSess[c.key]=tab.session; } });
-  pan._un=()=>{ try{un();}catch(e){} try{ud();}catch(e){} };
-  tab.render(); inp.focus();
+  t.send=async()=>{ const v=inp.value.trim(); if(!v||t.busy) return; if(!t.dir){ setStatus("нет рабочей папки — выбери задачу/проект", true); return; }
+    inp.value=""; inp.style.height="auto";
+    if(t.entry.fresh){ t.entry.fresh=false; scratchChats.unshift(t.entry); }
+    if(!t.entry.title) t.entry.title=v.slice(0,42);
+    persistScratch(); renderScratchList(); await sendChat(t, v); };
+  inp.onkeydown=(e)=>{ if(e.key==="Enter"&&!e.shiftKey){ e.preventDefault(); t.send(); } else if(e.key==="Escape"){ e.preventDefault(); closeScratchModal(); } };
+  inp.oninput=()=>{ inp.style.height="auto"; inp.style.height=Math.min(160, inp.scrollHeight)+"px"; };
+  t.render(); if(focusInput) inp.focus();
 }
 // Cmd+T → create a task under a project (epic-less) or under an epic. Defaults: --manual (no auto
 // background agent — you drive it in the cockpit chat) + --no-jira (quick local task; link Jira later).
@@ -1456,7 +1484,7 @@ window.addEventListener("DOMContentLoaded", ()=>{ setupCenter(); setupResizers()
   const brand=document.querySelector(".brand"); if(brand){ brand.style.cursor="pointer"; brand.title="На обзор"; brand.onclick=goHome; }
   document.addEventListener("keydown", globalKeydown);   // Cmd+T new chat · Cmd+Shift+F search · Cmd+P palette (rebindable)
   window.addEventListener("resize", ()=>{ if(active && active.refit) active.refit(); });   // keep the terminal fitted
-  const sb=el("button","",""); sb.id="scratchbtn"; sb.textContent="⚡"; sb.title="Быстрый чат (Cmd+J) — черновой, без вкладки";
+  const sb=el("button","",""); sb.id="scratchbtn"; sb.textContent="⚡"; sb.title="Быстрые чаты (Cmd+J) — черновые, с историей";
   sb.onclick=()=>toggleScratch(); document.body.appendChild(sb);
   let loading=false; const reload=async()=>{ if(loading) return; loading=true; try{ await load(); } finally{ loading=false; } };
   try{ invoke("watch_state"); listen("state-changed", reload); }catch(e){}   // realtime: refresh the moment cc writes state
