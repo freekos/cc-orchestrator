@@ -875,6 +875,14 @@ def test_task_sessions_history():
         shutil.rmtree(d, ignore_errors=True)
 
 
+def test_jira_write_pull_only_by_default():
+    # cc is pull-only: automatic Jira writes happen ONLY when the project opted in with --write
+    assert cc.jira_write_on(None) is False
+    assert cc.jira_write_on({}) is False
+    assert cc.jira_write_on({"token": "x", "project_key": "IK"}) is False, "token alone must NOT enable writes"
+    assert cc.jira_write_on({"write": True}) is True
+
+
 if __name__ == "__main__":
     n = 0
     for k, v in list(globals().items()):

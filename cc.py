@@ -1168,7 +1168,7 @@ def cmd_task_add(args):
         s = load_state(); s["tasks"][tid]["jira"] = args.jira; save_state(s)
         print("  linked to existing jira issue: %s" % args.jira)
         jira = proj.get("jira")
-        if jira and jira.get("token") and not loose and ekey.split("-")[0] == jira.get("project_key"):
+        if jira and jira.get("token") and jira_write_on(jira) and not loose and ekey.split("-")[0] == jira.get("project_key"):
             try:
                 cur = jira_issue_parent(jira, args.jira)
                 if cur != ekey:
@@ -1177,7 +1177,7 @@ def cmd_task_add(args):
                         args.jira, ekey, cur or "no parent"))
             except Exception as ex:
                 print("  (jira reparent failed: %s)" % str(ex)[:80])
-    elif jira and jira.get("token") and not loose and not getattr(args, "no_jira", False):
+    elif jira and jira.get("token") and jira_write_on(jira) and not loose and not getattr(args, "no_jira", False):
         try:
             jk = jira_create_task(jira, ekey, title, args.prompt)
             if jk:
@@ -1740,7 +1740,7 @@ def cmd_task_done(args):
         except Exception:
             pass
     jira = proj.get("jira"); jkey = t.get("jira")
-    if jira and jira.get("token") and jkey:
+    if jira and jira.get("token") and jira_write_on(jira) and jkey:
         if jira_status_category(jira, jkey) == "done":
             print("jira %s уже Done" % jkey)
         else:
@@ -2353,6 +2353,8 @@ def cmd_epic_sync(args):
 
 
 def _jira_done_keys(jira, keys):
+    if not jira_write_on(jira):
+        print("  jira: write выключен (pull-only) — Done не трогаю (%d issue)" % len(keys)); return
     print("  jira: перевожу в Done %d issue(s) …" % len(keys))
     done = skipped = failed = 0
     for k in keys:
@@ -3005,6 +3007,13 @@ def jira_status_category(cfg, key):
     except Exception:
         return ""
 
+def jira_write_on(cfg):
+    """cc is PULL-ONLY by default: Jira is read to import tasks/epics, never written to. Automatic
+    writes (create ticket on task add, transition to Done) happen ONLY if the project opted in with
+    `cc project jira ... --write`. Explicit `cc jira move/create-epic` stay available (deliberate)."""
+    return bool(cfg and cfg.get("write"))
+
+
 def jira_transition_done(cfg, key):
     """Transition an issue to a status in the 'done' category. (ok, info)."""
     try:
@@ -3101,13 +3110,17 @@ def cmd_project_jira(args):
         j["token"] = args.token
     if args.project_key:
         j["project_key"] = args.project_key
+    if getattr(args, "write", False):
+        j["write"] = True
+    if getattr(args, "no_write", False):
+        j.pop("write", None)
     if args.off:
         proj.pop("jira", None)
         save_state(s); print("jira disabled for '%s'" % args.project); return
     save_state(s)
-    print("jira for '%s': site=%s email=%s project=%s token=%s" % (
+    print("jira for '%s': site=%s email=%s project=%s token=%s  write=%s" % (
         args.project, j.get("site", "-"), j.get("email", "-"), j.get("project_key", "-"),
-        "set" if j.get("token") else "MISSING"))
+        "set" if j.get("token") else "MISSING", "ON" if j.get("write") else "off (pull-only)"))
     if j.get("site") and j.get("token") and j.get("project_key"):
         try:
             n = len(jira_my_epics(j))
@@ -3504,6 +3517,8 @@ def build_parser():
     a = pj.add_parser("jira"); a.add_argument("project")
     a.add_argument("--site"); a.add_argument("--email"); a.add_argument("--token")
     a.add_argument("--project-key", dest="project_key"); a.add_argument("--off", action="store_true")
+    a.add_argument("--write", action="store_true", help="opt IN to automatic Jira writes (default: pull-only)")
+    a.add_argument("--no-write", dest="no_write", action="store_true", help="back to pull-only (default)")
     a.set_defaults(fn=cmd_project_jira)
 
     a = sub.add_parser("deploys"); a.add_argument("project", nargs="?"); a.add_argument("repo", nargs="?")
