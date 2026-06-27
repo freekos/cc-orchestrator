@@ -339,6 +339,11 @@ h2 { margin:0; font-size:17px; font-weight:650; }
 .ops-tg { flex:1; min-width:0; color:var(--text); font-size:13px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 .ops-tgp { flex:0 0 auto; color:var(--dim); font-size:10px; background:var(--panel2); border:1px solid var(--border); border-radius:4px; padding:1px 5px; }
 .ops-trow .btn { flex:0 0 auto; }
+/* ops as a global modal */
+.ops-box { width:840px; max-width:94vw; height:660px; max-height:88vh; display:flex; flex-direction:column; padding:0; }
+.ops-box .mhead { padding:11px 14px; border-bottom:1px solid var(--border); }
+.ops-head-r { margin-left:auto; margin-right:8px; }
+.ops-body { flex:1; min-height:0; overflow-y:auto; padding:16px 22px 26px; }
 /* ---- task search palette (Cmd+P) ---- */
 .pal-ov { align-items:flex-start; }
 .palette-box { width:640px; max-width:92vw; margin-top:11vh; background:var(--panel); border:1px solid var(--border); border-radius:12px; box-shadow:0 24px 70px rgba(0,0,0,.6); display:flex; flex-direction:column; max-height:70vh; overflow:hidden; }
