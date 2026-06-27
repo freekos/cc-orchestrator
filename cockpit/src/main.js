@@ -17,6 +17,7 @@ let STATE = null, SEL = null;
 const collapsed = new Set();
 const seenKeys = new Set();   // projects/groups start COLLAPSED by default — seed each new key once
 let tabs = [], active = null, seq = 0;   // middle = per-task chat/diff tabs; `active` is the shown tab object
+let centerView = "home";                 // 'home'|'group'|'work'|'scopechat'|'ops' — so the 5s poll doesn't clobber a transient view
 let engine = localStorage.getItem("cc_engine") || "claude";   // which agent "+ Чат" launches
 const ENGINES = ["claude", "codex"];
 const ENGINE_GLYPH = { claude: "✦", codex: "❯" };
@@ -35,11 +36,13 @@ async function load(){
     STATE = JSON.parse(await invoke("get_state"));
     computeUpdates();   // diff vs last snapshot → "what's new" feed (before renderTree so tree dots show)
     renderTree();
-    const t=findTask();
-    if(t) renderFacts(t);                 // a task is open → refresh its facts (never disturb open chats)
-    else if(SEL && SEL.g && SEL.tid===null && groupOf(SEL.p, SEL.g)){   // a group is selected → its dashboard
-      renderGroupView(SEL.p, SEL.g); renderGroupFacts(SEL.p, SEL.g); centerMode("group"); }
-    else { renderHome(); centerMode(true); }   // nothing selected → live triage overview (refreshes each tick)
+    if(centerView==="ops" || centerView==="scopechat"){ /* transient full-screen view — don't clobber it on the poll */ }
+    else { const t=findTask();
+      if(t) renderFacts(t);                 // a task is open → refresh its facts (never disturb open chats)
+      else if(SEL && SEL.g && SEL.tid===null && groupOf(SEL.p, SEL.g)){   // a group is selected → its dashboard
+        renderGroupView(SEL.p, SEL.g); renderGroupFacts(SEL.p, SEL.g); centerMode("group"); }
+      else { renderHome(); centerMode(true); }   // nothing selected → live triage overview (refreshes each tick)
+    }
     setStatus("обновлено " + new Date().toLocaleTimeString());
   }catch(e){ setStatus("ошибка движка: "+e, true); }
 }
@@ -839,6 +842,7 @@ function setupCenter(){
   const home=el("div"); home.id="home"; c.append(home);            // triage home (no selection)
   const gv=el("div"); gv.id="groupview"; gv.style.display="none"; c.append(gv);   // group dashboard (group selected)
   const sc=el("div"); sc.id="scopechat"; sc.style.display="none"; c.append(sc);   // feature/project "ask" chat
+  const op=el("div"); op.id="opsview"; op.style.display="none"; c.append(op);     // global ops console (deploys + history)
   const bar=el("div","tabbar"); bar.id="tabbar"; bar.style.display="none"; c.append(bar);
   const body=el("div","tabbody"); body.id="tabbody"; c.append(body);
   const f=$("facts"); f.innerHTML=""; f.append(el("div","empty","выбери задачу — здесь появятся MR, ветки и действия"));
@@ -846,8 +850,9 @@ function setupCenter(){
 // center has three modes: 'home' (triage) · 'group' (feature dashboard) · 'work' (task chat/diff/term)
 function centerMode(mode){
   if(mode===true) mode="home"; if(mode===false) mode="work";   // back-compat with the old boolean calls
+  centerView=mode;
   const set=(id,on)=>{ const e=$(id); if(e) e.style.display=on?"":"none"; };
-  set("home", mode==="home"); set("groupview", mode==="group"); set("scopechat", mode==="scopechat"); set("tabbody", mode==="work");
+  set("home", mode==="home"); set("groupview", mode==="group"); set("scopechat", mode==="scopechat"); set("opsview", mode==="ops"); set("tabbody", mode==="work");
   if(mode!=="work"){ const bar=$("tabbar"); if(bar) bar.style.display="none"; }
   $("app").classList.toggle("no-task", mode==="home");   // facts hidden only on home (group/work show it)
 }
@@ -856,6 +861,48 @@ function goHome(){            // clicking the cc logo deselects → back to the 
   centerMode(true); renderHome(); renderTree();
   const f=$("facts"); f.innerHTML=""; f.append(el("div","empty","выбери задачу — здесь появятся MR, ветки и действия"));
 }
+// ---- global OPS console (view): where each repo is deployed (dev/stage/prod) + the shipping history ----
+const OPS_SHIP=new Set(["ops.start","group.mr","group.merge","task.merge"]);   // "shipping" actions for the history feed
+const OPS_LABEL={ "ops.start":"тест/деплой запущен", "group.mr":"релиз: MR в master", "group.merge":"влиты задачи группы", "task.merge":"влита задача" };
+function openOps(){ SEL=null; hideCard(); centerMode("ops"); renderOps(); }
+async function renderOps(){
+  const v=$("opsview"); if(!v) return; v.innerHTML="";
+  const head=el("div","ops-head");
+  head.append(el("div","ops-title","Операции — где что залито + история"),
+              btn("↻ Обновить деплои", ()=>renderOps(), "ghost"));
+  v.append(head);
+  // history first (fast: local audit)
+  v.append(el("div","ops-sec","История (деплои · релизы · мёржи)"));
+  const hist=el("div","ops-hist"); hist.append(el("div","dim","загрузка…")); v.append(hist);
+  // deploy state (slow: network glab/EAS)
+  v.append(el("div","ops-sec","Где что залито (dev · stage · prod)"));
+  const dep=el("div","ops-dep"); dep.append(el("div","dim","опрашиваю glab/EAS… (это сетевой запрос)")); v.append(dep);
+  try{ const recs=JSON.parse((await invoke("run_cc",{args:["log","--json","-n","60"]}))||"[]").filter(r=>OPS_SHIP.has(r.action));
+    if($("opsview")!==v) return; hist.innerHTML="";
+    if(!recs.length) hist.append(el("div","dim","пока нет записей о деплоях/релизах"));
+    recs.slice(0,20).forEach(r=>{ const row=el("div","ops-hrow");
+      const d=new Date((r.ts||0)*1000), ts=("0"+d.getDate()).slice(-2)+"."+("0"+(d.getMonth()+1)).slice(-2)+" "+("0"+d.getHours()).slice(-2)+":"+("0"+d.getMinutes()).slice(-2);
+      row.append(el("span","ops-ht", ts), el("span","ops-ha", OPS_LABEL[r.action]||r.action));
+      const who=r.epic||r.task||r.project||""; if(who) row.append(el("span","ops-hw", who));
+      const ex=[r.kind,r.repo,r.base].filter(Boolean).join(" · "); if(ex) row.append(el("span","ops-he", ex));
+      hist.append(row); });
+  }catch(e){ hist.innerHTML=""; hist.append(el("div","dim","✗ история: "+e)); }
+  try{ const dd=JSON.parse((await invoke("run_cc",{args:["deploys","--all","--json"]}))||"[]");
+    if($("opsview")!==v) return; dep.innerHTML="";
+    const byProj={}; dd.forEach(x=>{ (byProj[x.project]=byProj[x.project]||[]).push(x); });
+    if(!Object.keys(byProj).length) dep.append(el("div","dim","нет данных о деплоях"));
+    for(const [pn,rows] of Object.entries(byProj)){
+      dep.append(el("div","ops-proj", pn));
+      rows.forEach(x=>{ const row=el("div","ops-drow"); row.append(el("span","ops-repo", x.repo));
+        if(x.kind==="eas"){ const ch=x.channels||{};
+          row.append(envChip("staging", ch.staging), envChip("prod", ch.production)); }
+        else { const e=x.envs||{}; ["dev","stage","prod"].forEach(k=> row.append(envChip(k, e[k]?(e[k].ref+"@"+e[k].sha):null))); }
+        dep.append(row); });
+    }
+  }catch(e){ dep.innerHTML=""; dep.append(el("div","dim","✗ деплои: "+e)); }
+}
+function envChip(env, val){ const c=el("span","ops-env env-"+env);
+  c.append(el("span","ops-envk", env), el("span","ops-envv", val||"—")); return c; }
 // ---- GROUP view: the feature's dashboard (its tasks by status + next step + flow) ----
 function groupOf(pn, gkey){ const p=STATE&&STATE.projects[pn]; return p&&(p.groups||[]).find(g=>g.key===gkey); }
 function selectGroup(pn, gkey){   // click a group → open its feature dashboard
@@ -1212,6 +1259,7 @@ const COMMANDS=[
     run:()=>{ const t=findTask(); if(t) openChatTab(t, engine); else openNewTask(newTaskPreset()); }},
   {id:"new-task", label:"Новая задача…", run:()=>openNewTask(newTaskPreset())},
   {id:"scratch", key:"mod+j", label:"Быстрый чат (scratch)", run:()=>toggleScratch()},
+  {id:"ops", key:"mod+o", label:"Операции (деплои · история)", run:()=>openOps()},
   {id:"search", key:"mod+shift+f", label:"Поиск задач…", run:()=>openSearch()},
   {id:"palette", key:"mod+p", label:"Палитра команд…", run:()=>openCommandPalette()},
   {id:"home", label:"На обзор (домой)", run:()=>goHome()},
@@ -1317,7 +1365,9 @@ function renderHome(){
   const h=$("home"); if(!h) return; h.innerHTML="";
   if(!STATE){ return; }
   const all=activeTasksFlat();   // home triage = active board only
-  h.append(el("div","home-title","cc — обзор"));
+  const htop=el("div","home-top");
+  htop.append(el("div","home-title","cc — обзор"), btn("⚙ Операции", ()=>openOps(), "ghost"));
+  h.append(htop);
   const SECTIONS=[
     {label:"⚠ Ждут тебя",  cls:"wait",   match:t=>t.status==="needs_input"||t.status==="failed"},
     {label:"◑ На ревью",   cls:"review", match:t=>t.status==="mr"||t.status==="review"},
