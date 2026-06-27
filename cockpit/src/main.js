@@ -45,7 +45,37 @@ async function load(){
     }
     if($("ops-modal")) renderOps(false);   // ops modal open → refresh running-ops/history live (cached deploys, no network)
     setStatus("обновлено " + new Date().toLocaleTimeString());
+    autoLandSweep();                       // automerge-on: a finished task lands into its parent (no MR)
   }catch(e){ setStatus("ошибка движка: "+e, true); }
+}
+// ---- auto-merge on done: a finished task under an automerge-on group/project lands into its parent ----
+const autoLanding = new Set();
+const autoLandTried = new Set();           // don't re-fire auto-land for a task that already conflicted (no retry-spam)
+function autoLandSweep(){
+  if(!STATE || !STATE.projects) return;
+  if(autoLanding.size) return;             // serialize: one auto-land at a time (parallel merges race on a branch)
+  for(const [pn,p] of Object.entries(STATE.projects)){
+    const projAM = !!p.automerge;
+    for(const g of (p.groups||[])){
+      if(!projAM && !g.automerge) continue;            // this scope isn't on a fast lane
+      for(const t of (g.tasks||[])){
+        if(t.archived || t.landed || t.merged || t.needs_input) continue;
+        if(autoLandTried.has(t.tid)) continue;          // attempted once already → manual land from here
+        if(t.status!=="review" || !t.branch) continue;  // "review" = agent finished, ready, no MR yet
+        autoLand(t); return;               // fire one, let the next sweep pick up the rest
+      }
+    }
+  }
+}
+async function autoLand(t){
+  autoLanding.add(t.tid); autoLandTried.add(t.tid);
+  setStatus("авто-влитие: "+t.title+" …");
+  try{
+    const out=JSON.parse((await invoke("run_cc",{args:["task","land",t.tid,"--json"]}))||"{}");
+    if(out.ok) setStatus("авто-влито без MR: "+t.title);
+    else setStatus("авто-влитие не прошло ("+t.title+") — конфликт/занято, оставил тебе", true);
+  }catch(e){ setStatus("авто-влитие ошибка: "+e, true); }
+  finally{ autoLanding.delete(t.tid); load(); }
 }
 // ---- "What's New": detect status changes across ALL tasks since the last snapshot ----
 let lastSig=null;                  // tid -> status signature (null until baseline established)
