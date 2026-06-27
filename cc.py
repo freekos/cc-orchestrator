@@ -3453,23 +3453,40 @@ def repo_deploy_state(ri):
     return st
 
 def cmd_deploys(args):
+    """What's deployed where (NETWORK: glab/EAS). `--all` across every project, `--json` for the cockpit
+    ops console. Caches per-repo deploy state into ri['deploy']."""
     s = load_state()
-    proj = s["projects"].get(args.project) or die("unknown project '%s'" % args.project)
-    repos = [args.repo] if args.repo else list(proj["repos"].keys())
-    for r in repos:
-        ri = proj["repos"].get(r)
-        if not ri:
-            continue
-        st = repo_deploy_state(ri)
-        ri["deploy"] = st
-        if st["kind"] == "eas":
-            ch = st.get("channels", {})
-            print("%-22s EAS staging=%s | prod=%s" % (r, ch.get("staging", "?"), ch.get("production", "?")))
-        else:
-            envs = st.get("envs", {})
-            parts = ["%s=%s@%s" % (e, envs[e]["ref"], envs[e]["sha"]) for e in ("dev", "stage", "prod") if e in envs]
-            print("%-22s %s" % (r, "  ".join(parts) or "(no deployments)"))
+    if getattr(args, "all", False):
+        projects = list(s["projects"].items())
+    else:
+        proj = s["projects"].get(args.project) if args.project else None
+        if not proj:
+            die("нужен <project> или --all")
+        projects = [(args.project, proj)]
+    out = []
+    jsonl = getattr(args, "json", False)
+    for pn, proj in projects:
+        repos = [args.repo] if (args.repo and not getattr(args, "all", False)) else list(proj["repos"].keys())
+        for r in repos:
+            ri = proj["repos"].get(r)
+            if not ri:
+                continue
+            st = repo_deploy_state(ri)
+            ri["deploy"] = st
+            out.append({"project": pn, "repo": r, "kind": st.get("kind"),
+                        "envs": st.get("envs") or {}, "channels": st.get("channels") or {},
+                        "remote": ri.get("remote", "")})
+            if not jsonl:
+                if st["kind"] == "eas":
+                    ch = st.get("channels", {})
+                    print("%-22s EAS staging=%s | prod=%s" % (r, ch.get("staging", "?"), ch.get("production", "?")))
+                else:
+                    envs = st.get("envs", {})
+                    parts = ["%s=%s@%s" % (e, envs[e]["ref"], envs[e]["sha"]) for e in ("dev", "stage", "prod") if e in envs]
+                    print("%-22s %s" % (r, "  ".join(parts) or "(no deployments)"))
     save_state(s)
+    if jsonl:
+        print(json.dumps(out, ensure_ascii=False))
 
 
 # ----------------------------- cli -----------------------------
@@ -3489,7 +3506,9 @@ def build_parser():
     a.add_argument("--project-key", dest="project_key"); a.add_argument("--off", action="store_true")
     a.set_defaults(fn=cmd_project_jira)
 
-    a = sub.add_parser("deploys"); a.add_argument("project"); a.add_argument("repo", nargs="?")
+    a = sub.add_parser("deploys"); a.add_argument("project", nargs="?"); a.add_argument("repo", nargs="?")
+    a.add_argument("--all", action="store_true", help="every project (for the cockpit ops console)")
+    a.add_argument("--json", action="store_true")
     a.set_defaults(fn=cmd_deploys)
     sub.add_parser("orphans").set_defaults(fn=cmd_orphans)
     sub.add_parser("recover").set_defaults(fn=cmd_recover)
@@ -3499,6 +3518,7 @@ def build_parser():
     a.set_defaults(fn=cmd_snapshot)
     a = sub.add_parser("log"); a.add_argument("--task"); a.add_argument("--epic"); a.add_argument("--action")
     a.add_argument("--today", action="store_true"); a.add_argument("-n", type=int, default=200)
+    a.add_argument("--json", action="store_true")
     a.set_defaults(fn=cmd_log)
 
     jr = sub.add_parser("jira").add_subparsers(dest="cmd", required=True)
@@ -3756,6 +3776,8 @@ def cmd_log(args):
         since = int(time.mktime(time.strptime(time.strftime("%Y-%m-%d"), "%Y-%m-%d")))
     recs = read_audit(task=getattr(args, "task", None), epic=getattr(args, "epic", None),
                       action=getattr(args, "action", None), since=since, limit=getattr(args, "n", 200))
+    if getattr(args, "json", False):
+        print(json.dumps(recs, ensure_ascii=False)); return
     if not recs:
         print("(аудит пуст — записанных действий ещё нет)")
         return
