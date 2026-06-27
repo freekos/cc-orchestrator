@@ -1119,6 +1119,61 @@ def cmd_group_new(args):
             print("  пропущено %s: %s" % (sk["task"], sk["why"]))
 
 
+def cmd_task_land(args):
+    """Land a finished task into its parent branch LOCALLY, without an MR — the auto-merge 'fast lane'.
+    For each repo: merge the task branch into its base/target (group branch or main) inside a DEDICATED
+    worktree (the user's checkout is never touched); on conflict, abort and leave the task for manual
+    resolution (nothing half-merged). `--push` also pushes the target. Safe by construction: if the
+    target is busy (checked out elsewhere) it reports instead of forcing."""
+    s = load_state()
+    t = s["tasks"].get(args.task) or die("unknown task '%s'" % args.task)
+    branch = t.get("branch")
+    if not branch:
+        die("у задачи '%s' нет ветки — нечего вливать" % args.task)
+    epic = s["epics"].get(t.get("epic"), {})
+    proj = s["projects"].get(epic.get("project")) or die("у задачи нет проекта")
+    results = []
+    ok_all = True
+    for r in t.get("repos", []):
+        ri = (proj.get("repos") or {}).get(r) or {}
+        rp = ri.get("path")
+        if not rp or not os.path.isdir(rp):
+            results.append({"repo": r, "ok": False, "why": "нет пути репозитория"}); ok_all = False; continue
+        target = (t.get("base") or {}).get(r) or default_branch(rp)
+        if not have_ref(rp, branch):
+            results.append({"repo": r, "ok": False, "why": "ветки задачи нет локально"}); ok_all = False; continue
+        wt = Path(proj["path"]) / "cctui" / "__land__" / r
+        run(["git", "worktree", "prune"], cwd=rp, check=False)
+        if wt.exists():
+            run(["git", "worktree", "remove", "--force", str(wt)], cwd=rp, check=False)
+        wt.parent.mkdir(parents=True, exist_ok=True)
+        add = run(["git", "worktree", "add", str(wt), target], cwd=rp, check=False)
+        if add.returncode != 0:
+            results.append({"repo": r, "ok": False, "why": "target '%s' занят (открой/переключи чекаут) или отсутствует" % target})
+            ok_all = False; continue
+        run(["git", "config", "rerere.enabled", "true"], cwd=str(wt), check=False)
+        m = run(["git", "merge", "--no-edit", branch], cwd=str(wt), check=False)
+        if m.returncode != 0:
+            run(["git", "merge", "--abort"], cwd=str(wt), check=False)
+            run(["git", "worktree", "remove", "--force", str(wt)], cwd=rp, check=False)
+            results.append({"repo": r, "ok": False, "why": "конфликт с %s — реши вручную" % target}); ok_all = False; continue
+        pushed = False
+        if getattr(args, "push", False):
+            pushed = run(["git", "push", "origin", target], cwd=str(wt), check=False).returncode == 0
+        run(["git", "worktree", "remove", "--force", str(wt)], cwd=rp, check=False)
+        results.append({"repo": r, "ok": True, "target": target, "pushed": pushed})
+    if ok_all:
+        t["landed"] = True
+        targets = sorted({(t.get("base") or {}).get(r, "") for r in t.get("repos", [])})
+        audit("task.land", task=args.task, to=",".join(x for x in targets if x))
+        save_state(s)
+    if getattr(args, "json", False):
+        print(json.dumps({"task": args.task, "ok": ok_all, "repos": results}, ensure_ascii=False)); return
+    print("task %s land: %s" % (args.task, "OK — влито без MR" if ok_all else "ЕСТЬ ПРОБЛЕМЫ — не влито"))
+    for r in results:
+        print("  %-20s %s" % (r["repo"], ("-> " + r.get("target", "") + (" (pushed)" if r.get("pushed") else "")) if r["ok"] else "✗ " + r.get("why", "")))
+
+
 def cmd_task_add(args):
     s = load_state()
     # `args.epic` may be a real epic key OR a PROJECT name — the latter creates an epic-LESS task that
@@ -3687,6 +3742,8 @@ def build_parser():
     a = tk.add_parser("ls"); a.add_argument("epic", nargs="?"); a.set_defaults(fn=cmd_task_ls)
     a = tk.add_parser("setup"); a.add_argument("task"); a.set_defaults(fn=cmd_task_setup)  # regen CLAUDE.md (fresh rules)
     a = tk.add_parser("regroup"); a.add_argument("task"); a.add_argument("group"); a.set_defaults(fn=cmd_task_regroup)
+    a = tk.add_parser("land"); a.add_argument("task"); a.add_argument("--push", action="store_true")
+    a.add_argument("--json", action="store_true"); a.set_defaults(fn=cmd_task_land)
     a = tk.add_parser("diff"); a.add_argument("task"); a.set_defaults(fn=cmd_task_diff)
     a = tk.add_parser("memory"); a.add_argument("task")
     a.add_argument("--log"); a.add_argument("--pivot"); a.add_argument("--current")
@@ -3987,6 +4044,7 @@ def cmd_snapshot(args):
                 tasks.append({
                     "tid": tid, "title": t.get("title", tid), "status": _snap_task_status(t),
                     "branch": t.get("branch", ""), "merged": bool(t.get("merged")),
+                    "base": t.get("base") or {}, "landed": bool(t.get("landed")),
                     "archived": bool(t.get("archived")), "archived_at": t.get("archived_at") or None,
                     "prompt": (t.get("prompt") or "")[:280],   # short description — for content search
                     "combined": tid in combset,            # included in the group's combined branch

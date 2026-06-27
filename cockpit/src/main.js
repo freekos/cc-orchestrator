@@ -786,6 +786,20 @@ async function doneTask(t){
   catch(e){ m.body.textContent="✗ "+e; m.body.style.color="#f87171"; return; }
   goHome(); load();
 }
+async function landTask(t){   // local merge into the parent branch, no MR (auto-merge fast lane, manual trigger)
+  const targets=[...new Set(Object.values(t.base||{}).filter(Boolean))];
+  const toMain=targets.some(b=>/^(main|master|develop)$/.test(b));
+  const tlist=targets.join(", ")||"родительскую ветку";
+  const msg=(toMain?"⚠ ГЛАВНАЯ ВЕТКА ("+tlist+")! Напрямую, без ревью/MR.\n\n":"")+"Влить «"+t.title+"» в "+tlist+" ЛОКАЛЬНО, без MR?";
+  if(!confirm(msg)) return;
+  const m=modal("⏳ влить "+t.title+" …");
+  try{
+    const out=JSON.parse((await invoke("run_cc",{args:["task","land",t.tid,"--json"]}))||"{}");
+    if(out.ok){ m.body.textContent="✓ влито без MR → "+tlist; }
+    else { m.body.style.color="#f87171"; m.body.textContent="✗ не влито:\n"+(out.repos||[]).filter(r=>!r.ok).map(r=>"  "+r.repo+": "+(r.why||"")).join("\n"); }
+  }catch(e){ m.body.style.color="#f87171"; m.body.textContent="✗ ОШИБКА:\n"+e; }
+  load();
+}
 async function runAction(args, label, prod){
   if (!confirm((prod?"⚠ ПРОД-bound — пойдёт в master!\n\n":"")+"Выполнить:\n"+label+" ?")) return;
   const m=modal("⏳ "+label+" …");
@@ -811,6 +825,8 @@ function renderFacts(t){
   trow.append(
     tip(btn("Создать MR", ()=>openMrModal(t, loose), "primary"), "Создать MR по изменённым репозиториям (с подтверждением и выбором Draft)"),
     tip(btn("Diff", ()=>openDiffTab(t), "ghost"), "Изменения задачи (git diff) по всем репозиториям"));
+  if(!t.landed) trow.append(tip(btn("⟱ Влить в родителя", ()=>landTask(t), "ghost"),
+    "Влить задачу в родительскую ветку ЛОКАЛЬНО, без MR (fast lane). Конфликт — не вольёт, оставит тебе."));
   if(t.dir) trow.append(tip(btn("Открыть в Cursor", ()=>openInCursor(t.dir), "ghost"), "Открыть папку задачи в Cursor"));
   if(t.dir) trow.append(tip(btn("Терминал", ()=>openTermTab(t), "ghost"), "Терминал в папке задачи — запускай репозитории на их ветках, смотри логи"));
   trow.append(tip(btn("✓ Готово", ()=>doneTask(t), "ghost"), "Готово → убрать в архив (Jira→Done, worktrees снимаются; ветка/MR/чаты целы, вернуть можно через поиск)"));
