@@ -1010,6 +1010,46 @@ function openProjectChat(pn){
                    hint:"Спроси про проект: что где, что катить, общая картина.",
                    backFn:()=>goHome() });
 }
+// ---- scratch: a floating "throwaway" chat that DOESN'T add a tab; reuses one session per context ----
+const scratchSess={};
+function scratchCtx(){   // cwd + a light context from whatever is selected (task / feature / project / first project)
+  const t=findTask();
+  if(t) return {key:"t:"+t.tid, cwd:t.dir, label:"⚡ Быстрый · "+t.title,
+                ctx:"Это быстрый (черновой) чат в контексте задачи «"+t.title+"». Можешь делать что прошу прямо в этой папке. Кратко."};
+  if(SEL && SEL.g && SEL.tid===null){ const g=groupOf(SEL.p,SEL.g); const t0=(g&&g.tasks||[]).find(x=>!x.archived);
+    return {key:"g:"+SEL.g, cwd:(t0&&t0.dir)||(STATE.projects[SEL.p]||{}).path||"",
+            label:"⚡ Быстрый · "+(g?(g.summary||SEL.g):SEL.g), ctx:"Быстрый чат в контексте фичи «"+(g?(g.summary||SEL.g):SEL.g)+"». Кратко."}; }
+  const pn=(SEL&&SEL.p) || Object.keys(STATE&&STATE.projects||{})[0];
+  const p=(STATE&&STATE.projects&&STATE.projects[pn])||{};
+  return {key:"p:"+(pn||"x"), cwd:p.path||"", label:"⚡ Быстрый"+(pn?" · "+pn:""), ctx:"Быстрый черновой чат. Кратко."};
+}
+function closeScratch(){ const p=$("scratch"); if(p){ try{p._un&&p._un();}catch(e){} p.remove(); } }
+async function toggleScratch(){
+  if($("scratch")){ closeScratch(); return; }
+  const c=scratchCtx();
+  if(!c.cwd){ setStatus("нет рабочей папки для быстрого чата — выбери задачу/проект", true); return; }
+  const pan=el("div"); pan.id="scratch";
+  const head=el("div","scr-head"); head.append(el("span","scr-title", c.label), btn("✕", closeScratch, "ghost"));
+  const list=el("div","chat-msgs scr-msgs"); const composer=el("div","chat-composer");
+  const inp=el("textarea","chat-inp"); inp.placeholder="Быстрый вопрос / правка…  (Enter)"; inp.rows=1;
+  const bar=el("div","composer-bar"); const send=btn("▶", ()=>tab.send(), "send"); bar.append(el("span","cb-gap"), send);
+  composer.append(inp, bar); pan.append(head, list, composer); document.body.append(pan);
+  const id="scratch-"+(++seq);
+  const tab={ type:"chat", engine, dir:c.cwd, id, msgs:[], session:scratchSess[c.key]||null,
+              firstContext:c.ctx, injectedMem:!!scratchSess[c.key], busy:false, dirs:[] };
+  tab.render=()=>{ list.innerHTML=""; for(const m of tab.msgs){ const d=el("div","msg "+m.role);
+      if(m.role==="assistant"){ d.innerHTML=m.text?mdRender(m.text):(m.busy?'<span class="typing">…</span>':""); }
+      else if(m.role==="tool"){ d.textContent="▸ "+m.text; } else d.textContent=m.text; list.appendChild(d); }
+    if(!tab.msgs.length) list.appendChild(el("div","chat-hint","Черновой чат — не плодит вкладок. Контекст: "+c.label.replace("⚡ Быстрый · ","")+"."));
+    list.scrollTop=list.scrollHeight; };
+  tab.send=async()=>{ const v=inp.value.trim(); if(!v||tab.busy) return; inp.value=""; inp.style.height="auto"; await sendChat(tab, v); };
+  inp.onkeydown=(e)=>{ if(e.key==="Enter"&&!e.shiftKey){ e.preventDefault(); tab.send(); } else if(e.key==="Escape"){ e.preventDefault(); closeScratch(); } };
+  inp.oninput=()=>{ inp.style.height="auto"; inp.style.height=Math.min(140, inp.scrollHeight)+"px"; };
+  const un=await listen("chat-event",(e)=>{ if(e.payload&&e.payload.id===id) handleChatEvent(tab,e.payload.line); });
+  const ud=await listen("chat-done",(e)=>{ if(e.payload&&e.payload.id===id){ const last=tab.msgs[tab.msgs.length-1]; if(last&&last.busy) last.busy=false; tab.busy=false; tab.render(); if(tab.session) scratchSess[c.key]=tab.session; } });
+  pan._un=()=>{ try{un();}catch(e){} try{ud();}catch(e){} };
+  tab.render(); inp.focus();
+}
 // Cmd+T → create a task under a project (epic-less) or under an epic. Defaults: --manual (no auto
 // background agent — you drive it in the cockpit chat) + --no-jira (quick local task; link Jira later).
 // Cmd+T preset: a selected feature → its epic key (task lands IN the feature); a task → its project; else none
@@ -1171,6 +1211,7 @@ const COMMANDS=[
   {id:"new-chat", key:"mod+t", label:"Новый чат", hint:"в текущей задаче", when:()=>!!findTask(),
     run:()=>{ const t=findTask(); if(t) openChatTab(t, engine); else openNewTask(newTaskPreset()); }},
   {id:"new-task", label:"Новая задача…", run:()=>openNewTask(newTaskPreset())},
+  {id:"scratch", key:"mod+j", label:"Быстрый чат (scratch)", run:()=>toggleScratch()},
   {id:"search", key:"mod+shift+f", label:"Поиск задач…", run:()=>openSearch()},
   {id:"palette", key:"mod+p", label:"Палитра команд…", run:()=>openCommandPalette()},
   {id:"home", label:"На обзор (домой)", run:()=>goHome()},
@@ -1332,6 +1373,8 @@ window.addEventListener("DOMContentLoaded", ()=>{ setupCenter(); setupResizers()
   const brand=document.querySelector(".brand"); if(brand){ brand.style.cursor="pointer"; brand.title="На обзор"; brand.onclick=goHome; }
   document.addEventListener("keydown", globalKeydown);   // Cmd+T new chat · Cmd+Shift+F search · Cmd+P palette (rebindable)
   window.addEventListener("resize", ()=>{ if(active && active.refit) active.refit(); });   // keep the terminal fitted
+  const sb=el("button","",""); sb.id="scratchbtn"; sb.textContent="⚡"; sb.title="Быстрый чат (Cmd+J) — черновой, без вкладки";
+  sb.onclick=()=>toggleScratch(); document.body.appendChild(sb);
   let loading=false; const reload=async()=>{ if(loading) return; loading=true; try{ await load(); } finally{ loading=false; } };
   try{ invoke("watch_state"); listen("state-changed", reload); }catch(e){}   // realtime: refresh the moment cc writes state
   load(); setInterval(reload, 10000);   // slow safety poll (worktree-activity recency doesn't touch state.json)
