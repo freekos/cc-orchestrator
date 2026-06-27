@@ -37,13 +37,13 @@ async function load(){
     computeUpdates();   // diff vs last snapshot → "what's new" feed (before renderTree so tree dots show)
     renderTree();
     if(centerView==="scopechat"){ /* a live chat — don't clobber it */ }
-    else if(centerView==="ops"){ renderOps(false); }   // refresh running-ops/history live; keep cached deploys (no network)
     else { const t=findTask();
       if(t) renderFacts(t);                 // a task is open → refresh its facts (never disturb open chats)
       else if(SEL && SEL.g && SEL.tid===null && groupOf(SEL.p, SEL.g)){   // a group is selected → its dashboard
         renderGroupView(SEL.p, SEL.g); renderGroupFacts(SEL.p, SEL.g); centerMode("group"); }
       else { renderHome(); centerMode(true); }   // nothing selected → live triage overview (refreshes each tick)
     }
+    if($("ops-modal")) renderOps(false);   // ops modal open → refresh running-ops/history live (cached deploys, no network)
     setStatus("обновлено " + new Date().toLocaleTimeString());
   }catch(e){ setStatus("ошибка движка: "+e, true); }
 }
@@ -865,13 +865,21 @@ function goHome(){            // clicking the cc logo deselects → back to the 
 // ---- global OPS console (view): where each repo is deployed (dev/stage/prod) + the shipping history ----
 const OPS_SHIP=new Set(["ops.start","group.mr","group.merge","task.merge"]);   // "shipping" actions for the history feed
 const OPS_LABEL={ "ops.start":"тест/деплой запущен", "group.mr":"релиз: MR в master", "group.merge":"влиты задачи группы", "task.merge":"влита задача" };
-function openOps(){ SEL=null; hideCard(); centerMode("ops"); renderOps(true); }   // first open → fetch deploys
+function openOps(){   // global ops MODAL (toggle); history + "can I act now" + run actions from one place
+  if($("ops-modal")){ $("ops-modal").remove(); return; }
+  const ov=el("div","overlay"); ov.id="ops-modal"; ov.onclick=(e)=>{ if(e.target===ov) ov.remove(); };
+  const box=el("div","modal ops-box");
+  const head=el("div","mhead"); head.append(el("span",null,"⚙ Операции"),
+    el("span","ops-head-r"), btn("✕", ()=>ov.remove(), "ghost"));
+  const body=el("div"); body.id="ops-body"; body.className="ops-body";
+  box.append(head, body); ov.append(box); document.body.append(ov);
+  renderOps(true);   // first open → fetch deploys
+}
 let opsDeployCache=null;   // deploy state is network — fetch on open/↻, reuse on the poll
 async function renderOps(refetchDeploys){
-  const v=$("opsview"); if(!v) return; v.innerHTML="";
-  const head=el("div","ops-head");
-  head.append(el("div","ops-title","Операции"), btn("↻ Обновить", ()=>renderOps(true), "ghost"));
-  v.append(head);
+  const v=$("ops-body"); if(!v) return; v.innerHTML="";
+  const hr=document.querySelector("#ops-modal .ops-head-r");
+  if(hr){ hr.innerHTML=""; hr.append(btn("↻ Обновить", ()=>renderOps(true), "ghost")); }
   const tip=(b,s)=>{ b.title=s; return b; };
   // 1) running / recent ops (LOCAL, from snapshot) — facts-based ✓/✗; refreshes on the poll
   const running=[];
@@ -906,7 +914,7 @@ async function renderOps(refetchDeploys){
   v.append(el("div","ops-sec","Где что залито (dev · stage · prod)"));
   const dep=el("div","ops-dep"); v.append(dep);
   try{ const recs=JSON.parse((await invoke("run_cc",{args:["log","--json","-n","60"]}))||"[]").filter(r=>OPS_SHIP.has(r.action));
-    if($("opsview")!==v) return; hist.innerHTML="";
+    if($("ops-body")!==v) return; hist.innerHTML="";
     if(!recs.length) hist.append(el("div","dim","пока нет записей о деплоях/релизах"));
     recs.slice(0,20).forEach(r=>{ const row=el("div","ops-hrow");
       const d=new Date((r.ts||0)*1000), ts=("0"+d.getDate()).slice(-2)+"."+("0"+(d.getMonth()+1)).slice(-2)+" "+("0"+d.getHours()).slice(-2)+":"+("0"+d.getMinutes()).slice(-2);
@@ -919,7 +927,7 @@ async function renderOps(refetchDeploys){
     try{ opsDeployCache=JSON.parse((await invoke("run_cc",{args:["deploys","--all","--json"]}))||"[]"); }
     catch(e){ if($("opsview")===v){ dep.innerHTML=""; dep.append(el("div","dim","✗ деплои: "+e)); } return; }
   }
-  if($("opsview")!==v) return;
+  if($("ops-body")!==v) return;
   renderDeployTable(dep, opsDeployCache||[]);
 }
 function renderDeployTable(dep, dd){
@@ -1349,7 +1357,13 @@ function globalKeydown(e){
   const chord=chordOf(e);
   const pal=$("cmdpal");
   if(pal){ if(chord && chord===keyFor("palette")){ e.preventDefault(); pal.remove(); } return; }  // Cmd+P toggles palette
-  if(document.querySelector(".overlay")) return;   // another modal/search owns the keys while open
+  const ov=document.querySelector(".overlay");
+  if(ov){                                          // a modal is open
+    if(e.key==="Escape"){ e.preventDefault(); try{ov._un&&ov._un();}catch(_){}; ov.remove(); if(ov.id==="scratch-modal") scratchActive=null; return; }
+    if(chord && chord===keyFor("scratch")){ e.preventDefault(); toggleScratch(); return; }   // its own hotkey still toggles
+    if(chord && chord===keyFor("ops")){ e.preventDefault(); openOps(); return; }
+    return;                                        // otherwise the modal owns the keys
+  }
   if(!chord) return;
   for(const c of COMMANDS){ const k=keyFor(c.id); if(k && k===chord){ e.preventDefault(); c.run(); return; } }
 }
