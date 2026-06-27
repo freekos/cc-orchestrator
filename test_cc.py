@@ -883,6 +883,41 @@ def test_jira_write_pull_only_by_default():
     assert cc.jira_write_on({"write": True}) is True
 
 
+def test_group_new_logical_grouping():
+    # ad-hoc grouping: create a local group + move tasks logically (branch/worktrees untouched);
+    # a task with an open MR is skipped (its target can't silently change), single-membership.
+    import io, json as _json, contextlib
+    state = {
+        "projects": {"P": {"path": "/tmp/p", "repos": {"r1": {}}}},
+        "epics": {"P__loose": {"project": "P", "loose": True, "targets": {}, "mode": "targets"}},
+        "tasks": {
+            "t1": {"epic": "P__loose", "repos": ["r1"], "base": {"r1": "main"}},
+            "t2": {"epic": "P__loose", "repos": ["r1"], "base": {"r1": "main"}, "mrs": {"r1": "!1"}},
+        },
+    }
+    saved = (cc.load_state, cc.save_state, cc.write_task_claude_md, cc.mr_target_for)
+    try:
+        cc.load_state = lambda: state
+        cc.save_state = lambda s: None
+        cc.write_task_claude_md = lambda s, tid: None
+        cc.mr_target_for = lambda k, e, p, r: "main"
+
+        class A:
+            project = "P"; name = "Моя группа"; tasks = "t1,t2"; json = True
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            cc.cmd_group_new(A())
+        out = _json.loads(buf.getvalue())
+        assert out["moved"] == ["t1"], out
+        assert len(out["skipped"]) == 1 and out["skipped"][0]["task"] == "t2", out
+        gkey = out["key"]
+        assert state["tasks"]["t1"]["epic"] == gkey, "t1 reassigned to the new group"
+        assert state["tasks"]["t2"]["epic"] == "P__loose", "t2 untouched (had an MR)"
+        assert state["epics"][gkey]["local"] is True and state["epics"][gkey]["project"] == "P"
+    finally:
+        cc.load_state, cc.save_state, cc.write_task_claude_md, cc.mr_target_for = saved
+
+
 if __name__ == "__main__":
     n = 0
     for k, v in list(globals().items()):
