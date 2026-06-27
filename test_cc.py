@@ -883,6 +883,26 @@ def test_jira_write_pull_only_by_default():
     assert cc.jira_write_on({"write": True}) is True
 
 
+def test_task_land_requires_branch():
+    # land must refuse a task with no branch (nothing to merge) rather than do something undefined
+    state = {"tasks": {"t1": {"epic": "e", "repos": []}}, "epics": {"e": {"project": "P"}},
+             "projects": {"P": {"repos": {}}}}
+    saved = cc.load_state
+    try:
+        cc.load_state = lambda: state
+
+        class A:
+            task = "t1"; push = False; json = False
+        raised = False
+        try:
+            cc.cmd_task_land(A())
+        except SystemExit:
+            raised = True
+        assert raised, "land without a branch must die"
+    finally:
+        cc.load_state = saved
+
+
 def test_automerge_toggle_default_off():
     # auto-merge is OFF by default (no key); on/off sets/clears the flag on project + group
     import io, contextlib
