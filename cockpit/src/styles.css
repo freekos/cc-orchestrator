@@ -320,6 +320,16 @@ h2 { margin:0; font-size:17px; font-weight:650; }
 .ops-envk { font-size:9.5px; text-transform:uppercase; letter-spacing:.04em; color:var(--dim); }
 .ops-envv { font:11px Menlo,monospace; color:var(--text); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 .env-prod .ops-envk { color:#fbbf24; }
+/* ops: running + trigger-by-feature */
+.ops-orow { display:flex; align-items:center; gap:10px; padding:7px 10px; border-bottom:1px solid var(--border); font-size:12.5px; }
+.ops-orow .mark { flex:0 0 14px; }
+.ops-ok { flex:0 0 auto; color:var(--text); font-weight:600; }
+.ops-og { flex:1; min-width:0; color:var(--dim); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.ops-oci { flex:0 0 auto; color:var(--dim); font:11px Menlo,monospace; }
+.ops-trow { display:flex; align-items:center; gap:8px; padding:7px 10px; border:1px solid var(--border); border-radius:8px; margin-bottom:5px; }
+.ops-tg { flex:1; min-width:0; color:var(--text); font-size:13px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.ops-tgp { flex:0 0 auto; color:var(--dim); font-size:10px; background:var(--panel2); border:1px solid var(--border); border-radius:4px; padding:1px 5px; }
+.ops-trow .btn { flex:0 0 auto; }
 /* ---- task search palette (Cmd+P) ---- */
 .pal-ov { align-items:flex-start; }
 .palette-box { width:640px; max-width:92vw; margin-top:11vh; background:var(--panel); border:1px solid var(--border); border-radius:12px; box-shadow:0 24px 70px rgba(0,0,0,.6); display:flex; flex-direction:column; max-height:70vh; overflow:hidden; }
