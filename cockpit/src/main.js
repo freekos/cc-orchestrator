@@ -885,8 +885,9 @@ function renderGroupView(pn, gkey){
   if((g.combined||[]).length) sub.append(el("span",null,"·"), el("span","gv-comb","⊕ собрано "+(g.combined||[]).length));
   v.append(sub);
   const nx=el("div","gv-nextrow");
+  const ntb=btn("+ Задача", ()=>openNewTask(gkey), "ghost"); ntb.title="Новая задача в этой фиче (Cmd+T при открытой фиче — то же)";
   const fb=btn("💬 Чат фичи", ()=>openFeatureChat(pn,gkey), "ghost"); fb.title="Чат про состояние фичи (агент знает её задачи и combined)";
-  nx.append(el("div","gv-next", groupNextStep(g, active)), fb);
+  nx.append(el("div","gv-next", groupNextStep(g, active)), ntb, fb);
   v.append(nx);
   const SECTIONS=[
     {label:"🔵 В работе", match:t=>t.status==="running"},
@@ -1011,7 +1012,9 @@ function openProjectChat(pn){
 }
 // Cmd+T → create a task under a project (epic-less) or under an epic. Defaults: --manual (no auto
 // background agent — you drive it in the cockpit chat) + --no-jira (quick local task; link Jira later).
-function openNewTask(presetProject){
+// Cmd+T preset: a selected feature → its epic key (task lands IN the feature); a task → its project; else none
+function newTaskPreset(){ if(SEL && SEL.g && SEL.tid===null) return SEL.g; if(SEL && SEL.p) return SEL.p; return undefined; }
+function openNewTask(preset){   // preset = project name OR epic key → preselects "куда добавить"
   if(!STATE || !STATE.projects) return;
   const projNames=Object.keys(STATE.projects);
   if(!projNames.length){ setStatus("нет проектов", true); return; }
@@ -1033,7 +1036,7 @@ function openNewTask(presetProject){
     }
     where.append(og);
   }
-  if(presetProject && STATE.projects[presetProject]) where.value=presetProject;
+  if(preset){ const o=[...where.options].find(o=>o.value===preset); if(o) where.value=preset; }   // project or feature
   body.append(field("Задача", promptInp), field("Куда добавить", where));
   const foot=el("div","mem-foot"); const status=el("span","nt-status","");
   const run=async()=>{
@@ -1166,8 +1169,8 @@ function openSearch(){
 // in localStorage) maps a chord → command. The palette lists them and lets you rebind each.
 const COMMANDS=[
   {id:"new-chat", key:"mod+t", label:"Новый чат", hint:"в текущей задаче", when:()=>!!findTask(),
-    run:()=>{ const t=findTask(); if(t) openChatTab(t, engine); else openNewTask(SEL?SEL.p:undefined); }},
-  {id:"new-task", label:"Новая задача…", run:()=>openNewTask(SEL?SEL.p:undefined)},
+    run:()=>{ const t=findTask(); if(t) openChatTab(t, engine); else openNewTask(newTaskPreset()); }},
+  {id:"new-task", label:"Новая задача…", run:()=>openNewTask(newTaskPreset())},
   {id:"search", key:"mod+shift+f", label:"Поиск задач…", run:()=>openSearch()},
   {id:"palette", key:"mod+p", label:"Палитра команд…", run:()=>openCommandPalette()},
   {id:"home", label:"На обзор (домой)", run:()=>goHome()},
