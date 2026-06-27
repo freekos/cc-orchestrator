@@ -2877,6 +2877,81 @@ def cmd_epic_ops(args):
     print("ops-агент [%s] запущен для группы %s (pid=%s)\n  лог: %s\n  статус из exit-code + CI-факта (не из слов агента)"
           % (kind, args.key, proc.pid, log))
 
+
+def cmd_project_ops(args):
+    """Launch an ops agent for a WHOLE PROJECT — run/test/deploy its repos on their main/master, as a
+    unit (not a group/feature). Mirrors `epic ops`, scoped to the project's main checkouts."""
+    kind = args.kind
+    if kind not in OPS_KINDS:
+        die("kind должен быть один из: %s" % ", ".join(OPS_KINDS))
+    s = load_state()
+    proj = s["projects"].get(args.project) or die("unknown project '%s'" % args.project)
+    wts = []
+    for r in list((proj.get("repos") or {}).keys()):
+        rp = (proj["repos"].get(r) or {}).get("path")
+        if rp and os.path.isdir(rp):
+            wts.append((r, rp, default_branch(rp)))
+    if not wts:
+        die("в проекте %s нет репозиториев с путями на диске" % args.project)
+    this_repos = [r for r, _, _ in wts]
+    clash = _running_ops_overlap(s, this_repos)
+    if clash and not getattr(args, "force", False):
+        lines = "\n".join("  - [%s] %s (pid %s) — пересечение: %s" % (o.get("kind", "?"), oid2, o.get("pid", "?"), ", ".join(rs))
+                          for oid2, o, rs in clash)
+        die("уже идёт ops на тех же репозиториях — два прогона столкнутся:\n%s\nДождись (или --force)." % lines)
+    key = "__project_" + args.project
+    opsdir = Path(proj["path"]) / "cctui" / "__project__" / ("_ops-" + kind)
+    opsdir.mkdir(parents=True, exist_ok=True)
+    label, body = OPS_KINDS[kind]
+    repo_map = "\n".join("- %s  (branch %s)  ->  %s" % (r, br, wt) for r, wt, br in wts)
+    runbook = (
+        "# cc OPS agent — %s — PROJECT %s (main)\n\n"
+        "You are a cc OPS agent for the WHOLE PROJECT on its main/master branch. cc gives you the scope "
+        "+ rules; YOU figure out the project specifics.\n\n"
+        "## Project repos & checkouts (the work lives here — touch ONLY these, each on its main branch):\n%s\n\n"
+        "## Your job\n%s\n\n"
+        "## Rules\n"
+        "- Do NOT run git — cc owns branches/commits/MRs. Work only inside the checkouts above.\n"
+        "- You run NON-INTERACTIVELY in the background: NEVER call AskUserQuestion, never wait. If you "
+        "genuinely cannot proceed, make the VERY LAST line exactly:\n"
+        "  `[cc-needs-input] <one-line question + your recommended default>`  (nothing after it).\n"
+        "- REPORT each step + result as you go.\n"
+        "- When you TRIGGER a CI pipeline/run, output exactly one line "
+        "`[cc-ci] <github|gitlab> <project> <pipeline-id>` so cc verifies the result FROM CI itself.\n"
+    ) % (label, args.project, repo_map, body)
+    (opsdir / "CLAUDE.md").write_text(runbook)
+    oid = ops_id(key, kind)
+    log = STATE_DIR / ("%s.log" % oid)
+    exit_file = STATE_DIR / ("%s.exit" % oid)
+    ci_file = STATE_DIR / ("%s.ci" % oid)
+    for stale in (exit_file, ci_file):
+        try:
+            stale.unlink()
+        except OSError:
+            pass
+    s.setdefault("ops", {})[oid] = {"project": args.project, "kind": kind, "dir": str(opsdir),
+                                    "log": str(log), "exit": str(exit_file), "ci": str(ci_file),
+                                    "repos": this_repos, "status": "running", "claude_session": {}}
+    save_state(s)
+    audit("ops.start", project=args.project, kind=kind)
+    if getattr(args, "manual", False):
+        print("ops dir готов (manual, агент не запущен): %s" % opsdir)
+        return
+    prompt = ("[cc] You are the OPS agent for PROJECT %s (%s) on main. Follow this folder's CLAUDE.md: "
+              "study the repos, do the job, report each step, end with `[cc-done] <what you did + how to "
+              "verify>` on success or a single `[cc-needs-input] …` line if you must stop." % (args.project, kind))
+    addflags = []
+    for _, wt, _ in wts:
+        addflags += ["--add-dir", wt]
+    cc_dir = os.path.dirname(os.path.abspath(__file__))
+    with open(log, "w") as lf:
+        proc = subprocess.Popen([sys.executable, "-c", _OPS_WRAP, cc_dir, str(exit_file), str(ci_file), str(log),
+                                 "claude", "--permission-mode", "bypassPermissions", "-p", prompt] + addflags,
+                                cwd=str(opsdir), stdout=lf, stderr=lf)
+    s = load_state(); s["ops"][oid]["pid"] = proc.pid; save_state(s)
+    print("ops-агент [%s] запущен для ПРОЕКТА %s (pid=%s)\n  лог: %s\n  статус из exit-code + CI-факта" % (kind, args.project, proc.pid, log))
+
+
 def cmd_epic_open(args):
     s = load_state()
     e = s["epics"].get(args.key) or die("unknown epic '%s'" % args.key)
@@ -3652,6 +3727,9 @@ def build_parser():
     a.set_defaults(fn=cmd_project_jira)
     a = pj.add_parser("automerge"); a.add_argument("project"); a.add_argument("mode", choices=["on", "off"])
     a.set_defaults(fn=cmd_project_automerge)
+    a = pj.add_parser("ops"); a.add_argument("project"); a.add_argument("--kind", default="test")
+    a.add_argument("--force", action="store_true"); a.add_argument("--manual", action="store_true")
+    a.set_defaults(fn=cmd_project_ops)
 
     a = sub.add_parser("deploys"); a.add_argument("project", nargs="?"); a.add_argument("repo", nargs="?")
     a.add_argument("--all", action="store_true", help="every project (for the cockpit ops console)")
@@ -4065,8 +4143,11 @@ def cmd_snapshot(args):
                            "archived": bool(e.get("archived")), "automerge": bool(e.get("automerge")),
                            "tasks": tasks, "ops": ops,
                            "combined": combined, "combined_branch": combined_branch(k)})
+        proj_ops = [{"oid": oid, "kind": o.get("kind", "?"), "status": _snap_ops_status(o),
+                     "ci": (_ci_facts(o) or {}).get("pipelines") or None}
+                    for oid, o in (s.get("ops") or {}).items() if o.get("project") == pn]
         out["projects"][pn] = {"kind": p.get("kind", "—"), "path": p.get("path", ""),
-                               "automerge": bool(p.get("automerge")),
+                               "automerge": bool(p.get("automerge")), "ops": proj_ops,
                                "repos": list((p.get("repos") or {}).keys()), "groups": groups}
     print(json.dumps(out, ensure_ascii=False, indent=2))
 

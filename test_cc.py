@@ -883,6 +883,18 @@ def test_jira_write_pull_only_by_default():
     assert cc.jira_write_on({"write": True}) is True
 
 
+def test_project_ops_validates_kind():
+    # project ops as a unit: an unknown kind must die rather than launch a bogus agent
+    class A:
+        project = "P"; kind = "bogus"; force = False; manual = True
+    raised = False
+    try:
+        cc.cmd_project_ops(A())
+    except SystemExit:
+        raised = True
+    assert raised, "unknown ops kind must die"
+
+
 def test_task_land_requires_branch():
     # land must refuse a task with no branch (nothing to merge) rather than do something undefined
     state = {"tasks": {"t1": {"epic": "e", "repos": []}}, "epics": {"e": {"project": "P"}},
