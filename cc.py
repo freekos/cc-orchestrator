@@ -1074,6 +1074,51 @@ def cmd_task_regroup(args):
     for r in t["repos"]:
         print("  %s -> %s" % (r, t["base"][r]))
 
+def _local_group_key(s, name):
+    base = "g-" + (slugify(name) or "group")
+    key = base; i = 2
+    while key in s["epics"]:
+        key = "%s-%d" % (base, i); i += 1
+    return key
+
+
+def cmd_group_new(args):
+    """Create a LOCAL group (no Jira, no epic ceremony) and optionally move tasks into it. Logical
+    grouping: branch + worktrees are untouched, single-membership (a task is in exactly one group).
+    Backs the cockpit's ad-hoc 'select tasks -> Сгруппировать' flow. Skips tasks with an open MR
+    (their target won't change) or from another project."""
+    s = load_state()
+    proj_name = args.project
+    proj = s["projects"].get(proj_name) or die("unknown project '%s'" % proj_name)
+    name = (args.name or "").strip() or "Группа"
+    key = _local_group_key(s, name)
+    s["epics"][key] = {"project": proj_name, "summary": name, "targets": {}, "mode": "epic_branch",
+                       "branch": key, "repos": None, "memory": "", "local": True}
+    moved, skipped = [], []
+    tids = [x.strip() for x in (args.tasks or "").split(",") if x.strip()]
+    for tid in tids:
+        t = s["tasks"].get(tid)
+        if not t:
+            skipped.append({"task": tid, "why": "нет такой задачи"}); continue
+        if s["epics"].get(t.get("epic"), {}).get("project") != proj_name:
+            skipped.append({"task": tid, "why": "другой проект"}); continue
+        if t.get("mrs"):
+            skipped.append({"task": tid, "why": "есть MR"}); continue
+        t["epic"] = key
+        t["base"] = {r: mr_target_for(key, s["epics"][key], proj, r) for r in t["repos"]}
+        moved.append(tid)
+    save_state(s)
+    for tid in moved:
+        write_task_claude_md(s, tid); audit("task.regroup", task=tid, to=key)
+    if getattr(args, "json", False):
+        print(json.dumps({"key": key, "summary": name, "moved": moved, "skipped": skipped}, ensure_ascii=False))
+    else:
+        print("группа '%s' (%s) создана под '%s' — назначено %d, пропущено %d" % (
+            name, key, proj_name, len(moved), len(skipped)))
+        for sk in skipped:
+            print("  пропущено %s: %s" % (sk["task"], sk["why"]))
+
+
 def cmd_task_add(args):
     s = load_state()
     # `args.epic` may be a real epic key OR a PROJECT name — the latter creates an epic-LESS task that
@@ -3566,6 +3611,9 @@ def build_parser():
     # Both register the SAME subcommands → identical behaviour, internal state key stays "epic"
     # (zero migration). New code/users should say `cc group …`.
     def _add_group_cmds(grp):
+        a = grp.add_parser("new"); a.add_argument("project"); a.add_argument("name")
+        a.add_argument("--tasks", help="comma-separated task ids to move into the new group")
+        a.add_argument("--json", action="store_true"); a.set_defaults(fn=cmd_group_new)
         a = grp.add_parser("add"); a.add_argument("project"); a.add_argument("key")
         a.add_argument("--summary"); a.add_argument("--target", action="append"); a.add_argument("--repos")
         a.set_defaults(fn=cmd_epic_add)

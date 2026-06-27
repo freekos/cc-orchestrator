@@ -130,9 +130,12 @@ function folderIcon(open){
   return s;
 }
 function taskRow(t, pn, gkey){
-  const row=el("div","task"+(SEL&&SEL.tid===t.tid?" sel":"")+(unseen.has(t.tid)?" has-update":""));
+  const picked=selectedTasks.has(t.tid);
+  const row=el("div","task"+(SEL&&SEL.tid===t.tid?" sel":"")+(unseen.has(t.tid)?" has-update":"")+(picked?" picked":""));
+  const cb=el("span","task-check", picked?"☑":"☐");   // ad-hoc grouping: multi-select tasks → "Сгруппировать"
+  cb.onclick=(e)=>{ e.stopPropagation(); toggleTaskSel(t, pn); };
   const lbl=el("span","label", t.title);     // full title + context live in the hover-card now
-  row.append(statusMark(t.status), lbl);
+  row.append(cb, statusMark(t.status), lbl);
   const w=shortTime(t.activity); if(w){ const sp=el("span","when", w); sp.title="трогали "+relTime(t.activity); row.append(sp); }
   row.onclick=()=>selectTask(t, pn, gkey);
   row.onmouseenter=()=>showTaskCard(t, row); row.onmouseleave=hideCard;
@@ -141,6 +144,47 @@ function taskRow(t, pn, gkey){
 function opsRow(o){
   const row=el("div","ops"); const lbl=el("span","label","ops: "+o.kind); lbl.title="ops: "+o.kind;
   row.append(statusMark(o.status), lbl); return row;
+}
+// ---- ad-hoc grouping: select tasks (one project) → create a local group (logical, no Jira) ----
+const selectedTasks = new Set(); let selProject = null;
+function toggleTaskSel(t, pn){
+  if(selectedTasks.has(t.tid)) selectedTasks.delete(t.tid);
+  else {
+    if(selectedTasks.size && selProject && selProject!==pn){ setStatus("группировать можно задачи одного проекта", true); return; }
+    selectedTasks.add(t.tid); selProject=pn;
+  }
+  if(!selectedTasks.size) selProject=null;
+  renderTree(); renderSelBar();
+}
+function clearSel(){ selectedTasks.clear(); selProject=null; renderTree(); renderSelBar(); }
+function renderSelBar(){
+  let bar=$("selbar");
+  document.body.classList.toggle("selecting", selectedTasks.size>0);
+  if(!selectedTasks.size){ if(bar) bar.remove(); return; }
+  if(!bar){ bar=el("div"); bar.id="selbar"; document.body.append(bar); }
+  bar.innerHTML="";
+  bar.append(el("span","selbar-n","Выбрано "+selectedTasks.size),
+             btn("Сгруппировать", groupSelected, "primary"), btn("Снять", clearSel, "ghost"));
+}
+function groupSelected(){
+  if(!selectedTasks.size || !selProject) return;
+  const n=selectedTasks.size;
+  const ov=el("div","overlay"); ov.onclick=(e)=>{ if(e.target===ov) ov.remove(); };
+  const box=el("div","modal form");
+  const head=el("div","mhead"); head.append(el("span",null,"Сгруппировать "+n+" задач"), btn("✕",()=>ov.remove(),"ghost"));
+  const inp=el("input","mem-inp"); inp.placeholder="Название группы (можно переименовать позже)";
+  const go=btn("Создать группу", async()=>{
+    const name=inp.value.trim()||"Группа"; const tids=[...selectedTasks].join(",");
+    ov.remove();
+    try{ const out=JSON.parse((await invoke("run_cc",{args:["group","new",selProject,name,"--tasks",tids,"--json"]}))||"{}");
+      const moved=(out.moved||[]).length, skip=(out.skipped||[]).length;
+      setStatus("группа «"+(out.summary||name)+"»: назначено "+moved+(skip?(", пропущено "+skip):""));
+      clearSel(); await load();
+    }catch(e){ setStatus("не удалось сгруппировать: "+e, true); }
+  }, "primary");
+  const body=el("div","nt-body"); body.append(inp, go);
+  box.append(head, body); ov.append(box); document.body.append(ov); inp.focus();
+  inp.onkeydown=(e)=>{ if(e.key==="Enter"){ e.preventDefault(); go.click(); } else if(e.key==="Escape") ov.remove(); };
 }
 function projectAlert(p){   // loudest signal across all the project's groups (bubbled to the folder row)
   if (p.groups.some(g=>groupAlert(g)==="needs_input")) return "needs_input";
