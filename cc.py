@@ -3979,10 +3979,15 @@ def cmd_recover(args):
                                     "mode": "epic_branch", "branch": epic, "targets": {}, "mrs": {}}
             tid = _unique_tid(s, epic, o["slug"])
             base = {r: target_for(s["epics"][epic], proj, r) for r in o["repos"]}   # honors epic/loose targets
+            order = list(o["repos"].keys())
+            wts = dict(o["repos"])
+            primary = order[0] if order else None
+            task_dir = str(Path(wts[primary]).parent) if primary and wts.get(primary) else None
             s["tasks"][tid] = {
                 "epic": epic, "title": o["slug"], "branch": o["branch"],
-                "repos": list(o["repos"].keys()), "worktrees": dict(o["repos"]),
+                "repos": order, "worktrees": wts,
                 "base": base, "mrs": {}, "log": str(STATE_DIR / (tid + ".log")),
+                "primary": primary, "dir": task_dir,   # like a normal task → TUI/cockpit open chat without KeyError
                 "recovered": True,
             }
             recovered.append((tid, epic, o["branch"]))
