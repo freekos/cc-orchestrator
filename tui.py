@@ -1831,17 +1831,23 @@ class CCApp(App):
         cm = _cmux_path()
         if not cm:
             open_in_terminal(cwd, cmd); return "terminal"
-        r = subprocess.run([cm, "new-surface", "--type", "terminal", "--focus", "true"],
-                           capture_output=True, text=True)
+        try:
+            r = subprocess.run([cm, "new-surface", "--type", "terminal", "--focus", "true"],
+                               capture_output=True, text=True, timeout=10)
+        except Exception:
+            open_in_terminal(cwd, cmd); return "terminal"   # cmux hung/failed — never freeze; fall back
         m = re.search(r"surface:\d+|[0-9a-fA-F]{8}-[0-9a-fA-F-]{27,}", (r.stdout or "") + (r.stderr or ""))
         ref = m.group(0) if m else None
         if not ref:
             open_in_terminal(cwd, cmd); return "terminal"
         # leading newline first: dismisses any pending interactive shell prompt (e.g. oh-my-zsh
         # "[Y/n] update?") that would otherwise eat the start of the `cd` and land claude in the wrong cwd.
-        subprocess.run([cm, "send", "--surface", ref, "--", "\ncd %s && %s\n" % (shlex.quote(cwd), cmd)],
-                       capture_output=True)
-        subprocess.run([cm, "rename-tab", "--surface", ref, name], capture_output=True)
+        try:
+            subprocess.run([cm, "send", "--surface", ref, "--", "\ncd %s && %s\n" % (shlex.quote(cwd), cmd)],
+                           capture_output=True, timeout=10)
+            subprocess.run([cm, "rename-tab", "--surface", ref, name], capture_output=True, timeout=10)
+        except Exception:
+            pass
         return "cmux"
 
     def _open_ops(self, oid):
@@ -1874,13 +1880,23 @@ class CCApp(App):
         if not cwd or not os.path.isdir(cwd):
             self.notify("worktree missing — recreate the task", severity="error"); return
         self._mark_seen(tid)
-        subprocess.run([sys.executable, ENGINE, "task", "setup", tid], capture_output=True)  # rules always fresh on open
-        sid = ((t.get("claude_session") or {}).get(prim) if prim else None) or cc.resolve_session(cwd)
-        chat = "claude --resume %s --permission-mode auto" % sid if sid else "claude --permission-mode auto"
         pname = self.state()["epics"].get(t.get("epic"), {}).get("project")
-        chat += self._jira_flags(pname)
-        where = self._open_chat_tab("cc:%s" % tid, cwd, chat)
-        self.notify("чат %s открыт в новой вкладке (%s); Cmd-W закрыть" % (tid, where))
+        jflags = self._jira_flags(pname)
+        sess = (t.get("claude_session") or {}).get(prim) if prim else None
+        self.notify("открываю чат %s …" % tid)
+        # do the blocking work (task setup + cmux/terminal launch) OFF the main thread — a slow/hung
+        # cmux must never freeze the whole TUI (the bug). Daemon thread + call_from_thread for the toast.
+        def _open():
+            try:
+                subprocess.run([sys.executable, ENGINE, "task", "setup", tid], capture_output=True, timeout=60)
+            except Exception:
+                pass   # stale rules are fine; never block the chat on a slow setup
+            sid = sess or cc.resolve_session(cwd)
+            chat = ("claude --resume %s --permission-mode auto" % sid) if sid else "claude --permission-mode auto"
+            chat += jflags
+            where = self._open_chat_tab("cc:%s" % tid, cwd, chat)
+            self.call_from_thread(lambda: self.notify("чат %s открыт (%s); Cmd-W закрыть" % (tid, where)))
+        self._bg("open:%s" % tid, _open)
 
     def action_project_setup(self):
         proj = self._current_project()
