@@ -1800,9 +1800,21 @@ class CCApp(App):
         proj = self.state()["projects"].get(project_name, {})
         return cc.chat_jira_flags(proj, project_name)
 
+    def _resolve_cwd(self, t):
+        """cwd + primary repo for a task. Recovered/older tasks may lack 'primary'/'dir' — fall back to
+        the first repo that has a worktree, then to any worktree, so opening a chat never KeyErrors."""
+        wts = t.get("worktrees") or {}
+        prim = t.get("primary")
+        if not prim or prim not in wts:
+            prim = next((r for r in (t.get("repos") or []) if r in wts), None) or next(iter(wts), None)
+        cwd = t.get("dir")
+        if not cwd and prim and wts.get(prim):
+            cwd = os.path.dirname(wts[prim])   # task root (parent of the repo worktrees), like a normal task's 'dir'
+        return cwd, prim
+
     def _chat_cmd(self, t):
-        cwd = t.get("dir") or t["worktrees"][t["primary"]]
-        sid = t.get("claude_session", {}).get(t["primary"]) or cc.resolve_session(cwd)
+        cwd, prim = self._resolve_cwd(t)
+        sid = ((t.get("claude_session") or {}).get(prim) if prim else None) or (cc.resolve_session(cwd) if cwd else None)
         base = ("claude --resume %s --permission-mode auto" % sid) if sid else "claude --permission-mode auto"
         pname = self.state()["epics"].get(t.get("epic"), {}).get("project")
         return cwd, base + self._jira_flags(pname)
@@ -1858,12 +1870,12 @@ class CCApp(App):
             self.notify("встань на задачу, группу или проект — o откроет чат")
             return
         t = self.state()["tasks"][tid]
-        cwd = t.get("dir") or t["worktrees"][t["primary"]]
-        if not os.path.isdir(cwd):
+        cwd, prim = self._resolve_cwd(t)
+        if not cwd or not os.path.isdir(cwd):
             self.notify("worktree missing — recreate the task", severity="error"); return
         self._mark_seen(tid)
         subprocess.run([sys.executable, ENGINE, "task", "setup", tid], capture_output=True)  # rules always fresh on open
-        sid = (t.get("claude_session") or {}).get(t["primary"]) or cc.resolve_session(cwd)
+        sid = ((t.get("claude_session") or {}).get(prim) if prim else None) or cc.resolve_session(cwd)
         chat = "claude --resume %s --permission-mode auto" % sid if sid else "claude --permission-mode auto"
         pname = self.state()["epics"].get(t.get("epic"), {}).get("project")
         chat += self._jira_flags(pname)
