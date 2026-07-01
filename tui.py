@@ -1933,7 +1933,24 @@ class CCApp(App):
         where = self._open_chat_tab("cc:epic %s" % ekey, edir, cmd)
         self.notify("чат эпика %s %s (%s) — релиз/координация" % (ekey, "продолжен" if sid else "открыт", where))
 
+    def _cursor_epic(self, ekey):
+        # open the feature COMBINED (all its tasks merged into one branch per repo) in Cursor — for
+        # debugging the whole feature together / reviewing what the tasks produced.
+        if not shutil.which("cursor"):
+            self.notify("cursor CLI не установлен (нет в PATH)", severity="error"); return
+        cwts = (self.state()["epics"].get(ekey) or {}).get("combined_worktrees") or {}
+        if not cwts:
+            self.notify("фича не собрана — собери combined (⊕), потом откроется в Cursor", severity="error"); return
+        folder = os.path.dirname(next(iter(cwts.values())))   # cctui/<key>/__combined__ — все репо merged вместе
+        if not os.path.isdir(folder):
+            self.notify("combined-папка отсутствует — пересобери фичу (⊕)", severity="error"); return
+        subprocess.Popen(["cursor", folder])
+        self.notify("Cursor: combined фичи %s (все задачи вместе)" % ekey)
+
     def action_cursor(self):
+        data = self.current()
+        if data and data.get("type") == "epic":
+            self._cursor_epic(data["id"]); return
         tid = self._cur_task()
         if not tid:
             return
