@@ -981,6 +981,17 @@ def test_group_new_logical_grouping():
         cc.load_state, cc.save_state, cc.write_task_claude_md, cc.mr_target_for = saved
 
 
+def test_heal_task_dirs_backfills_recovered():
+    # recovered/older tasks lack primary/dir; load_state heals them in-memory from worktrees
+    d = {"tasks": {"t1": {"repos": ["a", "b"], "worktrees": {"a": "/x/task/a", "b": "/x/task/b"}}}}
+    cc._heal_task_dirs(d)
+    assert d["tasks"]["t1"]["primary"] == "a"
+    assert d["tasks"]["t1"]["dir"] == "/x/task"
+    keep = {"tasks": {"t2": {"primary": "b", "dir": "/keep", "worktrees": {"a": "/x/a", "b": "/x/b"}}}}
+    cc._heal_task_dirs(keep)
+    assert keep["tasks"]["t2"]["primary"] == "b" and keep["tasks"]["t2"]["dir"] == "/keep", "never clobber"
+
+
 if __name__ == "__main__":
     n = 0
     for k, v in list(globals().items()):

@@ -40,6 +40,23 @@ def glab_members(remote):
 def _valid_state(d):
     return isinstance(d, dict) and all(isinstance(d.get(k), dict) for k in ("projects", "epics", "tasks"))
 
+def _heal_task_dirs(d):
+    """Recovered/older tasks may lack 'primary'/'dir'. Backfill them IN MEMORY on every load (no
+    write) from the worktrees, so every consumer — TUI, cockpit snapshot — gets a usable task folder.
+    Never clobbers existing values; gets persisted whenever the task is next saved for another reason."""
+    try:
+        for t in (d.get("tasks") or {}).values():
+            wts = t.get("worktrees") or {}
+            if not wts:
+                continue
+            if not t.get("primary") or t.get("primary") not in wts:
+                t["primary"] = next((r for r in (t.get("repos") or []) if r in wts), None) or next(iter(wts), None)
+            if not t.get("dir") and t.get("primary") and wts.get(t["primary"]):
+                t["dir"] = os.path.dirname(wts[t["primary"]])
+    except Exception:
+        pass   # best-effort enrichment; must NEVER make load_state think the state is corrupt
+
+
 def load_state():
     if not STATE_FILE.exists():
         return {"projects": {}, "epics": {}, "tasks": {}}
@@ -47,6 +64,7 @@ def load_state():
         d = json.loads(STATE_FILE.read_text())
         if not _valid_state(d):
             raise ValueError("missing projects/epics/tasks")
+        _heal_task_dirs(d)
         return d
     except Exception as e:
         # state.json is torn/corrupt. NEVER fall back to empty — that would let the next save overwrite
