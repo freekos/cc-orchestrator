@@ -1937,14 +1937,18 @@ class CCApp(App):
         tid = self._cur_task()
         if not tid:
             return
-        subprocess.run([sys.executable, ENGINE, "task", "open", tid], capture_output=True)
         t = self.state()["tasks"].get(tid, {})
-        folder = t.get("dir")
-        if shutil.which("cursor") and folder and os.path.isdir(folder):
-            subprocess.Popen(["cursor", folder])
-            self.notify("Cursor открыт (папка задачи) для %s" % tid)
-        else:
-            self.notify("cursor CLI или папка задачи отсутствует", severity="error")
+        cwd, _ = self._resolve_cwd(t)   # recovered tasks lack 'dir' — derive it from the worktrees
+        if not shutil.which("cursor"):
+            self.notify("cursor CLI не установлен (нет в PATH)", severity="error"); return
+        if not cwd or not os.path.isdir(cwd):
+            self.notify("папка задачи отсутствует — пересоздай задачу", severity="error"); return
+        try:
+            subprocess.run([sys.executable, ENGINE, "task", "open", tid], capture_output=True, timeout=30)
+        except Exception:
+            pass
+        subprocess.Popen(["cursor", cwd])
+        self.notify("Cursor открыт (папка задачи) для %s" % tid)
 
     def action_mr_real(self):
         self._mr(False)
