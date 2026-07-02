@@ -1934,13 +1934,33 @@ class CCApp(App):
         self.notify("чат эпика %s %s (%s) — релиз/координация" % (ekey, "продолжен" if sid else "открыт", where))
 
     def _cursor_epic(self, ekey):
-        # open the feature COMBINED (all its tasks merged into one branch per repo) in Cursor — for
+        # open the feature COMBINED (ALL its tasks merged, one branch per repo) in Cursor — for
         # debugging the whole feature together / reviewing what the tasks produced.
         if not shutil.which("cursor"):
             self.notify("cursor CLI не установлен (нет в PATH)", severity="error"); return
-        cwts = (self.state()["epics"].get(ekey) or {}).get("combined_worktrees") or {}
+        st = self.state()
+        active = {tid for tid, t in st["tasks"].items() if t.get("epic") == ekey and not t.get("archived")}
+        g = st["epics"].get(ekey) or {}
+        have = set(g.get("combined") or [])
+        if active and not active.issubset(have):   # combined misses tasks → rebuild with the WHOLE feature
+            self.notify("собираю фичу целиком (%d задач) — Cursor откроется сам…" % len(active))
+            def _combine_and_open():
+                try:
+                    subprocess.run([sys.executable, ENGINE, "group", "combine", ekey, "--all"],
+                                   capture_output=True, timeout=600)
+                except Exception:
+                    pass
+                cwts2 = (cc.load_state()["epics"].get(ekey) or {}).get("combined_worktrees") or {}
+                if not cwts2:
+                    self.call_from_thread(lambda: self.notify("не собралось (конфликт/ошибка) — смотри ⊕", severity="error")); return
+                folder2 = os.path.dirname(next(iter(cwts2.values())))
+                subprocess.Popen(["cursor", folder2])
+                self.call_from_thread(lambda: self.notify("Cursor: combined фичи %s (%d репо)" % (ekey, len(cwts2))))
+            self._bg("combine:%s" % ekey, _combine_and_open)
+            return
+        cwts = g.get("combined_worktrees") or {}
         if not cwts:
-            self.notify("фича не собрана — собери combined (⊕), потом откроется в Cursor", severity="error"); return
+            self.notify("в фиче нет активных задач — собирать нечего", severity="error"); return
         folder = os.path.dirname(next(iter(cwts.values())))   # cctui/<key>/__combined__ — все репо merged вместе
         if not os.path.isdir(folder):
             self.notify("combined-папка отсутствует — пересобери фичу (⊕)", severity="error"); return

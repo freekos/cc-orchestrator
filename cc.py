@@ -991,6 +991,10 @@ def cmd_group_combine(args):
     s = load_state()
     g = s["epics"].get(args.group) or die("unknown group '%s'" % args.group)
     combined = list(g.get("combined", []))
+    if getattr(args, "all", False):   # include EVERY active task of the group (the whole feature)
+        for tid, t in s["tasks"].items():
+            if t.get("epic") == args.group and not t.get("archived") and tid not in combined:
+                combined.append(tid)
     if args.add:
         t = s["tasks"].get(args.add) or die("unknown task '%s'" % args.add)
         if t.get("epic") != args.group:
@@ -3808,6 +3812,7 @@ def build_parser():
         a = grp.add_parser("plan"); a.add_argument("key"); a.set_defaults(fn=cmd_epic_plan)
         a = grp.add_parser("merge"); a.add_argument("key"); a.add_argument("--dry-run", action="store_true"); a.add_argument("--squash", action="store_true"); a.set_defaults(fn=cmd_epic_merge)
         a = grp.add_parser("combine"); a.add_argument("group"); a.add_argument("--add"); a.add_argument("--remove")
+        a.add_argument("--all", action="store_true", help="include every active task of the group")
         a.set_defaults(fn=cmd_group_combine)
         a = grp.add_parser("dev"); a.add_argument("group"); a.add_argument("--json", action="store_true")
         a.set_defaults(fn=cmd_group_dev)   # local-run info for the combined branch (test the whole group)
