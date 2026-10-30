@@ -5,27 +5,71 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
 import cc
+from dataclasses import replace
+import tui_i18n
+from tui_i18n import tr
 
 from textual.app import App, ComposeResult
 from textual.screen import ModalScreen
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.widgets import Header, Footer, Tree, Static, Input, Button, Label, TextArea, Select
 from textual.binding import Binding
+from rich.markup import escape
 import threading
 
 ENGINE = str(Path(__file__).parent / "cc.py")
 GLYPH = {"running": "🔵", "review": "🟡", "mr": "🟣", "merged": "✅", "idle": "⚪", "done": "✅"}
-LEGEND = ("🟡 ждёт тебя   🔵 агент работает   🟣 MR открыт   ✅ влито   ⚪ простаивает   "
-          "💬 новый ответ   ❓ ждёт твоего ответа   ·   # группа   ⚠️ потеряшки (U)   ·   "
-          "o чат · n задача · P панель · G в группу · L таймлайн")
+LEGEND = ("🟡 needs review   🔵 agent running   🟣 MR open   ✅ merged   ⚪ idle   "
+          "💬 new reply   ❓ needs your answer   ·   # group   ⚠️ lost tasks (U)   ·   "
+          "o chat · n task · P panel · G move to group · L timeline")
 
-_AUDIT_VERB = {"task.add": "создана", "task.merge": "влита", "epic.mr": "MR эпик→master",
-               "jira.transition": "Jira", "repo.set": "repo set", "state.restore": "восстановлен стейт",
-               "state.recover": "возврат задач"}
+_AUDIT_VERB = {"task.add": "created", "task.merge": "merged", "epic.mr": "epic MR→master",
+               "jira.transition": "Jira", "repo.set": "repo set", "state.restore": "state restored",
+               "state.recover": "tasks recovered", "group.combine": "group combined",
+               "task.regroup": "task moved", "task.land": "task landed",
+               "task.memory": "task memory updated", "ops.start": "operation started"}
+
+_AUDIT_FIELD = {"repo": "repo", "base": "target", "mr": "MR", "url": "URL", "to": "to",
+                "key": "key", "branch": "branch", "default_branch": "default branch",
+                "remote": "remote", "title": "title", "repos": "repos", "skipped": "skipped",
+                "count": "count", "reason": "reason", "detail": "detail", "from": "from",
+                "included": "included", "op": "operation", "kind": "kind"}
+
+
+def _timeline_lines(output):
+    """`_timeline_lines(output)` is localized timeline text from the engine's JSON output."""
+    records = json.loads(output)
+    if not records:
+        return [tr("(timeline is empty — no actions recorded yet)")]
+    lines = []
+    for record in records:
+        timestamp = time.strftime("%H:%M %d.%m", time.localtime(record.get("ts", 0)))
+        action = record.get("action", "?")
+        verb = tr(_AUDIT_VERB[action]) if action in _AUDIT_VERB else action
+        who = record.get("task") or record.get("epic") or record.get("project") or ""
+        fields = []
+        for key, label in _AUDIT_FIELD.items():
+            if key in record:
+                value = record[key]
+                if isinstance(value, list):
+                    value = ",".join(map(str, value))
+                fields.append("%s=%s" % (tr(label), value))
+        lines.append("%s  %s  %s  %s" % (timestamp, verb, who, "  ".join(fields)))
+    return lines
+
+
+def _recovery_lines(output):
+    """`_recovery_lines(output)` is localized recovery results from the engine's JSON output."""
+    records = json.loads(output)
+    if not records:
+        return [tr("No lost tasks on disk to recover ✓")]
+    return [tr("Recovered %d tasks to the board:") % len(records),
+            *[tr("  %s   (epic %s, branch %s)") % tuple(record) for record in records], "",
+            tr("`cc task mrs <tid>` loads MRs; task names use the folder slug.")]
 
 def _audit_brief(r):
     """One compact human line for an audit record (used in the task detail's timeline block)."""
-    verb = _AUDIT_VERB.get(r.get("action"), r.get("action", "?"))
+    verb = tr(_AUDIT_VERB[r["action"]]) if r.get("action") in _AUDIT_VERB else r.get("action", "?")
     bits = []
     if r.get("repo"):
         bits.append(r["repo"])
@@ -71,7 +115,7 @@ def _group_options(s, tid):
         if e.get("project") == proj_name and not e.get("loose") and not e.get("archived") and k != cur:
             opts.append(("%s — %s" % (k, (e.get("summary") or "")[:40]), k))
     if not s["epics"].get(cur, {}).get("loose"):
-        opts.append(("(без группы — прямо в проект)", proj_name))
+        opts.append((tr("(no group — directly in project)"), proj_name))
     return opts, cur
 
 
@@ -144,7 +188,68 @@ def _ops_status(o):
 OPS_GLYPH = {"running": "🔵", "needs_input": "❓", "done": "✅", "failed": "❌"}
 
 
-class NewEpicScreen(ModalScreen):
+def status_label(status):
+    """`status_label(status)` is a localized display label, preserving unknown status values."""
+    labels = {"running": tr("Running"), "review": tr("Needs review"), "mr": tr("MR open"),
+              "merged": tr("Merged"), "idle": tr("Idle"), "done": tr("Done"),
+              "failed": tr("Failed"), "needs_input": tr("Needs an answer"),
+              "open": tr("Open"), "opened": tr("Open"), "closed": tr("Closed"), "locked": tr("Locked")}
+    return labels.get(status, status)
+
+
+def localize_bindings(node):
+    """`localize_bindings(node)` is an in-place translation of NODE's binding labels."""
+    for source in node.BINDINGS:
+        # Textual has no public Screen API for changing binding descriptions.
+        bindings = node._bindings.key_to_bindings.get(source.key, [])
+        node._bindings.key_to_bindings[source.key] = [
+            replace(binding, description=tr(source.description))
+            if binding.action == source.action else binding for binding in bindings
+        ]
+
+
+class TranslatedModalScreen(ModalScreen):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        localize_bindings(self)
+
+
+class LanguageScreen(TranslatedModalScreen):
+    CSS = """
+    LanguageScreen { align: center middle; }
+    #language-dialog { width: 58; max-width: 95%; height: auto;
+                       padding: 1 2; border: round $accent; background: $surface; }
+    #language-dialog Label, #language-dialog Select { margin-bottom: 1; }
+    #language-dialog Horizontal { height: auto; }
+    #language-dialog Button { margin-right: 2; }
+    """
+    BINDINGS = [Binding("escape", "cancel", "Cancel")]
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="language-dialog"):
+            yield Label(tr("Display language / Язык интерфейса"))
+            yield Select([(name, code) for code, name in tui_i18n.LANGUAGES.items()],
+                         value=tui_i18n.get_language(), allow_blank=False, id="language-choice")
+            with Horizontal():
+                yield Button(tr("Apply"), id="apply-language", variant="primary")
+                yield Button(tr("Cancel"), id="cancel-language")
+
+    def on_select_changed(self, event: Select.Changed):
+        if event.select.id == "language-choice" and event.value in tui_i18n.LANGUAGES:
+            self.query_one("#apply-language", Button).label = tr("Apply", language=event.value)
+            self.query_one("#cancel-language", Button).label = tr("Cancel", language=event.value)
+
+    def on_button_pressed(self, event):
+        if event.button.id == "apply-language":
+            self.dismiss(self.query_one("#language-choice", Select).value)
+        else:
+            self.dismiss(None)
+
+    def action_cancel(self):
+        self.dismiss(None)
+
+
+class NewEpicScreen(TranslatedModalScreen):
     CSS = """
     NewEpicScreen { align: center middle; }
     #dlg { width: 88; max-width: 94%; height: auto; max-height: 92%;
@@ -169,28 +274,28 @@ class NewEpicScreen(ModalScreen):
     def compose(self) -> ComposeResult:
         with Vertical(id="dlg"):
             if self.jira_on:
-                yield Label("[b]Epic из Jira[/b] для '%s'" % self.project)
+                yield Label(tr("[b]Jira epic[/b] for '%s'") % self.project)
                 with VerticalScroll(id="body"):
-                    yield Label("[dim]Взять существующий эпик (свежие сверху; поиск — по названию):[/dim]")
-                    yield Input(placeholder="поиск по названию — Enter (по всем эпикам проекта)", id="esearch")
-                    yield Select([("(загрузка эпиков проекта…)", "_")], id="epick", allow_blank=True)
-                    yield Button("Взять выбранный", variant="success", id="use")
-                    yield Static("──────────  или  ──────────", classes="sep")
-                    yield Label("[dim]Создать новый эпик в Jira:[/dim]")
-                    yield Input(placeholder="название нового эпика", id="enew")
-                    yield Button("Создать в Jira", variant="primary", id="createnew")
+                    yield Label(tr("[dim]Use an existing epic (newest first; search by name):[/dim]"))
+                    yield Input(placeholder=tr("search by name — Enter (all project epics)"), id="esearch")
+                    yield Select([(tr("(loading project epics…)"), "_")], id="epick", allow_blank=True)
+                    yield Button(tr("Use selected"), variant="success", id="use")
+                    yield Static(tr("──────────  or  ──────────"), classes="sep")
+                    yield Label(tr("[dim]Create a new Jira epic:[/dim]"))
+                    yield Input(placeholder=tr("new epic name"), id="enew")
+                    yield Button(tr("Create in Jira"), variant="primary", id="createnew")
                 with Horizontal(id="row"):
-                    yield Button("Cancel", id="cancel")
+                    yield Button(tr("Cancel"), id="cancel")
             else:
-                yield Label("[b]Новый эпик[/b] в проекте '%s'" % self.project)
+                yield Label(tr("[b]New epic[/b] in project '%s'") % self.project)
                 with VerticalScroll(id="body"):
-                    yield Input(placeholder="key (напр. IK-8631)", id="key")
-                    yield Input(placeholder="summary", id="summary")
-                    yield Input(placeholder="targets repo=branch,… (пусто = эпик получит свою ветку)", id="targets")
-                    yield Input(placeholder="repos через запятую; пусто = ВСЕ", id="erepos")
+                    yield Input(placeholder=tr("key (e.g. IK-8631)"), id="key")
+                    yield Input(placeholder=tr("summary"), id="summary")
+                    yield Input(placeholder=tr("targets repo=branch,… (empty = epic gets its own branch)"), id="targets")
+                    yield Input(placeholder=tr("comma-separated repos; empty = ALL"), id="erepos")
                 with Horizontal(id="row"):
-                    yield Button("Cancel", id="cancel")
-                    yield Button("Create", variant="success", id="ok")
+                    yield Button(tr("Cancel"), id="cancel")
+                    yield Button(tr("Create"), variant="success", id="ok")
 
     def on_mount(self):
         if self.jira_on:
@@ -210,7 +315,7 @@ class NewEpicScreen(ModalScreen):
             sel = self.query_one("#epick", Select)
             opts = [("%s — %s [%s]" % (e["key"], e["summary"][:42], e.get("status", "")), e["key"])
                     for e in self._epics]
-            sel.set_options(opts or [("(нет — впиши поиск или создай новый ниже)", "_")])
+            sel.set_options(opts or [(tr("(none — search or create a new one below)"), "_")])
         except Exception:
             pass
 
@@ -224,7 +329,7 @@ class NewEpicScreen(ModalScreen):
         if event.button.id == "ok":
             key = self.query_one("#key", Input).value.strip()
             if not key:
-                self.app.notify("key is required", severity="error"); return
+                self.app.notify(tr("key is required"), severity="error"); return
             self.dismiss({"key": key,
                           "summary": self.query_one("#summary", Input).value.strip(),
                           "targets": self.query_one("#targets", Input).value.strip(),
@@ -233,17 +338,17 @@ class NewEpicScreen(ModalScreen):
         if event.button.id == "use":
             val = self.query_one("#epick", Select).value
             if val in (None, "_", Select.BLANK):
-                self.app.notify("выбери эпик из списка", severity="error"); return
+                self.app.notify(tr("select an epic from the list"), severity="error"); return
             summary = next((e["summary"] for e in self._epics if e["key"] == val), "")
             self.dismiss({"action": "pick", "key": str(val), "summary": summary}); return
         if event.button.id == "createnew":
             summary = self.query_one("#enew", Input).value.strip()
             if not summary:
-                self.app.notify("введи название эпика", severity="error"); return
+                self.app.notify(tr("enter an epic name"), severity="error"); return
             self.dismiss({"action": "create", "summary": summary}); return
 
 
-class NewTaskScreen(ModalScreen):
+class NewTaskScreen(TranslatedModalScreen):
     CSS = """
     NewTaskScreen { align: center middle; }
     #dlg { width: 92; max-width: 94%; height: auto; max-height: 92%;
@@ -274,30 +379,30 @@ class NewTaskScreen(ModalScreen):
     def compose(self) -> ComposeResult:
         with Vertical(id="dlg"):
             if self.loose:
-                yield Label("[b]Новая задача[/b] в проекте '%s' (без эпика)" % self.project)
-                yield Label("[dim]MR летит прямо в master/main; идёт по всем репо проекта, MR — только где агент менял[/dim]")
+                yield Label(tr("[b]New task[/b] in project '%s' (no epic)") % self.project)
+                yield Label(tr("[dim]MR targets master/main; all project repos are included, with MRs only for changed repos[/dim]"))
             else:
-                yield Label("[b]Новая задача[/b] под эпиком '%s'" % self.epic)
-                yield Label("[dim]идёт по всем репо проекта; MR — только где агент менял[/dim]")
+                yield Label(tr("[b]New task[/b] under epic '%s'") % self.epic)
+                yield Label(tr("[dim]all project repos are included; MRs only for repos changed by the agent[/dim]"))
             with VerticalScroll(id="body"):
                 if self.jira_on:
                     with Vertical(id="jira"):
                         if self.loose:
-                            yield Label("[dim]из Jira (опц.): любая задача проекта → привяжем к доске как есть (в Jira не переносим)[/dim]")
-                            yield Input(placeholder="поиск по задачам проекта (Enter)", id="tsearch")
-                            yield Select([("(загрузка задач проекта…)", "_")], id="tpick", allow_blank=True)
+                            yield Label(tr("[dim]from Jira (optional): any project issue → link to the board as-is (no move in Jira)[/dim]"))
+                            yield Input(placeholder=tr("search project issues (Enter)"), id="tsearch")
+                            yield Select([(tr("(loading project issues…)"), "_")], id="tpick", allow_blank=True)
                         else:
-                            yield Label("[dim]из Jira (опц.): задача эпика ИЛИ без эпика (перенесём под эпик) → привяжем + засидим[/dim]")
-                            yield Input(placeholder="поиск задач эпика (Enter)", id="tsearch")
-                            yield Select([("(загрузка задач эпика…)", "_")], id="tpick", allow_blank=True)
-                        yield Button("Подставить из Jira", id="seed")
-                yield Label("title (необязательно):")
-                yield Input(placeholder="пусто = cc придумает название из промпта", id="title")
-                yield Label("prompt (что сделать агенту):")
+                            yield Label(tr("[dim]from Jira (optional): issue in this epic OR without an epic (move under epic) → link and prefill[/dim]"))
+                            yield Input(placeholder=tr("search epic issues (Enter)"), id="tsearch")
+                            yield Select([(tr("(loading epic issues…)"), "_")], id="tpick", allow_blank=True)
+                        yield Button(tr("Fill from Jira"), id="seed")
+                yield Label(tr("title (optional):"))
+                yield Input(placeholder=tr("empty = cc generates a title from the prompt"), id="title")
+                yield Label(tr("prompt (what the agent should do):"))
                 yield TextArea(id="prompt")
             with Horizontal(id="row"):
-                yield Button("Cancel", id="cancel")
-                yield Button("Launch", variant="success", id="ok")
+                yield Button(tr("Cancel"), id="cancel")
+                yield Button(tr("Launch"), variant="success", id="ok")
 
     def on_mount(self):
         if self.jira_on:
@@ -318,7 +423,7 @@ class NewTaskScreen(ModalScreen):
             self.query_one("#title", Input).value = summary
             seed = ("%s\n\n%s" % (summary, desc)).strip() if desc else summary
             self.query_one("#prompt", TextArea).load_text(seed)
-            self.app.notify("из %s — отредактируй prompt и Launch" % key)
+            self.app.notify(tr("from %s — edit the prompt and Launch") % key)
         self.app.call_from_thread(fill)
 
     def _load_children(self, query):
@@ -342,11 +447,11 @@ class NewTaskScreen(ModalScreen):
             opts = []
             for c in self._children:
                 if self.loose:
-                    tag = ("  · эпик %s" % c["parent"]) if c.get("parent") else "  · без эпика"
+                    tag = (tr("  · epic %s") % c["parent"]) if c.get("parent") else tr("  · no epic")
                 else:
-                    tag = "  · БЕЗ ЭПИКА (перенесём)" if c.get("orphan") else ""
+                    tag = tr("  · NO EPIC (will move)") if c.get("orphan") else ""
                 opts.append(("%s — %s [%s]%s" % (c["key"], c["summary"][:38], c["status"], tag), c["key"]))
-            sel.set_options(opts or [("(задач не найдено)", "_")])
+            sel.set_options(opts or [(tr("(no issues found)"), "_")])
         except Exception:
             pass
 
@@ -365,7 +470,7 @@ class NewTaskScreen(ModalScreen):
             self.query_one("#title", Input).value = summary
             seed = ("%s\n\n%s" % (summary, desc)).strip() if desc else summary
             self.query_one("#prompt", TextArea).load_text(seed)
-            self.app.notify("подставлено из %s — отредактируй prompt и Launch" % key)
+            self.app.notify(tr("filled from %s — edit the prompt and Launch") % key)
         self.app.call_from_thread(fill)
 
     def on_button_pressed(self, event: Button.Pressed):
@@ -374,13 +479,13 @@ class NewTaskScreen(ModalScreen):
         if event.button.id == "seed":
             val = self.query_one("#tpick", Select).value
             if val in (None, "_", Select.BLANK):
-                self.app.notify("выбери задачу из списка", severity="error"); return
+                self.app.notify(tr("select an issue from the list"), severity="error"); return
             self._jira_key = str(val)
             self.app._daemon(lambda: self._seed(str(val))); return
         title = self.query_one("#title", Input).value.strip()
         prompt = self.query_one("#prompt", TextArea).text.strip()
         if not prompt:
-            self.app.notify("нужен prompt (title cc придумает сам, если пусто)", severity="error"); return
+            self.app.notify(tr("a prompt is required (cc generates a title if empty)"), severity="error"); return
         self.dismiss({"epic": self.epic, "title": title, "prompt": prompt, "jira": self._jira_key})
 
 
@@ -404,7 +509,7 @@ def open_in_terminal(cwd, cmd):
 
 
 
-class AddProjectScreen(ModalScreen):
+class AddProjectScreen(TranslatedModalScreen):
     CSS = """
     AddProjectScreen { align: center middle; }
     #dlg { width: 86; max-width: 92%; height: auto; max-height: 90%; overflow-y: auto;
@@ -418,43 +523,44 @@ class AddProjectScreen(ModalScreen):
 
     def compose(self) -> ComposeResult:
         with Vertical(id="dlg"):
-            yield Label("Add project — папка с репо (single или multi-repo)")
-            yield Input(placeholder="путь к папке проекта", id="ppath")
-            yield Input(placeholder="имя (опц.; по умолчанию = имя папки)", id="pname")
+            yield Label(tr("Add project — folder with repos (single or multi-repo)"))
+            yield Input(placeholder=tr("project folder path"), id="ppath")
+            yield Input(placeholder=tr("name (optional; defaults to folder name)"), id="pname")
             with Horizontal(id="row"):
-                yield Button("Browse…", id="browse")
-                yield Button("Add", variant="success", id="ok")
-                yield Button("Cancel", id="cancel")
+                yield Button(tr("Browse…"), id="browse")
+                yield Button(tr("Add"), variant="success", id="ok")
+                yield Button(tr("Cancel"), id="cancel")
 
     def on_button_pressed(self, event: Button.Pressed):
         if event.button.id == "cancel":
             self.dismiss(None); return
         if event.button.id == "browse":
             r = subprocess.run(
-                ["osascript", "-e", 'POSIX path of (choose folder with prompt "Выбери папку проекта")'],
+                ["osascript", "-e", 'POSIX path of (choose folder with prompt %s)' % json.dumps(tr("Choose project folder"), ensure_ascii=False)],
                 capture_output=True, text=True)
             if r.returncode == 0 and r.stdout.strip():
                 self.query_one("#ppath", Input).value = r.stdout.strip().rstrip("/")
             return
         path = self.query_one("#ppath", Input).value.strip()
         if not path:
-            self.app.notify("укажи путь к папке", severity="error"); return
+            self.app.notify(tr("specify a folder path"), severity="error"); return
         self.dismiss({"path": path, "name": self.query_one("#pname", Input).value.strip()})
 
 
-class OutputScreen(ModalScreen):
+class OutputScreen(TranslatedModalScreen):
     CSS = """
     OutputScreen { align: center middle; }
     #obox { width: 90%; height: 85%; border: thick $accent; background: $surface; }
     #ocontent { padding: 0 1; }
     """
     BINDINGS = [Binding("escape", "close", "Close"), Binding("q", "close", "Close"),
-                Binding("o", "open_links", "Открыть ссылки")]
+                Binding("o", "open_links", "Open links")]
 
-    def __init__(self, title, argv):
+    def __init__(self, title, argv, formatter=None):
         super().__init__()
         self._title = title
         self._argv = argv
+        self._formatter = formatter
         self._lines = []
 
     def action_open_links(self):
@@ -463,10 +569,10 @@ class OutputScreen(ModalScreen):
             urls += re.findall(r"https?://[^\s)\]\"']+", ln)
         urls = list(dict.fromkeys(urls))
         if not urls:
-            self.app.notify("ссылок в выводе нет"); return
+            self.app.notify(tr("no links in output")); return
         for u in urls:
             subprocess.Popen(["open", u])
-        self.app.notify("открыл %d ссылок в браузере" % len(urls))
+        self.app.notify(tr("opened %d links in browser") % len(urls))
 
     def compose(self) -> ComposeResult:
         with VerticalScroll(id="obox"):
@@ -474,9 +580,9 @@ class OutputScreen(ModalScreen):
         yield Footer()
 
     def on_mount(self):
-        self._lines = ["⏳ %s — выполняю…" % self._title]
+        self._lines = [tr("⏳ %s — running…") % self._title]
         try:
-            self.query_one("#obox", VerticalScroll).border_title = "%s  ·  esc = закрыть" % self._title
+            self.query_one("#obox", VerticalScroll).border_title = tr("%s  ·  esc = close") % self._title
         except Exception:
             pass
         self.app._bg("output:%d" % id(self), self._run)
@@ -487,17 +593,30 @@ class OutputScreen(ModalScreen):
         try:
             proc = subprocess.Popen(self._argv, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                                     text=True, bufsize=1, env=env)
+            output = []
             for line in proc.stdout:
-                self.app.call_from_thread(self._append, line.rstrip("\n"))
+                if self._formatter:
+                    output.append(line)
+                else:
+                    self.app.call_from_thread(self._append, line.rstrip("\n"))
             proc.wait()
-            tail = "✓ готово (exit 0)" if proc.returncode == 0 else "✗ ОШИБКА (exit %d)" % proc.returncode
+            if self._formatter:
+                lines = "".join(output).splitlines()
+                if proc.returncode == 0:
+                    try:
+                        lines = self._formatter("".join(output))
+                    except (ValueError, TypeError, KeyError):
+                        pass
+                for line in lines:
+                    self.app.call_from_thread(self._append, line)
+            tail = tr("✓ done (exit 0)") if proc.returncode == 0 else tr("✗ ERROR (exit %d)") % proc.returncode
         except Exception as ex:
-            tail = "✗ ОШИБКА запуска: %s" % ex
+            tail = tr("✗ Launch ERROR: %s") % ex
         self.app.call_from_thread(self._append, "")
         self.app.call_from_thread(self._append, tail)
 
     def _append(self, line):
-        if self._lines == ["⏳ %s — выполняю…" % self._title]:
+        if self._lines == [tr("⏳ %s — running…") % self._title]:
             self._lines = []   # drop the placeholder on first real line
         self._lines.append(line)
         from rich.text import Text
@@ -525,7 +644,7 @@ class OutputScreen(ModalScreen):
         self.dismiss(None)
 
 
-class MRConfirmScreen(ModalScreen):
+class MRConfirmScreen(TranslatedModalScreen):
     """Loud confirmation BEFORE any MR is created: shows each repo's source -> target, flags the
     prod-bound ones (master/main), and refuses to proceed without an explicit y/Enter. Computes the
     plan off-thread by running the dry-run first (creates nothing)."""
@@ -534,8 +653,8 @@ class MRConfirmScreen(ModalScreen):
     #mrbox { width: 80%; height: auto; max-height: 80%; border: thick $warning; background: $surface; padding: 1 2; }
     #mrc { padding: 0 1; }
     """
-    BINDINGS = [Binding("escape", "cancel", "Отмена"), Binding("q", "cancel", "Отмена"),
-                Binding("y", "confirm", "Создать"), Binding("enter", "confirm", "Создать")]
+    BINDINGS = [Binding("escape", "cancel", "Cancel"), Binding("q", "cancel", "Cancel"),
+                Binding("y", "confirm", "Create"), Binding("enter", "confirm", "Create")]
 
     def __init__(self, title, dry_argv):
         super().__init__()
@@ -545,7 +664,7 @@ class MRConfirmScreen(ModalScreen):
 
     def compose(self) -> ComposeResult:
         with VerticalScroll(id="mrbox"):
-            yield Static("⏳ считаю, куда пойдут MR …", id="mrc")
+            yield Static(tr("⏳ checking MR targets …"), id="mrc")
         yield Footer()
 
     def on_mount(self):
@@ -568,11 +687,11 @@ class MRConfirmScreen(ModalScreen):
         from rich.text import Text
         t = Text()
         if not rows:
-            t.append("Нечего создавать — изменений нет ни в одном репо.\n\n", style="dim")
-            t.append("esc — закрыть", style="bold")
+            t.append(tr("Nothing to create — no changes in any repo.\n\n"), style="dim")
+            t.append(tr("esc — close"), style="bold")
             self.query_one("#mrc", Static).update(t); return
         prod = [r for r in rows if r[3]]
-        t.append("СОЗДАТЬ %d MR — проверь, куда они пойдут:\n\n" % len(rows), style="bold")
+        t.append(tr("CREATE %d MRs — check their targets:\n\n") % len(rows), style="bold")
         for repo, src, tgt, is_prod in rows:
             if is_prod:
                 t.append("  %s\n" % repo, style="bold")
@@ -582,9 +701,9 @@ class MRConfirmScreen(ModalScreen):
                 t.append("     %s  →  %s\n" % (src, tgt), style="green")
         t.append("\n")
         if prod:
-            t.append("⚠ %d MR идут в master/main — это прод-bound релиз.\n" % len(prod), style="bold yellow")
-        t.append("\ny / Enter — создать", style="bold")
-        t.append("        esc / q — отмена", style="dim")
+            t.append(tr("⚠ %d MRs target master/main — this is a production release.\n") % len(prod), style="bold yellow")
+        t.append(tr("\ny / Enter — create"), style="bold")
+        t.append(tr("        esc / q — cancel"), style="dim")
         self.query_one("#mrc", Static).update(t)
 
     def action_confirm(self):
@@ -597,7 +716,7 @@ class MRConfirmScreen(ModalScreen):
         self.dismiss(False)
 
 
-class ConfirmScreen(ModalScreen):
+class ConfirmScreen(TranslatedModalScreen):
     """Generic yes/no confirm -> dismiss(True/False). For low-stakes actions (e.g. merging task MRs
     into an epic branch — not prod). The heavy per-repo gate (MRConfirmScreen) is for prod MR creation."""
     CSS = """
@@ -606,14 +725,14 @@ class ConfirmScreen(ModalScreen):
     #cdlg Label { margin-bottom: 1; }
     #cdlg Button { margin: 0 2 0 0; min-width: 14; }
     """
-    BINDINGS = [Binding("escape", "cancel", "Отмена"), Binding("q", "cancel", "Отмена"),
-                Binding("y", "ok", "Да"), Binding("enter", "ok", "Да")]
+    BINDINGS = [Binding("escape", "cancel", "Cancel"), Binding("q", "cancel", "Cancel"),
+                Binding("y", "ok", "Yes"), Binding("enter", "ok", "Yes")]
 
-    def __init__(self, title, message, ok_label="Да"):
+    def __init__(self, title, message, ok_label="Yes"):
         super().__init__()
         self._title = title
         self._message = message
-        self._ok_label = ok_label
+        self._ok_label = tr(ok_label)
 
     def compose(self) -> ComposeResult:
         with Vertical(id="cdlg"):
@@ -621,7 +740,7 @@ class ConfirmScreen(ModalScreen):
             yield Label("[dim]%s[/dim]" % self._message)
             with Horizontal():
                 yield Button(self._ok_label, id="ok", variant="primary")
-                yield Button("Отмена", id="cancel")
+                yield Button(tr("Cancel"), id="cancel")
 
     def on_button_pressed(self, event):
         self.dismiss(event.button.id == "ok")
@@ -633,7 +752,7 @@ class ConfirmScreen(ModalScreen):
         self.dismiss(False)
 
 
-class ReviewersScreen(ModalScreen):
+class ReviewersScreen(TranslatedModalScreen):
     CSS = """
     ReviewersScreen { align: center middle; }
     #rbox { width: 84; height: 85%; border: thick $accent; background: $surface; padding: 1 2; }
@@ -649,17 +768,17 @@ class ReviewersScreen(ModalScreen):
 
     def compose(self) -> ComposeResult:
         with VerticalScroll(id="rbox"):
-            yield Static("[b]Reviewer на репо[/b] — выбери из участников GitLab. esc = закрыть\n")
+            yield Static(tr("[b]Reviewer per repo[/b] — select a GitLab member. esc = close\n"))
             s = cc.load_state()
             for r in s["projects"][self.project]["repos"]:
                 with Horizontal(classes="rrow"):
                     yield Label(r)
-                    yield Select([("(загрузка…)", "_")], id="sel__" + r, allow_blank=True)
+                    yield Select([(tr("(loading…)"), "_")], id="sel__" + r, allow_blank=True)
         yield Footer()
 
     def on_mount(self):
         try:
-            self.query_one("#rbox", VerticalScroll).border_title = "Reviewers — %s" % self.project
+            self.query_one("#rbox", VerticalScroll).border_title = tr("Reviewers — %s") % self.project
         except Exception:
             pass
         self.app._daemon(self._load)
@@ -674,7 +793,7 @@ class ReviewersScreen(ModalScreen):
     def _set_opts(self, repo, opts, cur):
         try:
             sel = self.query_one("#sel__" + repo, Select)
-            sel.set_options(opts or [("(нет участников)", "_")])
+            sel.set_options(opts or [(tr("(no members)"), "_")])
             if cur and cur in [v for _, v in opts]:
                 sel.value = cur
         except Exception:
@@ -694,13 +813,13 @@ class ReviewersScreen(ModalScreen):
             return
         subprocess.run([sys.executable, ENGINE, "repo", "set", self.project, repo, "--reviewer", str(val)],
                        capture_output=True)
-        self.app.notify("%s -> reviewer %s" % (repo, val))
+        self.app.notify(tr("%s -> reviewer %s") % (repo, val))
 
     def action_close(self):
         self.dismiss(None)
 
 
-class ProjectJiraScreen(ModalScreen):
+class ProjectJiraScreen(TranslatedModalScreen):
     CSS = """
     ProjectJiraScreen { align: center middle; }
     #dlg { width: 84; max-width: 92%; height: auto; max-height: 90%; overflow-y: auto;
@@ -721,25 +840,25 @@ class ProjectJiraScreen(ModalScreen):
         s = cc.load_state()
         j = s["projects"][self.project].get("jira", {})
         with Vertical(id="dlg"):
-            yield Label("Jira для проекта '%s'" % self.project)
-            yield Label("[dim]нет токена? кликни ссылку (или кнопку) — откроется в браузере:[/dim]")
+            yield Label(tr("Jira for project '%s'") % self.project)
+            yield Label(tr("[dim]need a token? click the link (or button) to open it in a browser:[/dim]"))
             yield Static("[@click=screen.open_token][u]https://id.atlassian.com/manage-profile/security/api-tokens[/u][/]")
-            yield Input(value=j.get("site", ""), placeholder="site (you.atlassian.net)", id="jsite")
-            yield Input(value=j.get("email", ""), placeholder="email", id="jemail")
-            yield Input(placeholder=("token: ••• (введи чтобы изменить)" if j.get("token") else "API-token (вставь сюда)"),
+            yield Input(value=j.get("site", ""), placeholder=tr("site (you.atlassian.net)"), id="jsite")
+            yield Input(value=j.get("email", ""), placeholder=tr("email"), id="jemail")
+            yield Input(placeholder=(tr("token: ••• (enter to change)") if j.get("token") else tr("API token (paste here)")),
                         id="jtoken", password=True)
-            yield Input(value=j.get("project_key", ""), placeholder="project key (e.g. IK)", id="jkey")
+            yield Input(value=j.get("project_key", ""), placeholder=tr("project key (e.g. IK)"), id="jkey")
             with Horizontal(id="row"):
-                yield Button("Сохранить", variant="success", id="save")
-                yield Button("Отвязать Jira", id="off")
-                yield Button("Cancel", id="cancel")
+                yield Button(tr("Save"), variant="success", id="save")
+                yield Button(tr("Disconnect Jira"), id="off")
+                yield Button(tr("Cancel"), id="cancel")
 
     def on_button_pressed(self, event: Button.Pressed):
         if event.button.id == "cancel":
             self.dismiss(None); return
         if event.button.id == "off":
             subprocess.run([sys.executable, ENGINE, "project", "jira", self.project, "--off"], capture_output=True)
-            self.app.notify("Jira выключена для %s" % self.project); self.dismiss(True); return
+            self.app.notify(tr("Jira disabled for %s") % self.project); self.dismiss(True); return
         args = [sys.executable, ENGINE, "project", "jira", self.project]
         site = self.query_one("#jsite", Input).value.strip()
         email = self.query_one("#jemail", Input).value.strip()
@@ -756,18 +875,18 @@ class ProjectJiraScreen(ModalScreen):
         r = subprocess.run(args, capture_output=True, text=True)
         out = (r.stdout or "") + (r.stderr or "")
         if "ok —" in out:
-            self.app.notify("Jira подключена ✓ (%s)" % (out.split("ok —")[1].strip()[:60]))
+            self.app.notify(tr("Jira connected ✓ (%s)") % (out.split("ok —")[1].strip()[:60]))
         elif "WARN" in out:
-            self.app.notify("сохранено, но auth не прошла — проверь токен/email", severity="error")
+            self.app.notify(tr("saved, but authentication failed — check token/email"), severity="error")
         else:
-            self.app.notify("Jira сохранена для %s" % self.project)
+            self.app.notify(tr("Jira saved for %s") % self.project)
         self.dismiss(True)
 
     def action_close(self):
         self.dismiss(None)
 
 
-class EpicManageScreen(ModalScreen):
+class EpicManageScreen(TranslatedModalScreen):
     """Готово и убрать с доски: Jira(эпик + все задачи) -> Done, затем убрать эпик и его задачи
     из cc локально (worktrees/ветки/папки). Remote MR/ветки не трогаем."""
     CSS = """
@@ -785,11 +904,11 @@ class EpicManageScreen(ModalScreen):
 
     def compose(self):
         with Vertical(id="dlg"):
-            yield Label("[b]Эпик %s[/b]" % self.key)
-            yield Label("[dim]«Готово и убрать с доски»:\n  • в Jira переведём в Done сам эпик и ВСЕ его задачи (уже-Done пропустим)\n  • снимем локальные worktrees/ветки/папки задач\n  • эпик исчезнет из cc (история остаётся в Jira + git; remote MR/ветки целы)[/dim]")
+            yield Label(tr("[b]Epic %s[/b]") % self.key)
+            yield Label(tr("[dim]“Done and remove from board”:\n  • move the epic and ALL its issues to Done in Jira (skip those already Done)\n  • remove local task worktrees/branches/folders\n  • remove the epic from cc (history stays in Jira + git; remote MRs/branches remain)[/dim]"))
             with Horizontal():
-                yield Button("Готово и убрать с доски", id="done", variant="primary")
-                yield Button("Отмена", id="cancel")
+                yield Button(tr("Done and remove from board"), id="done", variant="primary")
+                yield Button(tr("Cancel"), id="cancel")
 
     def on_button_pressed(self, event):
         self.dismiss(None if event.button.id == "cancel" else event.button.id)
@@ -798,7 +917,7 @@ class EpicManageScreen(ModalScreen):
         self.dismiss(None)
 
 
-class TaskManageScreen(ModalScreen):
+class TaskManageScreen(TranslatedModalScreen):
     """Cleanup (local worktrees) or Abort (close MRs + delete remote branches + remove) a task."""
     CSS = """
     TaskManageScreen { align: center middle; }
@@ -815,12 +934,12 @@ class TaskManageScreen(ModalScreen):
 
     def compose(self):
         with Vertical(id="dlg"):
-            yield Label("[b]Задача %s[/b]" % self.tid)
-            yield Label("[dim]«Готово и убрать с доски» = Jira задачи -> Done + снять локальные worktrees + убрать из cc (remote MR/ветка целы; откажет если незакоммичено).\nAbort = выбросить: закрыть MR + удалить remote-ветки + снести worktrees + убрать из cc.[/dim]")
+            yield Label(tr("[b]Task %s[/b]") % self.tid)
+            yield Label(tr("[dim]“Done and remove from board” = Jira issue -> Done + remove local worktrees + remove from cc (remote MR/branch remain; refuses uncommitted changes).\nAbort = discard: close MRs + delete remote branches + remove worktrees + remove from cc.[/dim]"))
             with Horizontal():
-                yield Button("Готово и убрать с доски", id="done", variant="primary")
-                yield Button("Abort (выбросить)", id="abort", variant="error")
-                yield Button("Cancel", id="cancel")
+                yield Button(tr("Done and remove from board"), id="done", variant="primary")
+                yield Button(tr("Abort (discard)"), id="abort", variant="error")
+                yield Button(tr("Cancel"), id="cancel")
 
     def on_button_pressed(self, event):
         self.dismiss(None if event.button.id == "cancel" else event.button.id)
@@ -829,7 +948,7 @@ class TaskManageScreen(ModalScreen):
         self.dismiss(None)
 
 
-class MoveToGroupScreen(ModalScreen):
+class MoveToGroupScreen(TranslatedModalScreen):
     """Pick a group to move a task into (task-based regrouping). Returns the chosen epic key, the
     project name for ungroup, or None on cancel."""
     CSS = """
@@ -849,27 +968,26 @@ class MoveToGroupScreen(ModalScreen):
 
     def compose(self):
         with Vertical(id="dlg"):
-            yield Label("[b]Перенести задачу %s[/b]   (сейчас: %s)" % (self.tid, self.cur))
-            yield Label("[dim]Сменит группу и пересчитает target MR. Ветка и worktree не тронутся. "
-                        "Только для задач без MR.[/dim]")
-            yield Select(self._options, id="grp", prompt="выбери группу")
+            yield Label(tr("[b]Move task %s[/b]   (currently: %s)") % (self.tid, self.cur))
+            yield Label(tr("[dim]Changes the group and recalculates the MR target. Branch and worktree stay intact. Only for tasks without MRs.[/dim]"))
+            yield Select(self._options, id="grp", prompt=tr("select a group"))
             with Horizontal():
-                yield Button("Перенести", id="ok", variant="primary")
-                yield Button("Отмена", id="cancel")
+                yield Button(tr("Move"), id="ok", variant="primary")
+                yield Button(tr("Cancel"), id="cancel")
 
     def on_button_pressed(self, event):
         if event.button.id == "cancel":
             self.dismiss(None); return
         val = self.query_one("#grp", Select).value
         if val in (None, Select.BLANK):
-            self.app.notify("выбери группу", severity="error"); return
+            self.app.notify(tr("select a group"), severity="error"); return
         self.dismiss(str(val))
 
     def action_cancel(self):
         self.dismiss(None)
 
 
-class GroupPanelScreen(ModalScreen):
+class GroupPanelScreen(TranslatedModalScreen):
     """Read-only control panel for a GROUP: every task + per-repo MR/merge state at a glance.
     Action buttons (Test / Stage / Release) come next; deploy/stage state isn't tracked yet."""
     CSS = """
@@ -881,7 +999,7 @@ class GroupPanelScreen(ModalScreen):
     #prow Button { margin: 0 0 0 2; }
     """
     BINDINGS = [Binding("escape", "close", "Close"), Binding("q", "close", "Close"),
-                Binding("o", "open_links", "Открыть MR")]
+                Binding("o", "open_links", "Open MRs")]
 
     def __init__(self, ekey, epic, rows):
         super().__init__()
@@ -895,28 +1013,28 @@ class GroupPanelScreen(ModalScreen):
             with VerticalScroll(id="pscroll"):
                 yield Static("", id="pc")
             with Horizontal(id="prow"):
-                yield Button("Test (агент)", id="ops_test", variant="success")
-                yield Button("Stage (агент)", id="ops_stage", variant="success")
+                yield Button(tr("Test (agent)"), id="ops_test", variant="success")
+                yield Button(tr("Stage (agent)"), id="ops_stage", variant="success")
                 if not self._epic.get("loose"):
-                    yield Button("Влить задачи в эпик", id="merge_tasks")
-                    yield Button("Release: MR эпик→master", id="release_mr", variant="warning")
-                yield Button("Закрыть", id="close")
+                    yield Button(tr("Merge tasks into epic"), id="merge_tasks")
+                    yield Button(tr("Release: epic MR→master"), id="release_mr", variant="warning")
+                yield Button(tr("Close"), id="close")
         yield Footer()
 
     def on_mount(self):
         mode = self._epic.get("mode") or ("targets" if self._epic.get("targets") else "epic_branch")
         try:
-            self.query_one("#pbox", Vertical).border_title = "Группа %s · %s · esc=закрыть" % (self.ekey, mode)
+            self.query_one("#pbox", Vertical).border_title = tr("Group %s · %s · esc=close") % (self.ekey, mode)
         except Exception:
             pass
         from rich.text import Text
         t = Text()
-        t.append("Группа %s" % self.ekey, style="bold")
+        t.append(tr("Group %s") % self.ekey, style="bold")
         if self._epic.get("summary"):
             t.append("  %s" % self._epic["summary"])
         t.append("\n\n")
         if not self._rows:
-            t.append("в группе нет задач (n — создать)\n", style="dim")
+            t.append(tr("no tasks in group (n — create)\n"), style="dim")
         merged_n = 0
         for r in self._rows:
             if r["merged"]:
@@ -926,21 +1044,20 @@ class GroupPanelScreen(ModalScreen):
             for repo, mr, base in r["repos"]:
                 if mr:
                     self._urls.append(mr)
-                    state = "влит ✓" if r["merged"] else "MR открыт"
+                    state = tr("merged ✓") if r["merged"] else tr("MR open")
                     t.append("    %-16s → %-22s %s\n" % (repo, base, state),
                              style=("magenta" if r["merged"] else "green"))
                 else:
                     t.append("    %-16s → %-22s —\n" % (repo, base), style="dim")
             t.append("\n")
         if self._rows:
-            t.append("итог: %d задач, %d влито\n\n" % (len(self._rows), merged_n), style="bold")
+            t.append(tr("total: %d tasks, %d merged\n\n") % (len(self._rows), merged_n), style="bold")
         if self._epic.get("loose"):
-            t.append("loose-группа: задачи идут в master сами — релизь задачу на доске (M на задаче).\n", style="dim")
+            t.append(tr("Ungrouped tasks target master directly — release the task from the board (M on the task).\n"), style="dim")
         else:
-            t.append("Release ниже = MR ветка-эпика → master (через подтверждение). Сначала влей задачи "
-                     "в ветку эпика на доске.  Test / Stage — следующий шаг.\n", style="dim")
-        t.append("«что на stage/prod» пока не трекается — появится с деплой-кнопками.\n", style="dim")
-        t.append("o — открыть MR-ссылки (%d) в браузере" % len(self._urls), style="dim")
+            t.append(tr("Release below = MR from the epic branch → master (with confirmation). First merge tasks into the epic branch on the board. Test / Stage is the next step.\n"), style="dim")
+        t.append(tr("Stage/prod deployments are not tracked here yet — deployment buttons will add this.\n"), style="dim")
+        t.append(tr("o — open MR links (%d) in browser") % len(self._urls), style="dim")
         self.query_one("#pc", Static).update(t)
 
     def on_button_pressed(self, event):
@@ -957,10 +1074,10 @@ class GroupPanelScreen(ModalScreen):
     def action_open_links(self):
         urls = list(dict.fromkeys(self._urls))
         if not urls:
-            self.app.notify("MR-ссылок в группе нет"); return
+            self.app.notify(tr("no MR links in group")); return
         for u in urls:
             subprocess.Popen(["open", u])
-        self.app.notify("открыл %d MR в браузере" % len(urls))
+        self.app.notify(tr("opened %d MRs in browser") % len(urls))
 
     def action_close(self):
         self.dismiss(None)
@@ -973,23 +1090,53 @@ class CCApp(App):
     #legend { height: auto; color: $text-muted; background: $panel; padding: 0 1; border-top: solid $accent; }
     """
     BINDINGS = [
+        Binding("f2", "language", "Language / Язык"),
         Binding("a", "add_project", "+Project"),
         Binding("R", "reviewers", "Reviewers"),
         Binding("D", "deploys", "Deploys"),
         Binding("j", "project_jira", "Jira/settings"),
-        Binding("e", "new_epic", "+Группа"),
+        Binding("e", "new_epic", "+Group"),
         Binding("n", "new_task", "+Task"),
         Binding("o", "open", "Chat"),
         Binding("c", "cursor", "Cursor"),
         Binding("M", "mr_real", "MR!"),
-        Binding("x", "cleanup", "Убрать/manage"),
+        Binding("x", "cleanup", "Remove/manage"),
         Binding("r", "refresh", "Refresh"),
         Binding("U", "recover", "Recover lost"),
         Binding("L", "timeline", "Timeline"),
-        Binding("G", "regroup", "→Группа"),
-        Binding("P", "panel", "Панель"),
+        Binding("G", "regroup", "→Group"),
+        Binding("P", "panel", "Panel"),
         Binding("q", "quit", "Quit"),
     ]
+
+    def __init__(self, *args, language=None, language_file=None, **kwargs):
+        self.language_file = language_file
+        tui_i18n.set_language(language if language is not None else tui_i18n.load_language(language_file))
+        super().__init__(*args, **kwargs)
+        localize_bindings(self)
+
+    def action_language(self):
+        """`action_language()` is the main screen's display-language selection action."""
+        if len(self.screen_stack) == 1:
+            self.push_screen(LanguageScreen(), self._change_language)
+
+    def _change_language(self, language):
+        """`_change_language(language)` is a persisted change of LANGUAGE and the visible board."""
+        if language is None:
+            return
+        try:
+            tui_i18n.save_language(language, self.language_file)
+        except OSError as error:
+            self.notify(tr("Could not save language: %s") % error, severity="error")
+            return
+        tui_i18n.set_language(language)
+        localize_bindings(self)
+        self.title = tr("cc — multi-repo orchestrator")
+        self.query_one("#legend", Static).update(tr(LEGEND))
+        self.build_tree()
+        self.show_detail(self.current())
+        self.refresh_bindings()
+        self.notify(tr("Display language saved"))
 
     def compose(self) -> ComposeResult:
         yield Header()
@@ -997,11 +1144,11 @@ class CCApp(App):
             yield Tree("cc", id="tree")
             with VerticalScroll():
                 yield Static("", id="detail")
-        yield Static(LEGEND, id="legend")
+        yield Static(tr(LEGEND), id="legend")
         yield Footer()
 
     def on_mount(self):
-        self.title = "cc — multi-repo orchestrator"
+        self.title = tr("cc — multi-repo orchestrator")
         self._detail_urls = []
         self._busy = set()           # daemon-thread dedup (replaces run_worker exclusive=)
         self._changes = {}           # tid -> {repo: git-status text}; lazily filled, never on every focus
@@ -1025,7 +1172,7 @@ class CCApp(App):
         try:
             n = len(cc._scan_orphans(cc.load_state()))
             if n:
-                self.notify("⚠️ %d задач(и) на диске нет на доске — нажми U чтобы восстановить" % n,
+                self.notify(tr("⚠️ %d tasks on disk are missing from the board — press U to recover") % n,
                             severity="warning", timeout=10)
         except Exception:
             pass
@@ -1172,7 +1319,7 @@ class CCApp(App):
         for tid, t in tasks:
             self._add_task_leaf(en, tid, t)
         if not tasks:
-            en.add_leaf("[dim](нет задач — n чтобы добавить)[/dim]", data=None)
+            en.add_leaf(tr("[dim](no tasks — n to add)[/dim]"), data=None)
         self._add_ops_leaves(en, ekey, s)
         return en
 
@@ -1195,6 +1342,9 @@ class CCApp(App):
             return "%s:%s" % (t, data["id"])
         if t == "orphans":
             return "orphans:"
+        if t == "orphan":
+            orphan = data["orphan"]
+            return "orphan:" + json.dumps([orphan[key] for key in ("project", "epic", "slug")])
         return None
 
     def _find_node(self, node, key):
@@ -1226,14 +1376,15 @@ class CCApp(App):
                 # epic-less tasks of this project, directly under it (below the epics)
                 had_loose = self._add_loose_tasks(pn, pname, s)
                 if not epics and not had_loose:
-                    pn.add_leaf("(no epics — 'e' to add one, or 'n' for a task without an epic)", data=None)
+                    pn.add_leaf(tr("(no epics — 'e' to add one, or 'n' for a task without an epic)"), data=None)
             orphans = cc._scan_orphans(s)
             if orphans:
-                on = tree.root.add("⚠️  Потеряшки на диске (%d) — U чтобы восстановить" % len(orphans),
+                on = tree.root.add(tr("⚠️  Lost tasks on disk (%d) — U to recover") % len(orphans),
                                    data={"type": "orphans"}, expand=True)
                 for o in orphans:
-                    on.add_leaf("[yellow]%s / %s  (ветка %s, %d репо)[/yellow]"
-                                % (o["epic"], o["slug"], o["branch"], len(o["repos"])), data=None)
+                    on.add_leaf(tr("[yellow]%s / %s  (branch %s, %d repos)[/yellow]")
+                                % (o["epic"], o["slug"], o["branch"], len(o["repos"])),
+                                data={"type": "orphan", "orphan": o})
         finally:
             self._building = False
         # Restore the cursor AFTER the tree re-renders: a freshly-added node has no line index yet
@@ -1279,7 +1430,7 @@ class CCApp(App):
             self.show_detail(data)            # a detail-render error must NEVER crash the whole TUI
         except Exception as ex:
             try:
-                self.query_one("#detail", Static).update("[red]ошибка отрисовки детали:[/red] %s" % ex)
+                self.query_one("#detail", Static).update(tr("[red]detail rendering error:[/red] %s") % ex)
             except Exception:
                 pass
         # First time you rest on a task, fetch its working-tree changes ONCE (debounced, off-thread)
@@ -1374,52 +1525,64 @@ class CCApp(App):
             d.update("")
             return
         s = self.state()
+        if data["type"] in ("orphans", "orphan"):
+            orphans = [data["orphan"]] if data["type"] == "orphan" else cc._scan_orphans(s)
+            lines = [tr("[b]Lost tasks[/b] — %d tasks on disk missing from the board") % len(orphans), ""]
+            for orphan in orphans:
+                lines.append(tr("Project: %s · Epic: %s · Task: %s") % tuple(
+                    escape(str(orphan[key])) for key in ("project", "epic", "slug")))
+                lines.append(tr("Branch: %s") % escape(orphan["branch"]))
+                lines += ["  %s: %s" % (escape(repo), escape(path)) for repo, path in orphan["repos"].items()]
+                lines.append("")
+            lines.append(tr("[dim]U — recover lost tasks; existing worktrees and branches are preserved[/dim]"))
+            d.update("\n".join(lines))
+            return
         if data["type"] in ("taskgroup", "jiragroup"):
-            d.update("[dim]группа задач — раскрой и выбери задачу[/dim]")
+            d.update(tr("[dim]task group — expand and select a task[/dim]"))
             return
         if data["type"] == "jira_stub":
-            st = "Done" if data.get("done") else "не начата"
-            d.update("[b]%s[/b]  (Jira — %s)\n%s\n\n[dim]n — активировать: создаст cc-задачу (worktree+агент), prompt засеян из Jira[/dim]"
+            st = tr("Done") if data.get("done") else tr("not started")
+            d.update(tr("[b]%s[/b]  (Jira — %s)\n%s\n\n[dim]n — activate: creates a cc task (worktree + agent), prompt prefilled from Jira[/dim]")
                      % (data["key"], st, data.get("summary", "")))
             return
         if data["type"] == "archive":
             n = sum(1 for e in s["epics"].values() if e["project"] == data["id"] and e.get("archived"))
-            d.update("[b]Архив[/b] — %d архивн. эпик(ов) в '%s'\n[dim]разверни узел; на эпике x → Разархивировать[/dim]" % (n, data["id"]))
+            d.update(tr("[b]Archive[/b] — %d archived epics in '%s'\n[dim]expand the node; on an epic, x → Unarchive[/dim]") % (n, data["id"]))
             return
         if data["type"] == "ops" and data["id"] in (s.get("ops") or {}):
             o = s["ops"][data["id"]]
             st = _ops_status(o)
-            L = ["[b]ops: %s[/b]   группа %s   %s %s" % (o.get("kind", "?"), o.get("epic", "?"),
-                                                          OPS_GLYPH.get(st, "?"), st)]
+            L = [tr("[b]ops: %s[/b]   group %s   %s %s") % (o.get("kind", "?"), o.get("epic", "?"),
+                                                          OPS_GLYPH.get(st, "?"), status_label(st))]
             # outcome FROM FACTS (the recorded exit code), not the agent's prose
             if st == "done":
-                L.append("[green]✓ успех — агент завершился с exit 0[/green]")
+                L.append(tr("[green]✓ success — agent finished with exit 0[/green]"))
             elif st == "failed":
                 rc = _ops_exit(o)
-                L.append("[bold red]✗ НЕ удалось — exit=%s%s[/bold red]"
-                         % (rc, " (агент умер без кода — крах)" if rc is None else ""))
-                L.append("[dim]o — открыть сессию, разобраться/перезапустить[/dim]")
+                L.append(tr("[bold red]✗ FAILED — exit=%s%s[/bold red]")
+                         % (rc, tr(" (agent died without an exit code — crash)") if rc is None else ""))
+                L.append(tr("[dim]o — open session to investigate/restart[/dim]"))
             ni = cc.task_needs_input({"log": o.get("log")})
             if ni:
-                L += ["", "[bold yellow]❓ агент ждёт ответа:[/bold yellow] %s" % ni,
-                      "[dim]o — открыть сессию и ответить (агент продолжит)[/dim]"]
-            L += ["", "[b]лог (хвост):[/b]"]
+                L += ["", tr("[bold yellow]❓ agent needs an answer:[/bold yellow] %s") % ni,
+                      tr("[dim]o — open session and reply (agent will continue)[/dim]")]
+            L += ["", tr("[b]log (tail):[/b]")]
             try:
                 tail = open(o["log"], encoding="utf-8", errors="replace").read().splitlines()[-15:]
-                L += ["  " + ln for ln in tail] if tail else ["  [dim](пусто)[/dim]"]
+                L += ["  " + ln for ln in tail] if tail else [tr("  [dim](empty)[/dim]")]
             except Exception:
-                L += ["  [dim](лога ещё нет)[/dim]"]
-            L += ["", "[dim]o — открыть/ответить агенту[/dim]"]
+                L += [tr("  [dim](no log yet)[/dim]")]
+            L += ["", tr("[dim]o — open/reply to agent[/dim]")]
             d.update("\n".join(L))
             return
         if data["type"] == "task" and data["id"] in s["tasks"]:
             t = s["tasks"][data["id"]]
-            L = ["[b]%s[/b]   status=%s" % (t["title"], fast_status(t)),
-                 "epic: %s    branch: %s" % (t["epic"], t["branch"])]
+            L = [tr("[b]%s[/b]   status=%s") % (t["title"], status_label(fast_status(t))),
+                 tr("epic: %s    branch: %s") % (t["epic"], t["branch"])]
             if t.get("needs_input"):
-                L += ["", "[bold yellow]❓ агент ждёт твоего ответа:[/bold yellow] %s" % t["needs_input"],
-                      "[dim]o — открыть чат и ответить (агент продолжит)[/dim]"]
-            L += ["", "repos -> target:"]
+                L += ["", tr("[bold yellow]❓ agent needs your answer:[/bold yellow] %s") % t["needs_input"],
+                      tr("[dim]o — open chat and reply (agent will continue)[/dim]")]
+            L += ["", tr("repos -> target:")]
             for r in t["repos"]:
                 L.append("  %s -> %s" % (r, t["base"][r]))
                 if t["mrs"].get(r):
@@ -1429,43 +1592,43 @@ class CCApp(App):
                     L.append("     [@click=app.open_url_idx(%d)][u]MR: %s[/u][/]" % (i, url))
             skipped = t.get("skipped") or {}
             if skipped:
-                L += ["", "[yellow]⚠️ репо НЕ развёрнуты (%d):[/yellow]" % len(skipped)]
+                L += ["", tr("[yellow]⚠️ repos NOT set up (%d):[/yellow]") % len(skipped)]
                 for r, e in skipped.items():
                     L.append("  [yellow]%s — %s[/yellow]" % (r, e))
             if t.get("merged"):
-                L += ["", "[bold green]✓ все MR влиты — x = очистить worktrees[/bold green]"]
-            L += ["", "[b]changes:[/b]"]
+                L += ["", tr("[bold green]✓ all MRs merged — x = clean up worktrees[/bold green]")]
+            L += ["", tr("[b]changes:[/b]")]
             cached = self._changes.get(data["id"])
             if cached is None:
-                L.append("  [dim]…(r — показать локальные изменения)[/dim]")
+                L.append(tr("  [dim]…(r — show local changes)[/dim]"))
             else:
                 for r in t["repos"]:
                     st = cached.get(r, "")
-                    L.append("  [%s] %s" % (r, st.replace("\n", "; ") if st else "(none)"))
+                    L.append("  [%s] %s" % (r, st.replace("\n", "; ") if st else tr("(none)")))
             recent = cc.read_audit(task=data["id"], limit=5)   # what cc DID to this task (audit timeline)
             if recent:
-                L += ["", "[b]timeline:[/b]  [dim](L — весь лог)[/dim]"]
+                L += ["", tr("[b]timeline:[/b]  [dim](L — full log)[/dim]")]
                 for ar in recent:
                     ts = time.strftime("%H:%M %d.%m", time.localtime(ar.get("ts", 0)))
                     L.append("  [dim]%s[/dim] %s" % (ts, _audit_brief(ar)))
-            L += ["", "[dim]o=чат  c=Cursor  M=создать MR  x=убрать  G=в группу  L=таймлайн  P=панель[/dim]"]
+            L += ["", tr("[dim]o=chat  c=Cursor  M=create MR  x=remove  G=move to group  L=timeline  P=panel[/dim]")]
             d.update("\n".join(L))
         elif data["type"] == "epic":
             e = s["epics"][data["id"]]
             mode = e.get("mode") or ("targets" if e.get("targets") else "epic_branch")
             mrs = e.get("mrs", {}) or {}
             mst = e.get("mr_state", {}) or {}
-            L = ["[b]epic %s[/b]  %s   [%s]" % (data["id"], e.get("summary", ""), mode), ""]
+            L = [tr("[b]epic %s[/b]  %s   [%s]") % (data["id"], e.get("summary", ""), mode), ""]
             if mode == "epic_branch":
-                L += ["ветка эпика: [b]%s[/b]  ->  master/main" % data["id"]]
+                L += [tr("epic branch: [b]%s[/b]  ->  master/main") % data["id"]]
                 rows = [(r, data["id"]) for r in sorted(mrs)]
             else:
-                L += ["routing (интеграционные ветки):"]
+                L += [tr("routing (integration branches):")]
                 for r, b in e.get("targets", {}).items():
                     L.append("  %s -> %s" % (r, b))
                 rows = list((e.get("targets") or {}).items())
             # epic -> master/main MRs (clickable, lazily filled on focus / by g; merged shown too)
-            L += ["", "[b]MR в master/main:[/b]"]
+            L += ["", tr("[b]MRs to master/main:[/b]")]
             COLOR = {"opened": "green", "merged": "magenta", "closed": "red", "locked": "yellow"}
             shown = 0
             for r, br in rows:
@@ -1476,23 +1639,23 @@ class CCApp(App):
                     st = mst.get(r, "") or "open"
                     c = COLOR.get(mst.get(r, ""), "white")
                     tail = ("  [dim]<- %s[/dim]" % br) if mode == "targets" else ""
-                    L.append("  [@click=app.open_url_idx(%d)][u]%-20s[/u][/]  [%s]%s[/%s]%s" % (idx, r, c, st, c, tail))
+                    L.append("  [@click=app.open_url_idx(%d)][u]%-20s[/u][/]  [%s]%s[/%s]%s" % (idx, r, c, status_label(st), c, tail))
                     shown += 1
                 elif mode == "targets":
-                    L.append("  %-20s  [dim]- MR не найден (<- %s)[/dim]" % (r, br))
+                    L.append(tr("  %-20s  [dim]- MR not found (<- %s)[/dim]") % (r, br))
             if not shown:
-                hint = "[dim]…(g — найти MR в master)[/dim]" if data["id"] not in self._epic_synced else "[dim]- MR в master пока нет[/dim]"
+                hint = tr("[dim]…(g — find MR to master)[/dim]") if data["id"] not in self._epic_synced else tr("[dim]- no MR to master yet[/dim]")
                 L += ["  " + hint]
-            L += ["", "[dim]o=чат группы  n=задача  P=панель (MR/Test/Stage/Release)  M=MR группа→master[/dim]"]
+            L += ["", tr("[dim]o=group chat  n=task  P=panel (MR/Test/Stage/Release)  M=group MR→master[/dim]")]
             d.update("\n".join(L))
         elif data["type"] == "project":
             p = s["projects"][data["id"]]
             j = p.get("jira", {})
             jira_line = ("on — %s @ %s" % (j.get("project_key", "?"), j.get("site", "?"))) if j.get("token") else "off"
-            L = ["[b]project %s[/b]  (%s, %d repos)" % (data["id"], p.get("kind", "—"), len(p.get("repos", {}))),
-                 "assignee: %s    Jira: %s" % (p.get("default_assignee") or "-", jira_line),
-                 "", "repos (reviewer):"]
-            L += ["repos — deploy / reviewer:"]
+            L = [tr("[b]project %s[/b]  (%s, %d repos)") % (data["id"], p.get("kind", "—"), len(p.get("repos", {}))),
+                 tr("assignee: %s    Jira: %s") % (p.get("default_assignee") or "-", jira_line),
+                 "", tr("repos (reviewer):")]
+            L += [tr("repos — deploy / reviewer:")]
             for r, ri in p["repos"].items():
                 dep = ri.get("deploy", {})
                 if dep.get("kind") == "eas":
@@ -1510,9 +1673,9 @@ class CCApp(App):
                     env = "dev:%s  stage:[green]%s[/green]  prod:[yellow]%s[/yellow]" % (
                         _sr("dev"), _sr("stage"), _sr("prod"))
                 else:
-                    env = "[dim](D = загрузить деплои)[/dim]"
+                    env = tr("[dim](D = load deployments)[/dim]")
                 L.append("  %-20s %s  ·  rev:%s" % (r, env, ri.get("reviewer") or "—"))
-            L += ["", "[dim]e=эпик  R=ревьюеры  j=Jira  D=обновить деплои[/dim]"]
+            L += ["", tr("[dim]e=epic  R=reviewers  j=Jira  D=refresh deployments[/dim]")]
             d.update("\n".join(L))
 
     def refresh_glyphs(self):
@@ -1535,15 +1698,15 @@ class CCApp(App):
 
     def action_recover(self):
         # restore tasks whose work is on disk but missing from the board
-        self.push_screen(OutputScreen("recover lost tasks",
-                         [sys.executable, "-u", ENGINE, "recover"]),
+        self.push_screen(OutputScreen(tr("recover lost tasks"),
+                         [sys.executable, "-u", ENGINE, "recover", "--json"], _recovery_lines),
                          lambda _: self.build_tree())
 
     def action_panel(self):
         # read-only control panel for a group: all its tasks + MR/merge state at a glance + actions
         ekey = self._current_epic()
         if not ekey:
-            self.notify("выбери группу (эпик) или её задачу — P покажет панель группы"); return
+            self.notify(tr("select a group (epic) or its task — P opens the group panel")); return
         epic, rows = _group_panel_rows(self.state(), ekey)
         self.push_screen(GroupPanelScreen(ekey, epic, rows), lambda res: self._panel_action(ekey, res))
 
@@ -1555,21 +1718,21 @@ class CCApp(App):
         act = res.get("action")
         if act == "release_mr":
             argv = [sys.executable, "-u", ENGINE, "epic", "mr", ekey]
-            self._mr_with_gate(argv, "Epic MR: %s" % ekey, lambda _: self._after_epic_sync(ekey))
+            self._mr_with_gate(argv, tr("Epic MR: %s") % ekey, lambda _: self._after_epic_sync(ekey))
         elif act == "merge_tasks":
             def go(ok):
                 if not ok:
-                    self.notify("отменено — ничего не влито"); return
-                self.push_screen(OutputScreen("Влить задачи в %s" % ekey,
+                    self.notify(tr("cancelled — nothing merged")); return
+                self.push_screen(OutputScreen(tr("Merge tasks into %s") % ekey,
                                  [sys.executable, "-u", ENGINE, "epic", "merge", ekey]),
                                  lambda _: self._after_epic_sync(ekey))
-            self.push_screen(ConfirmScreen("Влить задачи в ветку эпика %s" % ekey,
-                             "Сольёт ОТКРЫТЫЕ task-MR группы в ветку эпика (это НЕ прод-релиз). Продолжить?",
-                             ok_label="Влить"), go)
+            self.push_screen(ConfirmScreen(tr("Merge tasks into epic branch %s") % ekey,
+                             tr("Merge OPEN task MRs into the epic branch (this is NOT a production release). Continue?"),
+                             ok_label=tr("Merge")), go)
         elif act == "ops":
             # launch a headless ops agent (test/stage) — it studies the repos & acts, asks via ❓
             kind = res.get("kind", "test")
-            self.push_screen(OutputScreen("Запуск ops-агента [%s] для %s" % (kind, ekey),
+            self.push_screen(OutputScreen(tr("Start ops agent [%s] for %s") % (kind, ekey),
                              [sys.executable, "-u", ENGINE, "epic", "ops", ekey, "--kind", kind]),
                              lambda _: self.build_tree())
 
@@ -1577,14 +1740,14 @@ class CCApp(App):
         # move the focused task to another group on the board (task-based regrouping)
         tid = self._cur_task()
         if not tid:
-            self.notify("встань на задачу, чтобы перенести её в другую группу"); return
+            self.notify(tr("select a task to move it to another group")); return
         opts, cur = _group_options(self.state(), tid)
         if not opts:
-            self.notify("нет других групп в этом проекте — создай эпик (e)"); return
+            self.notify(tr("no other groups in this project — create an epic (e)")); return
         def go(val):
             if not val:
                 return
-            self.push_screen(OutputScreen("regroup %s -> %s" % (tid, val),
+            self.push_screen(OutputScreen(tr("regroup %s -> %s") % (tid, val),
                              [sys.executable, "-u", ENGINE, "task", "regroup", tid, val]),
                              lambda _: self.build_tree())
         self.push_screen(MoveToGroupScreen(tid, opts, cur), go)
@@ -1592,13 +1755,13 @@ class CCApp(App):
     def action_timeline(self):
         # the 'what happened' log; context-aware — filtered to the focused task/epic, else everything
         cur = self.current()
-        argv = [sys.executable, "-u", ENGINE, "log", "-n", "150"]
-        title = "timeline — всё"
+        argv = [sys.executable, "-u", ENGINE, "log", "-n", "150", "--json"]
+        title = tr("timeline — all")
         if cur and cur.get("type") == "task":
-            argv += ["--task", cur["id"]]; title = "timeline · задача %s" % cur["id"]
+            argv += ["--task", cur["id"]]; title = tr("timeline · task %s") % cur["id"]
         elif cur and cur.get("type") == "epic":
-            argv += ["--epic", cur["id"]]; title = "timeline · эпик %s" % cur["id"]
-        self.push_screen(OutputScreen(title, argv))
+            argv += ["--epic", cur["id"]]; title = tr("timeline · epic %s") % cur["id"]
+        self.push_screen(OutputScreen(title, argv, _timeline_lines))
 
     def action_refresh(self):
         cur = self.current()
@@ -1608,7 +1771,7 @@ class CCApp(App):
             s = self.state()
             proj = s["epics"].get(ekey, {}).get("project")
             if s["projects"].get(proj, {}).get("jira", {}).get("token"):
-                self.notify("синхронизирую задачи эпика из Jira …")
+                self.notify(tr("syncing epic issues from Jira …"))
                 self._bg("esync:%s" % ekey, lambda: self._sync_epic(ekey))
                 return
         # `r` on a TASK node = re-probe just that task's working-tree changes (the only on-demand git)
@@ -1621,7 +1784,7 @@ class CCApp(App):
     def _sync_epic(self, ekey):
         subprocess.run([sys.executable, ENGINE, "epic", "sync", ekey], capture_output=True)
         self.call_from_thread(self.build_tree)
-        self.call_from_thread(lambda: self.notify("задачи эпика обновлены"))
+        self.call_from_thread(lambda: self.notify(tr("epic issues updated")))
 
     # ---- project/epic resolution from current selection ----
     def _current_project(self):
@@ -1659,25 +1822,25 @@ class CCApp(App):
     def action_reviewers(self):
         proj = self._current_project()
         if not proj:
-            self.notify("select a project node first", severity="error"); return
+            self.notify(tr("select a project node first"), severity="error"); return
         self.push_screen(ReviewersScreen(proj))
 
     def action_deploys(self):
         proj = self._current_project()
         if not proj:
-            self.notify("выбери проект", severity="error"); return
-        self.notify("обновляю статусы деплоя (dev/stage/prod) …")
+            self.notify(tr("select a project"), severity="error"); return
+        self.notify(tr("refreshing deployment status (dev/stage/prod) …"))
         self._bg("deploys:%s" % proj, lambda: self._do_deploys(proj))
 
     def _do_deploys(self, proj):
         subprocess.run([sys.executable, ENGINE, "deploys", proj], capture_output=True)
         self.call_from_thread(self.build_tree)
-        self.call_from_thread(lambda: self.notify("деплои обновлены"))
+        self.call_from_thread(lambda: self.notify(tr("deployments updated")))
 
     def action_project_jira(self):
         proj = self._current_project()
         if not proj:
-            self.notify("select a project node first", severity="error"); return
+            self.notify(tr("select a project node first"), severity="error"); return
         self.push_screen(ProjectJiraScreen(proj), lambda _: self.build_tree())
 
     def _project_added(self, res):
@@ -1686,18 +1849,12 @@ class CCApp(App):
         args = [sys.executable, ENGINE, "project", "add", res["path"]]
         if res["name"]:
             args.append(res["name"])
-        r = subprocess.run(args, capture_output=True, text=True)
-        if r.returncode != 0:
-            self.notify("project add failed: %s" % r.stderr.strip()[:120], severity="error")
-        else:
-            line = r.stdout.strip().splitlines()[0] if r.stdout.strip() else "project added"
-            self.notify(line)
-        self.build_tree()
+        self.push_screen(OutputScreen(tr("Add project"), args), lambda _: self.build_tree())
 
     def action_new_epic(self):
         proj = self._current_project()
         if not proj:
-            self.notify("select a project node first", severity="error")
+            self.notify(tr("select a project node first"), severity="error")
             return
         jira_on = bool(self.state()["projects"][proj].get("jira", {}).get("token"))
         self.push_screen(NewEpicScreen(proj, jira_on), self._epic_created)
@@ -1709,8 +1866,8 @@ class CCApp(App):
         if res.get("action") == "pick":
             r = subprocess.run([sys.executable, ENGINE, "epic", "add", proj, res["key"],
                                 "--summary", res.get("summary", "")], capture_output=True, text=True)
-            self.notify("эпик %s взят из Jira" % res["key"] if r.returncode == 0
-                        else "ошибка: %s" % r.stderr.strip()[:100])
+            self.notify(tr("epic %s imported from Jira") % res["key"] if r.returncode == 0
+                        else tr("error: %s") % r.stderr.strip()[:100])
         elif res.get("action") == "create":
             r = subprocess.run([sys.executable, ENGINE, "jira", "create-epic", proj, res["summary"]],
                                capture_output=True, text=True)
@@ -1718,9 +1875,9 @@ class CCApp(App):
             if m:
                 subprocess.run([sys.executable, ENGINE, "epic", "add", proj, m.group(1),
                                 "--summary", res["summary"]], capture_output=True, text=True)
-                self.notify("создан Jira-эпик %s" % m.group(1))
+                self.notify(tr("created Jira epic %s") % m.group(1))
             else:
-                self.notify("не создал Jira-эпик: %s" % ((r.stderr or r.stdout).strip()[:120]), severity="error")
+                self.notify(tr("could not create Jira epic: %s") % ((r.stderr or r.stdout).strip()[:120]), severity="error")
         else:
             args = [sys.executable, ENGINE, "epic", "add", proj, res["key"]]
             if res.get("summary"):
@@ -1732,8 +1889,8 @@ class CCApp(App):
             if res.get("repos"):
                 args += ["--repos", res["repos"]]
             r = subprocess.run(args, capture_output=True, text=True)
-            self.notify("epic %s added" % res["key"] if r.returncode == 0
-                        else "epic failed: %s" % r.stderr.strip()[:120])
+            self.notify(tr("epic %s added") % res["key"] if r.returncode == 0
+                        else tr("epic failed: %s") % r.stderr.strip()[:120])
         self.build_tree()
 
     # ---- create task ----
@@ -1755,7 +1912,7 @@ class CCApp(App):
             return
         epic = self._current_epic()
         if not epic:
-            self.notify("select a project, epic, or task first", severity="error")
+            self.notify(tr("select a project, epic, or task first"), severity="error")
             return
         ep = s["epics"].get(epic, {})
         if ep.get("loose"):   # on a loose task -> another loose task in the same project
@@ -1777,14 +1934,14 @@ class CCApp(App):
                 "--prompt", res["prompt"]]
         if res.get("jira"):
             args += ["--jira", res["jira"]]
-        self.push_screen(OutputScreen("task: %s" % res["title"], args),
+        self.push_screen(OutputScreen(tr("task: %s") % res["title"], args),
                          lambda _: self.build_tree())
 
     # ---- task actions ----
     def _cur_task(self):
         data = self.current()
         if not data or data["type"] != "task":
-            self.notify("select a task first")
+            self.notify(tr("select a task first"))
             return None
         return data["id"]
 
@@ -1853,15 +2010,15 @@ class CCApp(App):
     def _open_ops(self, oid):
         o = (self.state().get("ops") or {}).get(oid)
         if not o:
-            self.notify("ops-прогон не найден"); return
+            self.notify(tr("ops run not found")); return
         cwd = o.get("dir")
         if not cwd or not os.path.isdir(cwd):
-            self.notify("ops dir отсутствует", severity="error"); return
+            self.notify(tr("ops directory missing"), severity="error"); return
         sid = cc.resolve_session(cwd)
         chat = "claude --resume %s --permission-mode auto" % sid if sid else "claude --permission-mode auto"
         chat += self._jira_flags(self.state()["epics"].get(o.get("epic"), {}).get("project"))
         where = self._open_chat_tab("cc:ops %s" % o.get("kind", ""), cwd, chat)
-        self.notify("ops-сессия [%s] открыта (%s) — ответь на ❓ если есть" % (o.get("kind", ""), where))
+        self.notify(tr("ops session [%s] opened (%s) — answer ❓ if present") % (o.get("kind", ""), where))
 
     def action_open(self):
         data = self.current()
@@ -1873,17 +2030,17 @@ class CCApp(App):
             self.action_project_setup(); return
         tid = self._cur_task()
         if not tid:
-            self.notify("встань на задачу, группу или проект — o откроет чат")
+            self.notify(tr("select a task, group, or project — o opens chat"))
             return
         t = self.state()["tasks"][tid]
         cwd, prim = self._resolve_cwd(t)
         if not cwd or not os.path.isdir(cwd):
-            self.notify("worktree missing — recreate the task", severity="error"); return
+            self.notify(tr("worktree missing — recreate the task"), severity="error"); return
         self._mark_seen(tid)
         pname = self.state()["epics"].get(t.get("epic"), {}).get("project")
         jflags = self._jira_flags(pname)
         sess = (t.get("claude_session") or {}).get(prim) if prim else None
-        self.notify("открываю чат %s …" % tid)
+        self.notify(tr("opening chat %s …") % tid)
         # do the blocking work (task setup + cmux/terminal launch) OFF the main thread — a slow/hung
         # cmux must never freeze the whole TUI (the bug). Daemon thread + call_from_thread for the toast.
         def _open():
@@ -1895,35 +2052,35 @@ class CCApp(App):
             chat = ("claude --resume %s --permission-mode auto" % sid) if sid else "claude --permission-mode auto"
             chat += jflags
             where = self._open_chat_tab("cc:%s" % tid, cwd, chat)
-            self.call_from_thread(lambda: self.notify("чат %s открыт (%s); Cmd-W закрыть" % (tid, where)))
+            self.call_from_thread(lambda: self.notify(tr("chat %s opened (%s); Cmd-W to close") % (tid, where)))
         self._bg("open:%s" % tid, _open)
 
     def action_project_setup(self):
         proj = self._current_project()
         if not proj:
-            self.notify("выбери проект", severity="error"); return
+            self.notify(tr("select a project"), severity="error"); return
         subprocess.run([sys.executable, ENGINE, "project", "setup", proj], capture_output=True)
         base = self.state()["projects"].get(proj, {}).get("path", "")
         sdir = os.path.join(base, ".cc-setup")
         if not os.path.isdir(sdir):
-            self.notify("не удалось подготовить setup-чат", severity="error"); return
+            self.notify(tr("could not prepare setup chat"), severity="error"); return
         sid = cc.resolve_session(sdir)   # resume the SAME session if one already exists for this chat
         resume = ("--resume %s " % sid) if sid else ""
         cmd = "claude %s--permission-mode auto --add-dir %s%s" % (resume, shlex.quote(base), self._jira_flags(proj))
         where = self._open_chat_tab("cc:setup %s" % proj, sdir, cmd)
-        self.notify("чат проекта '%s' %s (%s)" % (proj, "продолжен" if sid else "открыт", where))
+        self.notify(tr("project chat '%s' %s (%s)") % (proj, tr("resumed") if sid else tr("opened"), where))
 
     def action_epic_chat(self):
         ekey = self._current_epic()
         if not ekey:
-            self.notify("выбери эпик (или его задачу)", severity="error"); return
+            self.notify(tr("select an epic (or its task)"), severity="error"); return
         subprocess.run([sys.executable, ENGINE, "epic", "open", ekey], capture_output=True)
         s = self.state()
         e = s["epics"].get(ekey, {})
         proj = s["projects"].get(e.get("project"), {})
         edir = os.path.join(proj.get("path", ""), "cctui", ekey, "_release")
         if not os.path.isdir(edir):
-            self.notify("не удалось подготовить чат эпика", severity="error"); return
+            self.notify(tr("could not prepare epic chat"), severity="error"); return
         repos = e.get("repos") or list(proj.get("repos", {}).keys())
         adds = " ".join("--add-dir %s" % shlex.quote(proj["repos"][r]["path"])
                         for r in repos if proj.get("repos", {}).get(r, {}).get("path"))
@@ -1931,19 +2088,19 @@ class CCApp(App):
         resume = ("--resume %s " % sid) if sid else ""
         cmd = "claude %s--permission-mode auto %s%s" % (resume, adds, self._jira_flags(e.get("project")))
         where = self._open_chat_tab("cc:epic %s" % ekey, edir, cmd)
-        self.notify("чат эпика %s %s (%s) — релиз/координация" % (ekey, "продолжен" if sid else "открыт", where))
+        self.notify(tr("epic chat %s %s (%s) — release/coordination") % (ekey, tr("resumed") if sid else tr("opened"), where))
 
     def _cursor_epic(self, ekey):
         # open the feature COMBINED (ALL its tasks merged, one branch per repo) in Cursor — for
         # debugging the whole feature together / reviewing what the tasks produced.
         if not shutil.which("cursor"):
-            self.notify("cursor CLI не установлен (нет в PATH)", severity="error"); return
+            self.notify(tr("cursor CLI is not installed (not in PATH)"), severity="error"); return
         st = self.state()
         active = {tid for tid, t in st["tasks"].items() if t.get("epic") == ekey and not t.get("archived")}
         g = st["epics"].get(ekey) or {}
         have = set(g.get("combined") or [])
         if active and not active.issubset(have):   # combined misses tasks → rebuild with the WHOLE feature
-            self.notify("собираю фичу целиком (%d задач) — Cursor откроется сам…" % len(active))
+            self.notify(tr("combining the whole feature (%d tasks) — Cursor will open automatically…") % len(active))
             def _combine_and_open():
                 try:
                     subprocess.run([sys.executable, ENGINE, "group", "combine", ekey, "--all"],
@@ -1952,20 +2109,20 @@ class CCApp(App):
                     pass
                 cwts2 = (cc.load_state()["epics"].get(ekey) or {}).get("combined_worktrees") or {}
                 if not cwts2:
-                    self.call_from_thread(lambda: self.notify("не собралось (конфликт/ошибка) — смотри ⊕", severity="error")); return
+                    self.call_from_thread(lambda: self.notify(tr("combine failed (conflict/error) — check ⊕"), severity="error")); return
                 folder2 = os.path.dirname(next(iter(cwts2.values())))
                 subprocess.Popen(["cursor", folder2])
-                self.call_from_thread(lambda: self.notify("Cursor: combined фичи %s (%d репо)" % (ekey, len(cwts2))))
+                self.call_from_thread(lambda: self.notify(tr("Cursor: combined feature %s (%d repos)") % (ekey, len(cwts2))))
             self._bg("combine:%s" % ekey, _combine_and_open)
             return
         cwts = g.get("combined_worktrees") or {}
         if not cwts:
-            self.notify("в фиче нет активных задач — собирать нечего", severity="error"); return
+            self.notify(tr("no active tasks in this feature — nothing to combine"), severity="error"); return
         folder = os.path.dirname(next(iter(cwts.values())))   # cctui/<key>/__combined__ — все репо merged вместе
         if not os.path.isdir(folder):
-            self.notify("combined-папка отсутствует — пересобери фичу (⊕)", severity="error"); return
+            self.notify(tr("combined folder missing — rebuild feature (⊕)"), severity="error"); return
         subprocess.Popen(["cursor", folder])
-        self.notify("Cursor: combined фичи %s (все задачи вместе)" % ekey)
+        self.notify(tr("Cursor: combined feature %s (all tasks together)") % ekey)
 
     def action_cursor(self):
         data = self.current()
@@ -1977,15 +2134,15 @@ class CCApp(App):
         t = self.state()["tasks"].get(tid, {})
         cwd, _ = self._resolve_cwd(t)   # recovered tasks lack 'dir' — derive it from the worktrees
         if not shutil.which("cursor"):
-            self.notify("cursor CLI не установлен (нет в PATH)", severity="error"); return
+            self.notify(tr("cursor CLI is not installed (not in PATH)"), severity="error"); return
         if not cwd or not os.path.isdir(cwd):
-            self.notify("папка задачи отсутствует — пересоздай задачу", severity="error"); return
+            self.notify(tr("task folder missing — recreate the task"), severity="error"); return
         try:
             subprocess.run([sys.executable, ENGINE, "task", "open", tid], capture_output=True, timeout=30)
         except Exception:
             pass
         subprocess.Popen(["cursor", cwd])
-        self.notify("Cursor открыт (папка задачи) для %s" % tid)
+        self.notify(tr("Cursor opened (task folder) for %s") % tid)
 
     def action_mr_real(self):
         self._mr(False)
@@ -1998,7 +2155,7 @@ class CCApp(App):
             return
         tid = self._cur_task()
         if not tid:
-            self.notify("встань на задачу (Готово/Abort) или эпик (Готово и убрать с доски)")
+            self.notify(tr("select a task (Done/Abort) or epic (Done and remove from board)"))
             return
         self.push_screen(TaskManageScreen(tid), lambda res: self._task_manage(tid, res))
 
@@ -2006,11 +2163,11 @@ class CCApp(App):
         if not res:
             return
         if res == "done":
-            self.push_screen(OutputScreen("Готово и убрать: %s" % tid,
+            self.push_screen(OutputScreen(tr("Done and remove: %s") % tid,
                              [sys.executable, "-u", ENGINE, "task", "done", tid]),
                              lambda _: self.build_tree())
         elif res == "abort":
-            self.push_screen(OutputScreen("abort: %s" % tid,
+            self.push_screen(OutputScreen(tr("abort: %s") % tid,
                              [sys.executable, "-u", ENGINE, "task", "abort", tid]),
                              lambda _: self.build_tree())
 
@@ -2018,21 +2175,21 @@ class CCApp(App):
         if res != "done":
             return
         # Jira(эпик+задачи)->Done + локальная уборка эпика и задач из cc — стримим вывод
-        self.push_screen(OutputScreen("Готово и убрать: %s (+ Jira Done)" % ekey,
+        self.push_screen(OutputScreen(tr("Done and remove: %s (+ Jira Done)") % ekey,
                          [sys.executable, "-u", ENGINE, "epic", "done", ekey]),
                          lambda _: self.build_tree())
 
     def _mr(self, dry):
         data = self.current()
         if not data:
-            self.notify("select a task or epic")
+            self.notify(tr("select a task or epic"))
             return
         if data["type"] == "task":
             argv = [sys.executable, "-u", ENGINE, "task", "mr", data["id"]]; title = "MR: %s" % data["id"]
         elif data["type"] == "epic":
-            argv = [sys.executable, "-u", ENGINE, "epic", "mr", data["id"]]; title = "Epic MR: %s" % data["id"]
+            argv = [sys.executable, "-u", ENGINE, "epic", "mr", data["id"]]; title = tr("Epic MR: %s") % data["id"]
         else:
-            self.notify("select a task (MR) or epic (epic->master MR)")
+            self.notify(tr("select a task (MR) or epic (epic->master MR)"))
             return
         ekey = data["id"] if data["type"] == "epic" else None
         after = (lambda _: (self._after_epic_sync(ekey) if ekey else self.build_tree()))
@@ -2046,10 +2203,10 @@ class CCApp(App):
         # Shared by the `M` key and the panel's Release button.
         def go(ok):
             if not ok:
-                self.notify("MR отменён — ничего не создано")
+                self.notify(tr("MR cancelled — nothing created"))
                 return
             self.push_screen(OutputScreen(title, argv), after)
-        self.push_screen(MRConfirmScreen("Создать MR — %s" % title, argv + ["--dry-run"]), go)
+        self.push_screen(MRConfirmScreen(tr("Create MR — %s") % title, argv + ["--dry-run"]), go)
 
 
 if __name__ == "__main__":

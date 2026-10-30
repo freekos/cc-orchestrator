@@ -24,3 +24,5 @@ jobs:
         run: python tests/test_engine_integration.py
       - name: TUI smoke (headless)
         run: python tests/test_tui_smoke.py
+      - name: TUI translations and language picker
+        run: python tests/test_tui_i18n.py

@@ -64,6 +64,17 @@ cc epic done FEAT-1                               # finish epic: Jira(epic+tasks
 ```
 
 ### TUI keys
+**Display language:** press **F2** in `cc tui`, choose **English** or **Русский**,
+and select **Apply**. The board, footer, and subsequent dialogs use the chosen
+language immediately, keeping the current selection and expanded groups.
+The preference is saved separately in `~/.cc/tui.json` and restored next time.
+Russian remains the default when no valid preference is saved.
+
+This setting covers the terminal UI only. Task names, Jira content, agent logs,
+and output from CLI commands keep their original text. It does not change the
+desktop cockpit or instruct agents to answer in a different language.
+See [TUI translations](locales/tui/README.md) to contribute another language.
+
 `a` +Project · `e` +Epic · `n` +Task · `o` chat (interactive, new terminal/cmux tab) ·
 `o` chat / project setup · `v` view chat (read-only) · `c` Cursor · `d` diff · `m`/`M` MR dry/create ·
 `g` MR links (task & epic→master) · `D` refresh deploy status · `x` finish (task/epic → done & remove) ·

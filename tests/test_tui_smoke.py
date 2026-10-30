@@ -58,7 +58,7 @@ async def _smoke():
     cc._scan_orphans = lambda s: [{"project": "demo", "epic": "E1", "slug": "ghost",
                                    "branch": "E1-ghost", "repos": {"web": "/x"}}]
     try:
-        app = tui.CCApp()
+        app = tui.CCApp(language="ru")
         async with app.run_test() as pilot:
             await pilot.pause()
             tree = app.query_one("#tree", Tree)
@@ -122,7 +122,7 @@ async def _mrconfirm():
     cc.STATE_FILE = tmp / "state.json"; cc._BACKUP_DIR = tmp / "backups"; cc.AUDIT_FILE = tmp / "audit.log"
     cc.STATE_FILE.write_text(json.dumps(_make_state(tmp)))
     try:
-        app = tui.CCApp()
+        app = tui.CCApp(language="ru")
         async with app.run_test() as pilot:
             await pilot.pause()
             result = {}
@@ -138,7 +138,7 @@ async def _mrconfirm():
             await pilot.pause()
             assert result.get("r") is True, result            # rows present -> confirm yields True
         # empty plan must NOT confirm (guards an accidental create when nothing changed)
-        app2 = tui.CCApp()
+        app2 = tui.CCApp(language="ru")
         async with app2.run_test() as pilot:
             await pilot.pause()
             res2 = {}
@@ -175,7 +175,7 @@ def test_group_options():
 
 async def _movescreen():
     # MoveToGroupScreen mounts and renders without error; cancel -> None (regression guard)
-    app = tui.CCApp()
+    app = tui.CCApp(language="ru")
     async with app.run_test() as pilot:
         await pilot.pause()
         res = {}
@@ -223,7 +223,7 @@ async def _panelscreen():
              "repos": [("web", "http://mr/1", "E1")]},
             {"tid": "t_b", "title": "BB", "status": "merged", "merged": True,
              "repos": [("api", None, "E1")]}]
-    app = tui.CCApp()
+    app = tui.CCApp(language="ru")
     async with app.run_test() as pilot:
         await pilot.pause()
         res = {}
@@ -241,7 +241,7 @@ async def _panelscreen():
         await pilot.pause()
         assert res.get("r") == {"action": "ops", "kind": "test"}, res
     # loose group -> no release/merge, but Test/Stage ops buttons still available
-    app2 = tui.CCApp()
+    app2 = tui.CCApp(language="ru")
     async with app2.run_test() as pilot:
         await pilot.pause()
         r2 = {}
@@ -259,7 +259,7 @@ async def _panelscreen():
 
 async def _confirmscreen():
     # generic ConfirmScreen: ok -> True, cancel -> False
-    app = tui.CCApp()
+    app = tui.CCApp(language="ru")
     async with app.run_test() as pilot:
         await pilot.pause()
         r1 = {}

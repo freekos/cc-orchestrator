@@ -158,6 +158,31 @@ def test_group_combine_rebuild_from_base():
         shutil.rmtree(d, ignore_errors=True)
 
 
+def test_project_creation_without_glab():
+    """`test_project_creation_without_glab()` covers project registration without optional GitLab tools."""
+    import json
+    with tempfile.TemporaryDirectory(prefix="cc-project-") as directory:
+        root = pathlib.Path(directory)
+        repo = _make_repo(root, "existing")
+        bin_dir = root / "bin"
+        bin_dir.mkdir()
+        (bin_dir / "git").symlink_to(shutil.which("git"))
+        env = dict(os.environ, HOME=str(root / "home"), PATH=str(bin_dir))
+        engine = [sys.executable, str(ROOT / "cc.py")]
+        empty = root / "empty folder"
+        empty.mkdir()
+        for args in (["project", "add", str(repo)], ["project", "add", str(empty), "empty"],
+                     ["project", "new", "fresh", str(root / "new folder")]):
+            result = subprocess.run(engine + args, env=env, capture_output=True, text=True)
+            assert result.returncode == 0, result.stderr
+        state = json.loads((root / "home/.cc/state.json").read_text())
+        assert set(state["projects"]) == {"existing", "empty", "fresh"}
+        assert all(project["default_assignee"] == "" for project in state["projects"].values())
+        result = subprocess.run(engine + ["recover", "--json"], env=env, capture_output=True, text=True)
+        assert result.returncode == 0, result.stderr
+        assert json.loads(result.stdout) == []
+
+
 if __name__ == "__main__":
     n = 0
     for k, v in list(globals().items()):

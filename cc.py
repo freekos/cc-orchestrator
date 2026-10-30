@@ -16,11 +16,11 @@ WS_DIR = STATE_DIR / "workspaces"
 CLAUDE_PROJECTS = HOME / ".claude" / "projects"
 
 def glab_user():
-    """Current GitLab username (for default MR assignee)."""
-    r = run(["glab", "api", "user"], check=False)
+    """`glab_user()` is the GitLab username, or an empty string when unavailable."""
     try:
+        r = run(["glab", "api", "user"], check=False)
         return json.loads(r.stdout).get("username", "")
-    except Exception:
+    except (OSError, ValueError, AttributeError):
         return ""
 
 def glab_members(remote):
@@ -3758,7 +3758,8 @@ def build_parser():
     a.add_argument("--json", action="store_true")
     a.set_defaults(fn=cmd_deploys)
     sub.add_parser("orphans").set_defaults(fn=cmd_orphans)
-    sub.add_parser("recover").set_defaults(fn=cmd_recover)
+    a = sub.add_parser("recover"); a.add_argument("--json", action="store_true")
+    a.set_defaults(fn=cmd_recover)
     a = sub.add_parser("doctor"); a.add_argument("--restore", action="store_true"); a.set_defaults(fn=cmd_doctor)
     a = sub.add_parser("snapshot"); a.add_argument("--json", action="store_true")
     a.add_argument("--all", action="store_true", help="include archived epics/tasks (flagged) — for search")
@@ -4016,10 +4017,14 @@ def cmd_recover(args):
             recovered.append((tid, epic, o["branch"]))
         return recovered
     recovered = mutate(fn)
+    if recovered:
+        audit("state.recover", count=len(recovered), detail=",".join(t for t, _, _ in recovered))
+    if getattr(args, "json", False):
+        print(json.dumps(recovered, ensure_ascii=False))
+        return
     if not recovered:
         print("нечего восстанавливать — потеряшек на диске нет ✓")
         return
-    audit("state.recover", count=len(recovered), detail=",".join(t for t, _, _ in recovered))
     print("восстановлено %d задач(и) на доску:" % len(recovered))
     for tid, epic, br in recovered:
         print("  %s   (epic %s, ветка %s)" % (tid, epic, br))
